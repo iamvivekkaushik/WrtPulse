@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- WrtPulse launcher icon "2c — Front panel": router silhouette with live LEDs.
+     48x48 glyph art mapped into the 66x66 adaptive-icon safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="1.2"
+        android:scaleY="1.2"
+        android:translateX="25.2"
+        android:translateY="25.2">
+        <!-- antennas: M14 19V9  M34 19V9 (stroke #3A4A44, w2.5, round caps) -->
+        <path
+            android:strokeColor="#3A4A44"
+            android:strokeWidth="2.5"
+            android:strokeLineCap="round"
+            android:pathData="M14,19 L14,9 M34,19 L34,9" />
+        <!-- body: rect x7 y19 w34 h12 rx3.5 (stroke #8FA69E, fill #131B19) -->
+        <path
+            android:fillColor="#131B19"
+            android:strokeColor="#8FA69E"
+            android:strokeWidth="2.5"
+            android:pathData="M10.5,19 L37.5,19 A3.5,3.5 0 0 1 41,22.5 L41,27.5 A3.5,3.5 0 0 1 37.5,31 L10.5,31 A3.5,3.5 0 0 1 7,27.5 L7,22.5 A3.5,3.5 0 0 1 10.5,19 Z" />
+        <!-- LEDs -->
+        <path
+            android:fillColor="#46D97E"
+            android:pathData="M14,25 m-2.2,0 a2.2,2.2 0 1 1 4.4,0 a2.2,2.2 0 1 1 -4.4,0" />
+        <path
+            android:fillColor="#2EE5C8"
+            android:pathData="M21,25 m-2.2,0 a2.2,2.2 0 1 1 4.4,0 a2.2,2.2 0 1 1 -4.4,0" />
+        <path
+            android:fillColor="#1E2A26"
+            android:pathData="M28,25 m-2.2,0 a2.2,2.2 0 1 1 4.4,0 a2.2,2.2 0 1 1 -4.4,0" />
+    </group>
+</vector>
