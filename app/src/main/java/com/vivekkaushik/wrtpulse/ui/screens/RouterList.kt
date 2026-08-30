@@ -66,7 +66,8 @@ fun RouterEntity.asRouter(connectedHost: String?, connectingHost: String?): Rout
         tag = host,
         status = status,
         wanIp = null,
-        detail = if (status == RouterStatus.Online) "connected" else agoLabel(lastSeenEpoch),
+        detail = (if (privateKey != null) "key · " else "") +
+            (if (status == RouterStatus.Online) "connected" else agoLabel(lastSeenEpoch)),
         switcherDetail = listOf(host, summary.substringBefore(" · ")).filter { it.isNotBlank() }.joinToString(" · "),
         latencyMs = null,
     )

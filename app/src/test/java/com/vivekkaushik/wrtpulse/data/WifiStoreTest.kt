@@ -117,3 +117,28 @@ class WifiStoreTest {
         assertEquals("OPEN", Parsers.encryptionLabel("none"))
     }
 }
+
+class ScanParserTest {
+    @org.junit.Test
+    fun `iwinfo scan cells parse`() {
+        val cells = com.vivekkaushik.wrtpulse.ops.Parsers.scanCells(
+            """
+            Cell 01 - Address: AA:BB:CC:DD:EE:01
+                      ESSID: "neighbor-one"
+                      Mode: Master  Channel: 6
+                      Signal: -72 dBm  Quality: 38/70
+                      Encryption: WPA2 PSK (CCMP)
+            Cell 02 - Address: AA:BB:CC:DD:EE:02
+                      ESSID: unknown
+                      Mode: Master  Channel: 11
+                      Signal: -85 dBm  Quality: 15/70
+                      Encryption: none
+            """.trimIndent()
+        )
+        org.junit.Assert.assertEquals(2, cells.size)
+        org.junit.Assert.assertEquals(6, cells[0].channel)
+        org.junit.Assert.assertEquals(-72, cells[0].signalDbm)
+        org.junit.Assert.assertEquals("neighbor-one", cells[0].ssid)
+        org.junit.Assert.assertEquals(11, cells[1].channel)
+    }
+}

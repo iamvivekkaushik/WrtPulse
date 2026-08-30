@@ -30,6 +30,7 @@ class Telemetry(private val session: RouterSession) {
     var cpuPct by mutableIntStateOf(0); private set
     var ramPct by mutableIntStateOf(0); private set
     var flashPct by mutableIntStateOf(0); private set
+    var flashFree by mutableStateOf<String?>(null); private set
     var load1 by mutableFloatStateOf(0f); private set
     var load5 by mutableFloatStateOf(0f); private set
     var load15 by mutableFloatStateOf(0f); private set
@@ -86,7 +87,10 @@ class Telemetry(private val session: RouterSession) {
             wanIp = address ?: wanIp
             wanDevice = device ?: wanDevice
         }
-        sections["overlay"]?.let { flashPct = Parsers.overlayUsedPercent(it) }
+        sections["overlay"]?.let { line ->
+            flashPct = Parsers.overlayUsedPercent(line)
+            flashFree = Parsers.overlayAvailKb(line)?.let { "${bytesLabel(it * 1024)} free" }
+        }
         sections["netdev"]?.let { text ->
             val counters = Parsers.netCounters(text)
             val wan = wanDevice?.let(counters::get) ?: return@let

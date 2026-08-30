@@ -87,6 +87,12 @@ object WrtIcons {
         "M11 9h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z",
         "M5 15V6a2 2 0 0 1 2-2h9",
     )
+    val Paste = stroked(
+        "paste", 1.7f,
+        "M9 4h6v3H9Z",
+        "M15 5h2a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2",
+        "M9 13h6", "M9 16h4",
+    )
     val Pencil = stroked("pencil", 1.8f, "M4 20l4-1L20 7l-3-3L5 16l-1 4z")
     val RadioWaves = stroked(
         "radio", 1.6f,

@@ -21,8 +21,8 @@ sealed interface ConnectionState {
 }
 
 /**
- * Owns one router's connection: opens it, keeps it warm, retries with backoff, and serialises
- * command execution so a 1 s dashboard tick can't collide with a user-triggered action.
+ * Owns one router's connection: opens it, keeps it warm, and retries with backoff. Connection
+ * setup is serialised; commands run on independent SSH channels and may overlap.
  *
  * Reconnect follows the design's rule — amber is non-blocking and retries, red never does.
  */

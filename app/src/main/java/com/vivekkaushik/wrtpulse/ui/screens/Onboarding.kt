@@ -29,7 +29,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -328,15 +327,27 @@ private fun SpecRow(label: String, value: String, last: Boolean = false) {
 }
 
 @Composable
-fun OnboardingSshKeyScreen(routerSummary: String?, onFinish: () -> Unit) {
-    // Key install lands with the credential-persistence phase; password auth is what works today.
-    var installKey by remember { mutableStateOf(false) }
+fun OnboardingSshKeyScreen(flow: OnboardingFlow, routerSummary: String?, onFinish: () -> Unit) {
+    var installKey by remember { mutableStateOf(true) }
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             OnboardingScaffoldBody(routerSummary, installKey, onSelect = { installKey = it })
+            if (flow.error != null) {
+                Box(Modifier.padding(horizontal = 20.dp)) { ErrorCard(flow.error!!) }
+            }
         }
         Column(Modifier.padding(start = 20.dp, end = 20.dp, bottom = 24.dp)) {
-            PrimaryButton("Finish", onClick = onFinish)
+            PrimaryButton(
+                when {
+                    flow.busy -> "Installing key…"
+                    installKey -> "Install key & finish"
+                    else -> "Finish"
+                },
+                onClick = {
+                    if (installKey) flow.installAppKey { ok -> if (ok) onFinish() }
+                    else onFinish()
+                },
+            )
             Spacer(Modifier.height(10.dp))
             Text(
                 "You can remove the key any time in System → SSH keys.",
@@ -383,15 +394,13 @@ private fun OnboardingScaffoldBody(routerSummary: String?, installKey: Boolean, 
             style = sans(13f, 400, Wrt.TextSecondary, lineHeight = 20.sp),
         )
         Spacer(Modifier.height(22.dp))
-        Box(Modifier.alpha(0.55f)) {
-            KeyOption(
-                selected = installKey,
-                title = "Install the app's key",
-                tag = "COMING SOON",
-                body = "Your password is used once to install the key, then discarded. Nothing is stored.",
-                onClick = { /* lands with the credential-persistence phase */ },
-            )
-        }
+        KeyOption(
+            selected = installKey,
+            title = "Install the app's key",
+            tag = "RECOMMENDED",
+            body = "Your password is used once to install the key, then discarded. Nothing is stored.",
+            onClick = { onSelect(true) },
+        )
         Spacer(Modifier.height(10.dp))
         KeyOption(
             selected = !installKey,

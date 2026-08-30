@@ -35,7 +35,74 @@ object Commands {
         "echo $SECTION assoc" to
             "for i in \$(iwinfo 2>/dev/null | grep ESSID | cut -d' ' -f1); do " +
             "echo \"# \$i\"; iwinfo \$i assoclist; done",
+        "echo $SECTION blocked" to "uci show firewall 2>/dev/null | grep wrtpulse-block- || true",
+        "echo $SECTION nlbwbin" to "command -v nlbw 2>/dev/null || true",
+        "echo $SECTION nlbw" to "nlbw -c json 2>/dev/null || true",
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    /**
+     * Everything the install-consent dialog needs, one round trip: package manager, the
+     * packages an install would pull in, the space each will occupy, and free overlay space.
+     * The resolve runs once and is reused for the size lookup. `opkg update` first — its
+     * package lists live in /tmp and vanish on reboot.
+     */
+    val NLBW_PLAN: String = listOf(
+        "echo $SECTION pm",
+        DETECT_PACKAGE_MANAGER,
+        "if command -v apk >/dev/null 2>&1; then PLAN=\$(apk add --simulate nlbwmon 2>&1); " +
+            "else opkg update >/dev/null 2>&1; PLAN=\$(opkg install --noaction nlbwmon 2>&1); fi",
+        "echo $SECTION plan",
+        "echo \"\$PLAN\"",
+        "echo $SECTION sizes",
+        // "<package>|<size>" per resolved package; apk reports human units, opkg raw bytes.
+        "for p in \$(echo \"\$PLAN\" | sed -n 's/.*Installing \\([^ ]*\\).*/\\1/p'); do " +
+            "if command -v apk >/dev/null 2>&1; then " +
+            "s=\$(apk info --size \"\$p\" 2>/dev/null | sed -n '2p'); " +
+            "else s=\$(opkg info \"\$p\" 2>/dev/null | sed -n 's/^Installed-Size: *//p' | head -1); " +
+            "[ -z \"\$s\" ] && s=\$(opkg info \"\$p\" 2>/dev/null | sed -n 's/^Size: *//p' | head -1); " +
+            "s=\"\$s B\"; fi; " +
+            "echo \"\$p|\$s\"; done",
+        "echo $SECTION df",
+        "df -k /overlay | tail -n1",
+    ).joinToString("; ")
+
+    /** Installs, enables, and starts nlbwmon; succeeds only if the nlbw binary lands. */
+    val NLBW_INSTALL: String =
+        "if command -v apk >/dev/null; then apk add nlbwmon >/dev/null 2>&1; " +
+        "else opkg install nlbwmon >/dev/null 2>&1; fi; " +
+        "/etc/init.d/nlbwmon enable 2>/dev/null; /etc/init.d/nlbwmon start 2>/dev/null; " +
+        "command -v nlbw"
+
+    /** Cuts a client's WAN access with a named REJECT rule; reversed by [unblockClient]. */
+    fun blockClient(mac: String): String = listOf(
+        "uci add firewall rule >/dev/null",
+        "uci set firewall.@rule[-1].name='wrtpulse-block-$mac'",
+        "uci set firewall.@rule[-1].src='lan'",
+        "uci set firewall.@rule[-1].dest='wan'",
+        "uci set firewall.@rule[-1].src_mac='$mac'",
+        "uci set firewall.@rule[-1].proto='all'",
+        "uci set firewall.@rule[-1].target='REJECT'",
+        "uci commit firewall",
+        "/etc/init.d/firewall reload >/dev/null 2>&1",
+    ).joinToString(" && ")
+
+    fun unblockClient(mac: String): String =
+        "s=\$(uci show firewall | grep \"wrtpulse-block-$mac\" | cut -d. -f2); " +
+        "[ -n \"\$s\" ] && uci delete firewall.\$s && uci commit firewall && " +
+        "/etc/init.d/firewall reload >/dev/null 2>&1; :"
+
+    /** Busybox ships the applet as ether-wake; standalone installs name it etherwake. */
+    fun wake(mac: String): String =
+        "ether-wake -i br-lan '$mac' 2>/dev/null || etherwake -i br-lan '$mac'"
+
+    /** DHCP reservation, idempotent per MAC. */
+    fun reserveIp(mac: String, ip: String, name: String): String =
+        "uci show dhcp 2>/dev/null | grep -iq \"$mac\" || (" +
+        "uci add dhcp host >/dev/null && " +
+        "uci set dhcp.@host[-1].name='$name' && " +
+        "uci set dhcp.@host[-1].mac='$mac' && " +
+        "uci set dhcp.@host[-1].ip='$ip' && " +
+        "uci commit dhcp && /etc/init.d/dnsmasq restart >/dev/null 2>&1)"
 
     /** Neighbour survey for the channel chart. */
     fun scan(radioIface: String) = "iwinfo $radioIface scan"
@@ -57,6 +124,16 @@ object Commands {
             append("WRTPULSE_EOF\n")
             append("uci commit $commitPackage && $reload")
         }
+
+    /**
+     * Appends the app's public key to dropbear's authorized_keys, idempotently.
+     * The key line is base64 + spaces — safe inside single quotes.
+     */
+    fun installKey(publicLine: String): String {
+        val f = "/etc/dropbear/authorized_keys"
+        return "mkdir -p /etc/dropbear && touch $f && " +
+            "(grep -qF '$publicLine' $f || echo '$publicLine' >> $f) && chmod 600 $f"
+    }
 
     /** Package manager differs across releases: apk on 24.10+, opkg before it. */
     const val DETECT_PACKAGE_MANAGER = "command -v apk >/dev/null && echo apk || echo opkg"

@@ -75,6 +75,7 @@ data class WifiRadio(
     val channel: String,       // "11", "auto"
     val htmode: String,        // "HE40", ...
     val disabled: Boolean,
+    val country: String = "",  // regulatory domain, e.g. "IN"
 )
 
 /** One AP `wifi-iface` section from `uci show wireless`. */
@@ -86,6 +87,35 @@ data class WifiNetwork(
     val key: String,
     val disabled: Boolean,
 )
+
+/** Cumulative per-host byte counters from `nlbw -c json`, client's perspective. */
+data class NlbwHost(
+    val mac: String,
+    val downBytes: Long,
+    val upBytes: Long,
+    /** layer7 protocol → total bytes, e.g. "HTTPS" to 104_000_000. */
+    val apps: Map<String, Long> = emptyMap(),
+) {
+    val totalBytes: Long get() = downBytes + upBytes
+
+    /** Busiest protocols first — what this device is actually doing. */
+    val topApps: List<Pair<String, Long>>
+        get() = apps.entries.sortedByDescending { it.value }.take(3).map { it.key to it.value }
+}
+
+/** What installing nlbwmon would do — the consent dialog's facts. */
+data class InstallPlan(
+    val packageManager: String,          // "opkg" or "apk"
+    val packages: List<Pair<String, Long?>>, // name to installed size in bytes (null = unknown)
+    val availKb: Long?,                  // overlay space before install
+    val problem: String?,                // set when the plan itself failed (no net, no package)
+) {
+    val totalBytes: Long? get() =
+        if (packages.isNotEmpty() && packages.all { it.second != null }) packages.sumOf { it.second!! } else null
+}
+
+/** One neighbouring AP from `iwinfo <iface> scan`. */
+data class ScanCell(val channel: Int, val signalDbm: Int, val ssid: String)
 
 /** One `logread -f` line, split for the log screen. */
 data class LogEntry(
@@ -187,6 +217,12 @@ object Parsers {
         return address?.ifBlank { null } to device
     }
 
+    /** `df -k /overlay | tail -n1` → available kilobytes, null if the line doesn't parse. */
+    fun overlayAvailKb(dfLine: String): Long? {
+        val nums = dfLine.trim().split(Regex("\\s+")).mapNotNull { it.toLongOrNull() }
+        return nums.getOrNull(2) // 1k-blocks, used, available
+    }
+
     /** `df -k /overlay | tail -n1` → used percent. */
     fun overlayUsedPercent(dfLine: String): Int {
         val fields = dfLine.trim().split(Regex("\\s+"))
@@ -263,6 +299,135 @@ object Parsers {
         return LogEntry(time, severity, src, msg.trim(), tok)
     }
 
+    /**
+     * `iwinfo <iface> scan` cells:
+     *   Cell 01 - Address: AA:BB:...
+     *             ESSID: "neighbor"
+     *             Mode: Master  Channel: 6
+     *             Signal: -72 dBm  Quality: 38/70
+     */
+    fun scanCells(text: String): List<ScanCell> {
+        val cells = mutableListOf<ScanCell>()
+        var ssid = ""
+        var channel: Int? = null
+        var signal: Int? = null
+        fun flush() {
+            val ch = channel
+            val sig = signal
+            if (ch != null && sig != null) cells += ScanCell(ch, sig, ssid)
+            ssid = ""; channel = null; signal = null
+        }
+        text.lineSequence().forEach { raw ->
+            val line = raw.trim()
+            when {
+                line.startsWith("Cell ") -> flush()
+                line.startsWith("ESSID:") ->
+                    ssid = line.removePrefix("ESSID:").trim().removeSurrounding("\"")
+                else -> {
+                    Regex("Channel: (\\d+)").find(line)?.let { channel = it.groupValues[1].toInt() }
+                    Regex("Signal: (-?\\d+) dBm").find(line)?.let { signal = it.groupValues[1].toInt() }
+                }
+            }
+        }
+        flush()
+        return cells
+    }
+
+    /**
+     * `nlbw -c json` → {"columns":[...],"data":[[...]]}. Rows repeat per protocol, so byte
+     * counters are summed per MAC. In nlbwmon "rx" is bytes the host received (download).
+     */
+    fun nlbwHosts(json: String): List<NlbwHost> {
+        val root = runCatching { JSONObject(json) }.getOrNull() ?: return emptyList()
+        val columns = root.optJSONArray("columns") ?: return emptyList()
+        var macIdx = -1; var rxIdx = -1; var txIdx = -1; var appIdx = -1
+        for (i in 0 until columns.length()) {
+            when (columns.optString(i)) {
+                "mac" -> macIdx = i
+                "rx_bytes" -> rxIdx = i
+                "tx_bytes" -> txIdx = i
+                "layer7" -> appIdx = i
+            }
+        }
+        if (macIdx < 0 || rxIdx < 0 || txIdx < 0) return emptyList()
+        val data = root.optJSONArray("data") ?: return emptyList()
+        val down = linkedMapOf<String, Long>()
+        val up = linkedMapOf<String, Long>()
+        val apps = linkedMapOf<String, MutableMap<String, Long>>()
+        for (i in 0 until data.length()) {
+            val row = data.optJSONArray(i) ?: continue
+            val mac = row.optString(macIdx).lowercase()
+            if (mac.isEmpty() || mac == "00:00:00:00:00:00") continue
+            val rx = row.optLong(rxIdx)
+            val tx = row.optLong(txIdx)
+            down[mac] = (down[mac] ?: 0) + rx
+            up[mac] = (up[mac] ?: 0) + tx
+            if (appIdx >= 0) {
+                val app = row.optString(appIdx).trim()
+                if (app.isNotEmpty()) {
+                    val perApp = apps.getOrPut(mac) { linkedMapOf() }
+                    perApp[app] = (perApp[app] ?: 0) + rx + tx
+                }
+            }
+        }
+        return down.keys.map { mac ->
+            NlbwHost(mac, down[mac] ?: 0, up[mac] ?: 0, apps[mac].orEmpty())
+        }
+    }
+
+    /** "46 KiB", "1.2 MiB", "512 B", "26113 B" → bytes. */
+    fun humanBytes(text: String): Long? {
+        val m = Regex("([0-9]+(?:\\.[0-9]+)?)\\s*([KMG]?)i?B", RegexOption.IGNORE_CASE).find(text.trim())
+            ?: return null
+        val value = m.groupValues[1].toDoubleOrNull() ?: return null
+        val scale = when (m.groupValues[2].uppercase()) {
+            "K" -> 1024.0
+            "M" -> 1024.0 * 1024
+            "G" -> 1024.0 * 1024 * 1024
+            else -> 1.0
+        }
+        return (value * scale).toLong()
+    }
+
+    /** Sections of [Commands.NLBW_PLAN] → the consent dialog's numbers. */
+    fun installPlan(sections: Map<String, String>): InstallPlan {
+        val pm = sections["pm"].orEmpty().trim().ifEmpty { "opkg" }
+        val plan = sections["plan"].orEmpty()
+        val problem = when {
+            plan.contains("Unknown package", ignoreCase = true) ||
+                plan.contains("unable to select packages", ignoreCase = true) ||
+                (pm == "apk" && plan.contains("ERROR")) ->
+                "The $pm feed doesn't offer nlbwmon — is the router online?"
+            // Package present but the binary wasn't found: the service exists, just isn't running.
+            plan.contains("is up to date", ignoreCase = true) ->
+                "nlbwmon is already installed — it only needs to be started."
+            !plan.contains("Installing", ignoreCase = true) ->
+                "Couldn't resolve the install — is the router online?"
+            else -> null
+        }
+        // "<package>|<size>" lines, one per package the resolve pulled in.
+        val packages = sections["sizes"].orEmpty().lineSequence()
+            .mapNotNull { line ->
+                val name = line.substringBefore('|', "").trim()
+                if (name.isEmpty() || !line.contains('|')) return@mapNotNull null
+                name to humanBytes(line.substringAfter('|'))
+            }
+            .distinctBy { it.first }
+            .toList()
+        return InstallPlan(
+            packageManager = pm,
+            packages = packages,
+            availKb = overlayAvailKb(sections["df"].orEmpty()),
+            problem = problem,
+        )
+    }
+
+    private val BLOCKED_MAC = Regex("wrtpulse-block-((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})")
+
+    /** MACs with a wrtpulse block rule, from grepped `uci show firewall` lines. */
+    fun blockedMacs(text: String): Set<String> =
+        BLOCKED_MAC.findAll(text).map { it.groupValues[1].lowercase() }.toSet()
+
     /** `uci show wireless` → structured radios and AP networks. */
     fun wireless(uci: Map<String, String>): Pair<List<WifiRadio>, List<WifiNetwork>> {
         val radios = mutableListOf<WifiRadio>()
@@ -278,6 +443,7 @@ object Parsers {
                     channel = opt(section, "channel").orEmpty().ifEmpty { "auto" },
                     htmode = opt(section, "htmode").orEmpty(),
                     disabled = opt(section, "disabled") == "1",
+                    country = opt(section, "country").orEmpty(),
                 )
                 "wifi-iface" -> if ((opt(section, "mode") ?: "ap") == "ap") networks += WifiNetwork(
                     section = section,

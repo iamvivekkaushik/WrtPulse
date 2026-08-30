@@ -8,6 +8,7 @@ import com.vivekkaushik.wrtpulse.net.SshTarget
 import com.vivekkaushik.wrtpulse.ops.Parsers
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TermEngineTest {
@@ -19,6 +20,10 @@ class TermEngineTest {
     }
 
     private fun engine() = TermEngine(RouterSession(SshTarget("t"), unusedClient, { error("unused") }))
+
+    /** A tiny screen, so scrolling and wrapping can be exercised in a few lines. */
+    private fun smallEngine(cols: Int = 10, rows: Int = 3) =
+        TermEngine(RouterSession(SshTarget("t"), unusedClient, { error("unused") }), cols, rows)
 
     private val esc = 27.toChar().toString()
     private val bel = 7.toChar().toString()
@@ -65,6 +70,234 @@ class TermEngineTest {
         val e = engine()
         e.feed("a long old line\rnew${esc}[K")
         assertEquals("new", e.current)
+    }
+
+    // --- regressions from device use: backspace wiped the screen, history recall garbled ---
+
+    /** `ESC[J` is erase-to-end-of-display, which ash emits on every redraw — not a clear. */
+    @Test
+    fun `backspace correction does not clear the session`() {
+        val e = engine()
+        e.feed("BusyBox v1.36.1\r\n")
+        e.feed("root@gw:~# lss")
+        e.feed("\b${esc}[J") // ash: move back one, erase the rest of the display
+        assertEquals(listOf("BusyBox v1.36.1"), e.lines.toList())
+        assertEquals("root@gw:~# ls", e.current)
+    }
+
+    @Test
+    fun `erase-display 0 keeps the rows above the cursor`() {
+        val e = engine()
+        e.feed("one\r\ntwo\r\nprompt")
+        e.feed("${esc}[0J")
+        assertEquals(2, e.lines.size)
+    }
+
+    /**
+     * `clear` homes the cursor and then erases; ED2 on its own does not move the cursor,
+     * so ignoring the row in ESC[H left the screen looking untouched.
+     */
+    @Test
+    fun `clear empties the screen and homes the cursor`() {
+        val e = engine()
+        e.feed("one\r\ntwo\r\nroot@gw:~# clear")
+        e.feed("\r\n${esc}[H${esc}[2J")   // what terminfo's clear capability sends
+        assertEquals(listOf(""), e.screen.toList())
+        assertEquals(0, e.cursorRow)
+        assertEquals("", e.current)
+        assertTrue(e.lines.isEmpty())
+
+        // The other spelling, erase-from-home-to-end, must do the same.
+        e.feed("a\r\nb\r\nc")
+        assertEquals(3, e.screen.size)
+        e.feed("${esc}[H${esc}[J")
+        assertEquals(listOf(""), e.screen.toList())
+        assertEquals(0, e.cursorRow)
+    }
+
+    /** Up-arrow: ash rewrites the line in place using CR, erase-line and cursor moves. */
+    @Test
+    fun `history recall redraws the line instead of corrupting it`() {
+        val e = engine()
+        e.feed("root@gw:~# ")
+        e.feed("\r${esc}[Kroot@gw:~# uptime")   // recalled command redrawn from column 0
+        assertEquals("root@gw:~# uptime", e.current)
+        assertEquals(0, e.lines.size)
+
+        // A second recall replaces a longer line with a shorter one, no leftovers.
+        e.feed("\r${esc}[Kroot@gw:~# ls")
+        assertEquals("root@gw:~# ls", e.current)
+    }
+
+    /**
+     * Captured from the user's router: a recalled command longer than the 48-column pty
+     * wraps (CR CR LF mid-text); the next recall moves the cursor UP with ESC[nA and
+     * erases downward with ESC[J. Ignoring the cursor move stranded the wrapped rows.
+     */
+    @Test
+    fun `recalling over a wrapped command leaves no leftover rows`() {
+        val e = engine()
+        val prompt = "root@OpenWrt:~# "
+        e.feed("$prompt")
+
+        // First recall: a long command that wraps onto a second row.
+        e.feed("\r${esc}]0;root@OpenWrt: ~${bel}${prompt}/usr/")
+        e.feed("sbin/networksetup -setdhcp \r\r\nWi-Fi${esc}[J")
+        assertEquals(2, e.screen.size)
+        assertEquals("Wi-Fi", e.screen.last())
+        assertEquals(1, e.cursorRow)
+
+        // Second recall: ash steps back up to the first row, redraws, erases downward.
+        e.feed("${esc}[1A\r${esc}]0;root@OpenWrt: ~${bel}${prompt}uptime${esc}[J")
+        assertEquals(listOf("${prompt}uptime"), e.screen.toList())
+        assertEquals(0, e.cursorRow)
+        assertEquals("${prompt}uptime", e.current)
+        assertTrue(e.lines.isEmpty())
+    }
+
+    @Test
+    fun `erase to end of display drops the rows below the cursor`() {
+        val e = engine()
+        e.feed("one\r\ntwo\r\nthree")
+        e.feed("${esc}[2A")       // back up to "one"
+        e.feed("\rXY${esc}[J")    // rewrite, then erase from the cursor to the end of the screen
+        assertEquals(listOf("XY"), e.screen.toList())
+        assertEquals(0, e.cursorRow)
+    }
+
+    @Test
+    fun `line feed keeps the column so wrapped output is not indented`() {
+        val e = engine()
+        e.feed("abc\r\ndef")
+        assertEquals(listOf("abc", "def"), e.screen.toList())
+    }
+
+    @Test
+    fun `cursor down past the end creates rows`() {
+        val e = engine()
+        e.feed("top${esc}[2Bbottom")
+        assertEquals(3, e.screen.size)
+        assertEquals("bottom", e.screen.last().trim())
+        assertEquals(2, e.cursorRow)
+    }
+
+    @Test
+    fun `rows scroll into scrollback once the screen is full`() {
+        val e = smallEngine(cols = 10, rows = 3)
+        e.feed("l1\r\nl2\r\nl3\r\nl4\r\nl5")
+        // Three rows on screen, the first two scrolled above them.
+        assertEquals(listOf("l1", "l2", "l3", "l4", "l5"), e.screen.toList())
+        assertEquals(4, e.cursorRow)
+        assertEquals("l5", e.current)
+    }
+
+    @Test
+    fun `clear wipes scrolled-off rows too, so the view really empties`() {
+        val e = smallEngine(cols = 10, rows = 3)
+        e.feed("l1\r\nl2\r\nl3\r\nl4\r\nl5")
+        e.feed("${esc}[H${esc}[2J")
+        assertEquals(listOf(""), e.screen.toList())
+        assertEquals(0, e.cursorRow)
+    }
+
+    /** Busybox's clear applet emits ESC[H ESC[J, with no terminfo involved. */
+    @Test
+    fun `busybox clear form empties the view as well`() {
+        val e = smallEngine(cols = 10, rows = 3)
+        e.feed("l1\r\nl2\r\nl3\r\nl4\r\nl5")
+        assertEquals(5, e.screen.size)
+        e.feed("${esc}[H${esc}[J")
+        assertEquals(listOf(""), e.screen.toList())
+        assertEquals(0, e.cursorRow)
+    }
+
+    /**
+     * ash reaches column 0 with CR, not ESC[H, when it redraws a recalled command — that
+     * must trim rows, never wipe the view.
+     */
+    @Test
+    fun `redraw that returns to column zero does not count as clear`() {
+        val e = smallEngine(cols = 10, rows = 3)
+        e.feed("l1\r\nl2\r\nold")
+        e.feed("\rnew${esc}[J")
+        assertEquals(listOf("l1", "l2", "new"), e.screen.toList())
+    }
+
+    /** But an erase-to-end mid-line must still only trim from the cursor. */
+    @Test
+    fun `erase to end away from home keeps earlier rows`() {
+        val e = smallEngine(cols = 10, rows = 3)
+        e.feed("l1\r\nl2\r\nab")
+        e.feed("${esc}[J")
+        assertEquals(listOf("l1", "l2", "ab"), e.screen.toList())
+    }
+
+    @Test
+    fun `text wraps at the pty width without an early break`() {
+        val e = smallEngine(cols = 10, rows = 3)
+        e.feed("0123456789")          // exactly fills row 0
+        assertEquals(listOf("0123456789"), e.screen.toList())
+        assertEquals(0, e.cursorRow)
+        e.feed("X")                   // the next character starts row 1
+        assertEquals(listOf("0123456789", "X"), e.screen.toList())
+        assertEquals(1, e.cursorRow)
+    }
+
+    @Test
+    fun `cursor moves let the shell overwrite mid-line`() {
+        val e = engine()
+        e.feed("root@gw:~# uptimx")
+        e.feed("${esc}[1D")   // one left
+        e.feed("e")           // overwrite the typo
+        assertEquals("root@gw:~# uptime", e.current)
+
+        e.feed("${esc}[12G")  // column-absolute back onto the command
+        e.feed("U")
+        assertEquals("root@gw:~# Uptime", e.current)
+    }
+
+    @Test
+    fun `delete and insert characters`() {
+        val e = engine()
+        e.feed("abcdef${esc}[3D${esc}[2P")   // cursor onto "d", delete two
+        assertEquals("abcf", e.current)
+        e.feed("${esc}[2@")                  // open two blanks at the cursor
+        assertEquals("abc  f", e.current)
+    }
+
+    @Test
+    fun `erase to start blanks the head of the line`() {
+        val e = engine()
+        e.feed("hello world${esc}[6G${esc}[1K")
+        assertEquals("     " + " world", e.current)
+    }
+
+    @Test
+    fun `charset selection is swallowed, not printed`() {
+        val e = engine()
+        e.feed("${esc}(Bready")
+        assertEquals("ready", e.current)
+    }
+
+    @Test
+    fun `sgr colour parameters are ignored`() {
+        val e = engine()
+        e.feed("${esc}[01;32mroot${esc}[00m@gw")
+        assertEquals("root@gw", e.current)
+    }
+
+    @Test
+    fun `osc terminated by string terminator`() {
+        val e = engine()
+        e.feed("${esc}]0;title${esc}\\root@gw:~# ")
+        assertEquals("root@gw:~# ", e.current)
+    }
+
+    @Test
+    fun `tabs advance to the next stop`() {
+        val e = engine()
+        e.feed("ab\tc")
+        assertEquals("ab      c", e.current)
     }
 
     @Test

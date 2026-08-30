@@ -9,6 +9,8 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -30,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -37,7 +40,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import android.media.AudioManager
+import android.view.HapticFeedbackConstants
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.text.selection.DisableSelection
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -45,7 +56,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vivekkaushik.wrtpulse.data.Demo
-import com.vivekkaushik.wrtpulse.data.TermEngine
+import com.vivekkaushik.wrtpulse.data.TerminalSessions
 import com.vivekkaushik.wrtpulse.ui.BlinkingCaret
 import com.vivekkaushik.wrtpulse.ui.MonoTag
 import com.vivekkaushik.wrtpulse.ui.WrtIcons
@@ -53,9 +64,56 @@ import com.vivekkaushik.wrtpulse.ui.dashedBorder
 import com.vivekkaushik.wrtpulse.ui.mono
 import com.vivekkaushik.wrtpulse.ui.sans
 import com.vivekkaushik.wrtpulse.ui.theme.Wrt
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private const val ESC = "\u001b"
+
+/** Hold-to-repeat timings, matched to the platform keyboard's feel. */
+private const val REPEAT_START_MS = 400L
+private const val REPEAT_INTERVAL_MS = 55L
+
+/** Repeats with no echo change before backspace counts as "nothing left to delete". */
+private const val BOUNDARY_REPEATS = 4
+private const val BOUNDARY_VOLUME = 0.3f
+
+/**
+ * A key press with the platform's keyboard tick. Repeating keys (backspace, arrows) keep
+ * firing while held, buzzing every few repeats so a long delete feels like a ratchet rather
+ * than one continuous hum.
+ */
+@Composable
+private fun Modifier.keyPress(
+    repeat: Boolean = false,
+    haptic: Int = HapticFeedbackConstants.KEYBOARD_TAP,
+    onTap: () -> Unit,
+): Modifier {
+    val view = LocalView.current
+    val scope = rememberCoroutineScope()
+    return this.pointerInput(onTap, repeat) {
+        detectTapGestures(
+            onPress = {
+                view.performHapticFeedback(haptic)
+                onTap()
+                if (repeat) {
+                    val job = scope.launch {
+                        delay(REPEAT_START_MS)
+                        var fired = 0
+                        while (true) {
+                            onTap()
+                            if (fired++ % 4 == 0) view.performHapticFeedback(haptic)
+                            delay(REPEAT_INTERVAL_MS)
+                        }
+                    }
+                    tryAwaitRelease()
+                    job.cancel()
+                } else {
+                    tryAwaitRelease()
+                }
+            },
+        )
+    }
+}
 private const val DEL = "\u007f"
 
 private val promptPrefix: AnnotatedString = buildAnnotatedString {
@@ -91,7 +149,7 @@ fun initialTerminalLines(): List<TermLine> = listOf(
 
 @Composable
 fun TerminalScreen(
-    engine: TermEngine?,
+    sessions: TerminalSessions?,
     routerName: String,
     lines: SnapshotStateList<TermLine>,
     pendingCommand: String,
@@ -100,9 +158,18 @@ fun TerminalScreen(
     onInsertSnippet: (String) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val engine = sessions?.current
     var shift by remember { mutableStateOf(false) }
     var symbols by remember { mutableStateOf(false) }
     var ctrl by remember { mutableStateOf(false) }
+
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val audio = remember(context) { context.getSystemService(AudioManager::class.java) }
+    // Watches whether the shell's echo actually shrank; a held backspace that changes
+    // nothing means the cursor is already at the start of the input.
+    var lastEchoLength by remember { mutableIntStateOf(-1) }
+    var unchangedRepeats by remember { mutableIntStateOf(0) }
 
     fun sendKey(text: String) {
         if (engine == null) return
@@ -130,35 +197,87 @@ fun TerminalScreen(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Row(
-                    Modifier
-                        .border(1.dp, Wrt.Accent.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
-                        .background(Wrt.TermTabActive, RoundedCornerShape(8.dp))
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                    Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Text(routerName, style = mono(11f, 400, Wrt.TextPrimary))
-                    Text("×", style = mono(11f, 400, Wrt.TextDim))
-                }
-                if (engine == null) {
+                    if (sessions == null) {
+                        Row(
+                            Modifier
+                                .border(1.dp, Wrt.Accent.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+                                .background(Wrt.TermTabActive, RoundedCornerShape(8.dp))
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(7.dp),
+                        ) {
+                            Text(routerName, style = mono(11f, 400, Wrt.TextPrimary))
+                            Text("×", style = mono(11f, 400, Wrt.TextDim))
+                        }
+                        Box(
+                            Modifier
+                                .border(1.dp, Wrt.TermTabBorder, RoundedCornerShape(8.dp))
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) { Text("bpi-r3-lab", style = mono(11f, 400, Wrt.TextDim)) }
+                    } else {
+                        sessions.tabs.forEachIndexed { i, tab ->
+                            val active = i == sessions.selected
+                            Row(
+                                Modifier
+                                    .border(
+                                        1.dp,
+                                        if (active) Wrt.Accent.copy(alpha = 0.35f) else Wrt.TermTabBorder,
+                                        RoundedCornerShape(8.dp),
+                                    )
+                                    .let { if (active) it.background(Wrt.TermTabActive, RoundedCornerShape(8.dp)) else it }
+                                    .clickable { sessions.select(i) }
+                                    .padding(start = 10.dp, top = 6.dp, bottom = 6.dp, end = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                            ) {
+                                Text(
+                                    if (i == 0) routerName else "$routerName ${i + 1}",
+                                    style = mono(11f, 400, if (active) Wrt.TextPrimary else Wrt.TextDim),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
+                                if (!tab.connected) {
+                                    Text(
+                                        if (tab.error != null) "!" else "…",
+                                        style = mono(11f, 600, Wrt.Amber),
+                                    )
+                                }
+                                Text(
+                                    "×",
+                                    style = mono(12f, 400, Wrt.TextDim),
+                                    modifier = Modifier
+                                        .keyPress { sessions.close(i) }
+                                        .padding(horizontal = 4.dp),
+                                )
+                            }
+                        }
+                    }
                     Box(
                         Modifier
                             .border(1.dp, Wrt.TermTabBorder, RoundedCornerShape(8.dp))
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) { Text("bpi-r3-lab", style = mono(11f, 400, Wrt.TextDim)) }
-                } else if (!engine.connected) {
-                    MonoTag(
-                        if (engine.error != null) "DISCONNECTED" else "OPENING…",
-                        color = Wrt.Amber,
-                        border = Wrt.Amber.copy(alpha = 0.45f),
-                        size = 8.5f,
-                    )
+                            .let { if (sessions != null) it.keyPress { sessions.open() } else it }
+                            .padding(horizontal = 9.dp, vertical = 6.dp)
+                    ) { Text("+", style = mono(11f, 400, Wrt.TextDim)) }
                 }
-                Box(
-                    Modifier
-                        .border(1.dp, Wrt.TermTabBorder, RoundedCornerShape(8.dp))
-                        .padding(horizontal = 9.dp, vertical = 6.dp)
-                ) { Text("+", style = mono(11f, 400, Wrt.TextDim)) }
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.width(10.dp))
+                if (engine != null) {
+                    Icon(
+                        WrtIcons.Paste, "paste",
+                        Modifier
+                            .size(17.dp)
+                            .keyPress {
+                                // Trailing newlines are dropped so a pasted command lands at
+                                // the prompt for review instead of running itself.
+                                val text = clipboard.getText()?.text?.trimEnd('\n', '\r')
+                                if (!text.isNullOrEmpty()) scope.launch { engine.send(text) }
+                            },
+                        tint = Wrt.TextTertiary,
+                    )
+                    Spacer(Modifier.width(14.dp))
+                }
                 Icon(
                     WrtIcons.Lightning, "snippets",
                     Modifier.size(17.dp).clickable { onToggleSnippets(!snippetsOpen) },
@@ -169,24 +288,32 @@ fun TerminalScreen(
             // session
             val scroll = rememberScrollState()
             if (engine != null) {
-                LaunchedEffect(engine.lines.size, engine.current) {
+                LaunchedEffect(engine.screen.size, engine.current) {
                     scroll.scrollTo(scroll.maxValue)
                 }
             }
+            // Long-press the output to select and copy it.
+            SelectionContainer(Modifier.weight(1f)) {
             Column(
                 Modifier
-                    .weight(1f)
                     .verticalScroll(scroll)
                     .padding(12.dp)
             ) {
                 if (engine != null) {
-                    engine.lines.forEach { line ->
-                        Text(line, style = mono(11.5f, 400, Wrt.TermText, lineHeight = 19.sp))
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(engine.current, style = mono(11.5f, 400, Wrt.TermText, lineHeight = 19.sp))
-                        Spacer(Modifier.width(1.dp))
-                        BlinkingCaret()
+                    // The caret follows the cursor row, which the shell moves up to rewrite
+                    // a command that wrapped across rows.
+                    engine.screen.forEachIndexed { i, line ->
+                        if (i == engine.cursorRow) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(line, style = mono(11.5f, 400, Wrt.TermText, lineHeight = 19.sp))
+                                DisableSelection {
+                                    Spacer(Modifier.width(1.dp))
+                                    BlinkingCaret()
+                                }
+                            }
+                        } else {
+                            Text(line, style = mono(11.5f, 400, Wrt.TermText, lineHeight = 19.sp))
+                        }
                     }
                     if (engine.error != null) {
                         Text(
@@ -213,6 +340,7 @@ fun TerminalScreen(
                     }
                 }
             }
+            }
             ExtraKeysRow(ctrl, onCtrl = { ctrl = !ctrl }, onKey = ::sendKey)
             TerminalKeyboard(
                 shift = shift,
@@ -220,7 +348,23 @@ fun TerminalScreen(
                 onShift = { shift = !shift },
                 onSymbols = { symbols = !symbols },
                 onKey = ::sendKey,
-                onBackspace = { sendKey(DEL) },
+                onBackspace = {
+                    val echoed = engine?.current?.length ?: -1
+                    if (engine != null && echoed == lastEchoLength) {
+                        // Allow for the round trip before calling it stuck, then chirp
+                        // every few repeats rather than on every one.
+                        if (unchangedRepeats >= BOUNDARY_REPEATS &&
+                            (unchangedRepeats - BOUNDARY_REPEATS) % 3 == 0
+                        ) {
+                            audio?.playSoundEffect(AudioManager.FX_KEYPRESS_INVALID, BOUNDARY_VOLUME)
+                        }
+                        unchangedRepeats++
+                    } else {
+                        unchangedRepeats = 0
+                    }
+                    lastEchoLength = echoed
+                    sendKey(DEL)
+                },
                 onEnter = { sendKey("\r") },
             )
         }
@@ -331,10 +475,10 @@ private fun ExtraKeysRow(ctrl: Boolean, onCtrl: () -> Unit, onKey: (String) -> U
             ExtraKey("|", 1f) { onKey("|") }
             ExtraKey("/", 1f) { onKey("/") }
             ExtraKey("-", 1f) { onKey("-") }
-            ExtraKey("↑", 1f) { onKey(ESC + "[A") }
-            ExtraKey("↓", 1f) { onKey(ESC + "[B") }
-            ExtraKey("←", 1f) { onKey(ESC + "[D") }
-            ExtraKey("→", 1f) { onKey(ESC + "[C") }
+            ExtraKey("↑", 1f, repeat = true) { onKey(ESC + "[A") }
+            ExtraKey("↓", 1f, repeat = true) { onKey(ESC + "[B") }
+            ExtraKey("←", 1f, repeat = true) { onKey(ESC + "[D") }
+            ExtraKey("→", 1f, repeat = true) { onKey(ESC + "[C") }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(Wrt.TermRowBorder))
     }
@@ -345,6 +489,7 @@ private fun androidx.compose.foundation.layout.RowScope.ExtraKey(
     label: String,
     weight: Float,
     active: Boolean = false,
+    repeat: Boolean = false,
     onTap: () -> Unit,
 ) {
     Box(
@@ -353,7 +498,7 @@ private fun androidx.compose.foundation.layout.RowScope.ExtraKey(
             .height(32.dp)
             .border(1.dp, if (active) Wrt.Accent.copy(alpha = 0.5f) else Wrt.TermExtraKeyBorder, RoundedCornerShape(6.dp))
             .background(if (active) Wrt.Accent.copy(alpha = 0.1f) else Wrt.TermExtraKeyBg, RoundedCornerShape(6.dp))
-            .clickable(onClick = onTap),
+            .keyPress(repeat = repeat, onTap = onTap),
         contentAlignment = Alignment.Center,
     ) {
         Text(label, style = mono(10.5f, 400, if (active) Wrt.Accent else Wrt.TermExtraKeyText))
@@ -389,7 +534,7 @@ private fun TerminalKeyboard(
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             TermKey("⇧", 1.4f, alt = true, activeAlt = shift, onTap = onShift)
             row3.forEach { c -> TermKey(shown(c, shift), 1f) { onKey(c.toString()) } }
-            TermKey("⌫", 1.4f, alt = true, onTap = onBackspace)
+            TermKey("⌫", 1.4f, alt = true, repeat = true, onTap = onBackspace)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             TermKey(if (symbols) "abc" else "?123", 1.6f, alt = true, small = true, onTap = onSymbols)
@@ -409,6 +554,7 @@ private fun androidx.compose.foundation.layout.RowScope.TermKey(
     alt: Boolean = false,
     small: Boolean = false,
     activeAlt: Boolean = false,
+    repeat: Boolean = false,
     onTap: () -> Unit,
 ) {
     Box(
@@ -423,7 +569,7 @@ private fun androidx.compose.foundation.layout.RowScope.TermKey(
                 },
                 RoundedCornerShape(5.dp),
             )
-            .clickable(onClick = onTap),
+            .keyPress(repeat = repeat, onTap = onTap),
         contentAlignment = Alignment.Center,
     ) {
         if (label.isNotEmpty()) {
@@ -440,7 +586,8 @@ private fun androidx.compose.foundation.layout.RowScope.TermKeyEnter(weight: Flo
             .height(36.dp)
             .border(1.dp, Wrt.Accent.copy(alpha = 0.4f), RoundedCornerShape(5.dp))
             .background(Wrt.Accent.copy(alpha = 0.15f), RoundedCornerShape(5.dp))
-            .clickable(onClick = onTap),
+            // Enter commits a command — a firmer tick than a plain keypress.
+            .keyPress(haptic = HapticFeedbackConstants.VIRTUAL_KEY, onTap = onTap),
         contentAlignment = Alignment.Center,
     ) {
         Text("⏎", style = mono(11f, 400, Wrt.Accent))

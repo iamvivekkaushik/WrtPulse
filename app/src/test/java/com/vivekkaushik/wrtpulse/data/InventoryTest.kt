@@ -113,6 +113,47 @@ class InventoryTest {
     }
 
     @Test
+    fun `blocked rules and rename overrides apply in merge`() {
+        val blocked = Parsers.blockedMacs(
+            "firewall.@rule[12].name='wrtpulse-block-aa:5c:1e:88:04:2b'"
+        )
+        assertEquals(setOf("aa:5c:1e:88:04:2b"), blocked)
+
+        val now = 1_000_000L
+        val leases = Parsers.leases("${now + 3600} aa:5c:1e:88:04:2b 192.168.2.34 pixel-8 *")
+        val neigh = Parsers.neighEntries("192.168.2.34 dev br-lan lladdr aa:5c:1e:88:04:2b REACHABLE")
+        val clients = Inventory.merge(
+            leases, neigh, emptyList(), emptyList(), now,
+            blockedMacs = blocked,
+            nameOverrides = mapOf("aa:5c:1e:88:04:2b" to "Vivek's Pixel"),
+        )
+        val c = clients.single()
+        assertTrue(c.blocked)
+        assertEquals("Vivek's Pixel", c.name)
+        assertTrue(c.editable)
+    }
+
+    @Test
+    fun `action commands have expected shapes`() {
+        val block = com.vivekkaushik.wrtpulse.ops.Commands.blockClient("aa:bb:cc:dd:ee:ff")
+        assertTrue(block.contains("name='wrtpulse-block-aa:bb:cc:dd:ee:ff'"))
+        assertTrue(block.contains("src_mac='aa:bb:cc:dd:ee:ff'"))
+        assertTrue(block.contains("target='REJECT'"))
+        assertTrue(block.endsWith("/etc/init.d/firewall reload >/dev/null 2>&1"))
+
+        val unblock = com.vivekkaushik.wrtpulse.ops.Commands.unblockClient("aa:bb:cc:dd:ee:ff")
+        assertTrue(unblock.contains("grep \"wrtpulse-block-aa:bb:cc:dd:ee:ff\""))
+        assertTrue(unblock.contains("uci delete firewall.\$s"))
+        assertTrue(unblock.trimEnd().endsWith("; :")) // absent rule is success, not an error
+
+        assertTrue(com.vivekkaushik.wrtpulse.ops.Commands.wake("aa:bb:cc:dd:ee:ff").contains("ether-wake"))
+
+        val reserve = com.vivekkaushik.wrtpulse.ops.Commands.reserveIp("aa:bb:cc:dd:ee:ff", "192.168.2.34", "pixel-8")
+        assertTrue(reserve.contains("dhcp.@host[-1].ip='192.168.2.34'"))
+        assertTrue(reserve.startsWith("uci show dhcp")) // idempotence guard first
+    }
+
+    @Test
     fun `signal to bars thresholds`() {
         assertEquals(4, Inventory.barsFor(-50))
         assertEquals(3, Inventory.barsFor(-60))

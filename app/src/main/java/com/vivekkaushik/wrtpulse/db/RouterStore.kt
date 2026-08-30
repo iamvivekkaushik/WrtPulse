@@ -10,6 +10,8 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -27,9 +29,29 @@ data class RouterEntity(
     val summary: String,       // "OpenWrt 24.10 · r28xxx · MediaTek …"
     val credential: ByteArray?,
     val lastSeenEpoch: Long,
+    val privateKey: ByteArray? = null,  // sealed OpenSSH PEM; when set, key auth replaces the password
 ) {
     override fun equals(other: Any?) = other is RouterEntity && other.id == id
     override fun hashCode() = id.hashCode()
+}
+
+/** A user-chosen display name for a client, keyed by MAC. Local to the app. */
+@Entity(tableName = "client_names")
+data class ClientName(
+    @PrimaryKey val mac: String,
+    val name: String,
+)
+
+@Dao
+interface ClientNameDao {
+    @Query("SELECT * FROM client_names")
+    fun all(): Flow<List<ClientName>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(name: ClientName)
+
+    @Query("DELETE FROM client_names WHERE mac = :mac")
+    suspend fun delete(mac: String)
 }
 
 @Dao
@@ -53,12 +75,30 @@ interface RouterDao {
     suspend fun delete(id: Long)
 }
 
-@Database(entities = [RouterEntity::class], version = 1, exportSchema = false)
+@Database(entities = [RouterEntity::class, ClientName::class], version = 3, exportSchema = false)
 abstract class WrtDb : RoomDatabase() {
     abstract fun routers(): RouterDao
+    abstract fun clientNames(): ClientNameDao
 
     companion object {
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE routers ADD COLUMN privateKey BLOB")
+            }
+        }
+
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS client_names (" +
+                        "mac TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL)"
+                )
+            }
+        }
+
         fun build(context: Context): WrtDb =
-            Room.databaseBuilder(context, WrtDb::class.java, "wrtpulse.db").build()
+            Room.databaseBuilder(context, WrtDb::class.java, "wrtpulse.db")
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .build()
     }
 }

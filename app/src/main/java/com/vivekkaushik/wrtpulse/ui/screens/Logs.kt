@@ -56,7 +56,7 @@ import com.vivekkaushik.wrtpulse.ui.theme.Wrt
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 @Composable
-fun LogsScreen(ticker: LiveTicker, live: LiveLogs?, routerName: String, onRouterTap: () -> Unit) {
+fun LogsScreen(ticker: LiveTicker, live: LiveLogs?, liveLatencyMs: Int? = null, routerName: String, onRouterTap: () -> Unit) {
     var sourceFilter by remember { mutableIntStateOf(if (live != null) -1 else 2) }
     var selected by remember { mutableStateOf<com.vivekkaushik.wrtpulse.data.LogLine?>(null) }
     val sources = listOf("kernel", "hostapd", "dnsmasq", "firewall")
@@ -67,7 +67,7 @@ fun LogsScreen(ticker: LiveTicker, live: LiveLogs?, routerName: String, onRouter
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         ConnectionTopBar(
             routerName = routerName,
-            latencyMs = ticker.latencyMs,
+            latencyMs = liveLatencyMs ?: ticker.latencyMs,
             onRouterTap = onRouterTap,
             trailing = { Icon(WrtIcons.ShareUp, "export", Modifier.size(17.dp), tint = Wrt.TextTertiary) },
         )

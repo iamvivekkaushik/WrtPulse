@@ -40,9 +40,12 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
+import androidx.compose.runtime.rememberCoroutineScope
 import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.WifiStore
 import com.vivekkaushik.wrtpulse.ops.Parsers
+import com.vivekkaushik.wrtpulse.ops.ScanCell
+import kotlinx.coroutines.launch
 import com.vivekkaushik.wrtpulse.ops.WifiNetwork
 import com.vivekkaushik.wrtpulse.ops.WifiRadio
 import com.vivekkaushik.wrtpulse.ui.ConnectionTopBar
@@ -60,6 +63,7 @@ import com.vivekkaushik.wrtpulse.ui.theme.Wrt
 fun WifiEditorScreen(
     ticker: LiveTicker,
     store: WifiStore?,
+    liveLatencyMs: Int? = null,
     routerName: String,
     pendingCount: Int,
     onRouterTap: () -> Unit,
@@ -69,7 +73,7 @@ fun WifiEditorScreen(
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         ConnectionTopBar(
             routerName = routerName,
-            latencyMs = ticker.latencyMs,
+            latencyMs = liveLatencyMs ?: ticker.latencyMs,
             onRouterTap = onRouterTap,
             trailing = { Icon(WrtIcons.MoreVert, "menu", Modifier.size(18.dp), tint = Wrt.TextTertiary) },
         )
@@ -143,6 +147,7 @@ private fun LiveRadios(store: WifiStore) {
                 Text(radio.htmode.ifEmpty { "—" }, style = mono(10f, 500, Wrt.TextTertiary))
             }
             nets.firstOrNull()?.let { net -> LiveSsidEditorCard(store, radio, net, channel) }
+            LiveChannelChartCard(store, radio, channel)
             nets.drop(1).forEach { net -> ExtraSsidRow(store, net) }
         } else {
             Row(
@@ -334,6 +339,110 @@ private fun StaticBox(value: String) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(value, style = mono(13f, 500, Wrt.TextSecondary))
+    }
+}
+
+@Composable
+private fun LiveChannelChartCard(store: WifiStore, radio: WifiRadio, channel: String) {
+    val scope = rememberCoroutineScope()
+    val cells = store.scans[radio.section]
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(1.dp, Wrt.BorderCard, RoundedCornerShape(14.dp))
+            .background(Wrt.BgCard, RoundedCornerShape(14.dp))
+            .padding(horizontal = 14.dp, vertical = 13.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            SectionLabel("CHANNEL — ${bandHeader(radio.band)}", size = 9.5f)
+            FlexSpacer()
+            Text(
+                when {
+                    store.scanning -> "scanning…"
+                    cells != null -> "${cells.size} neighbors heard"
+                    else -> "not scanned yet"
+                },
+                style = mono(10f, 500, if (store.scanning) Wrt.Amber else Wrt.TextTertiary),
+            )
+            Text(
+                "Scan",
+                style = sans(11.5f, 600, if (store.scanning) Wrt.TextDim else Wrt.Accent),
+                modifier = Modifier.clickable(enabled = !store.scanning) {
+                    scope.launch { store.scan(radio.section) }
+                },
+            )
+        }
+        if (cells != null) {
+            val ourChannel = channel.toIntOrNull()
+            val axis = chartAxis(radio.band, cells, ourChannel)
+            LiveChannelChart(
+                cells = cells,
+                axis = axis,
+                ourChannel = ourChannel,
+                modifier = Modifier.fillMaxWidth().height(96.dp).padding(top = 8.dp),
+            )
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                axis.forEach { ch ->
+                    Text(
+                        "$ch",
+                        style = mono(9.5f, if (ch == ourChannel) 600 else 500, if (ch == ourChannel) Wrt.Accent else Wrt.TextDim),
+                    )
+                }
+            }
+        } else if (!store.scanning) {
+            Text(
+                "Survey nearby access points to judge how crowded this channel is.",
+                style = sans(11f, 400, Wrt.TextDim),
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+    }
+}
+
+/** Sorted label channels: fixed comb for 2.4 GHz, observed channels elsewhere. */
+private fun chartAxis(band: String, cells: List<ScanCell>, ourChannel: Int?): List<Int> =
+    if (band == "2.4G") listOf(1, 3, 6, 9, 11, 13)
+    else (cells.map { it.channel } + listOfNotNull(ourChannel)).distinct().sorted().ifEmpty { listOf(36, 149) }
+
+/**
+ * Neighbor-occupancy arcs, one per heard AP: x from the channel's position on the axis,
+ * height from signal strength. Our own channel is the accent arc.
+ */
+@Composable
+private fun LiveChannelChart(cells: List<ScanCell>, axis: List<Int>, ourChannel: Int?, modifier: Modifier) {
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        val baseY = h * 0.875f
+        val lo = axis.first().toFloat()
+        val hi = axis.last().toFloat()
+        fun xFor(ch: Int): Float =
+            if (hi > lo) ((ch - lo) / (hi - lo)) * (w * 0.9f) + w * 0.05f else w / 2f
+        fun arc(ch: Int, signal: Int, fill: Color, stroke: Color, sw: Float) {
+            val cx = xFor(ch)
+            // -40 dBm → tall, -90 dBm → low
+            val strength = ((signal + 90) / 50f).coerceIn(0.08f, 1f)
+            val top = baseY - strength * (h * 0.72f)
+            val halfW = w * 0.11f
+            val p = Path().apply {
+                moveTo(cx - halfW, baseY)
+                quadraticTo(cx, top, cx + halfW, baseY)
+            }
+            drawPath(p, fill)
+            drawPath(p, stroke, style = Stroke(sw.dp.toPx()))
+        }
+        drawLine(Wrt.ProgressTrack, Offset(0f, baseY), Offset(w, baseY), 1.dp.toPx())
+        cells.filter { it.channel != ourChannel }.forEach { cell ->
+            arc(cell.channel, cell.signalDbm, Wrt.TextTertiary.copy(alpha = 0.10f), Wrt.DotOff, 1f)
+        }
+        // neighbors sharing our channel are the contention that matters — amber
+        cells.filter { it.channel == ourChannel }.forEach { cell ->
+            arc(cell.channel, cell.signalDbm, Wrt.Amber.copy(alpha = 0.14f), Wrt.Amber.copy(alpha = 0.55f), 1.2f)
+        }
+        ourChannel?.let { arc(it, -45, Wrt.Accent.copy(alpha = 0.18f), Wrt.Accent, 1.5f) }
     }
 }
 

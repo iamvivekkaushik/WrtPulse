@@ -30,7 +30,13 @@ data class Client(
     val leaseLabel: String? = null,
     val downMbps: Float? = null,
     val upMbps: Float? = null,
-)
+    /** Cumulative traffic this nlbwmon accounting period, when nlbwmon is installed. */
+    val usageDown: Long? = null,
+    val usageUp: Long? = null,
+    val apps: List<Pair<String, Long>> = emptyList(),
+) {
+    val usageTotal: Long get() = (usageDown ?: 0) + (usageUp ?: 0)
+}
 
 data class Ssid(
     val name: String,

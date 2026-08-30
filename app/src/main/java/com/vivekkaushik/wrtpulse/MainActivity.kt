@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -41,7 +42,7 @@ import com.vivekkaushik.wrtpulse.data.Inventory
 import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.LiveLogs
 import com.vivekkaushik.wrtpulse.data.Telemetry
-import com.vivekkaushik.wrtpulse.data.TermEngine
+import com.vivekkaushik.wrtpulse.data.TerminalSessions
 import com.vivekkaushik.wrtpulse.data.WifiStore
 import kotlinx.coroutines.launch
 import com.vivekkaushik.wrtpulse.net.WrtRuntime
@@ -112,24 +113,35 @@ private fun WrtPulseApp() {
     // The Keystore blob is only opened after the user passes the screen-lock gate, once per launch.
     var unlocked by remember { mutableStateOf(false) }
     var connectingHost by remember { mutableStateOf<String?>(null) }
+    val prefs = remember { context.getSharedPreferences("wrtpulse", android.content.Context.MODE_PRIVATE) }
+    var biometricEnabled by remember { mutableStateOf(prefs.getBoolean("biometric_gate", true)) }
 
     // Live feeds exist only while the main scaffold is on screen and a session is live.
     val session = if (dest == Dest.Main) WrtRuntime.session else null
     val telemetry = remember(session) { session?.let { Telemetry(it) } }
     val inventory = remember(session) { session?.let { Inventory(it) } }
     val wifiStore = remember(session) { session?.let { WifiStore(it) } }
-    val termEngine = remember(session) { session?.let { TermEngine(it) } }
+    val termSessions = remember(session) { session?.let { TerminalSessions(it, scope) } }
     val liveLogs = remember(session) { session?.let { LiveLogs(it) } }
-    var termStarted by remember(session) { mutableStateOf(false) }
     var logsStarted by remember(session) { mutableStateOf(false) }
     // Polling pauses while the app is in the background; the terminal shell stays attached.
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(telemetry) { telemetry?.let { t -> lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { t.run() } } }
     LaunchedEffect(inventory) { inventory?.let { inv -> lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { inv.run() } } }
+    // User renames flow into the merge as overrides.
+    LaunchedEffect(inventory) {
+        if (inventory != null) {
+            WrtRuntime.db.clientNames().all().collect { names ->
+                inventory.nameOverrides = names.associate { it.mac to it.name }
+                inventory.remerge()
+            }
+        }
+    }
     LaunchedEffect(wifiStore) { wifiStore?.load() }
-    // The shell and the log stream open lazily, the first time their screens appear,
-    // then stay alive across tab switches.
-    LaunchedEffect(termEngine, termStarted) { if (termStarted) termEngine?.run() }
+    // The log stream opens lazily, the first time its screen appears, then stays alive
+    // across tab switches. Terminal shells are owned by TerminalSessions.
+    // Switching routers replaces the holder; its shells must not outlive it.
+    DisposableEffect(termSessions) { onDispose { termSessions?.closeAll() } }
     LaunchedEffect(liveLogs, logsStarted) {
         if (logsStarted) liveLogs?.let { l -> lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { l.run() } }
     }
@@ -148,17 +160,20 @@ private fun WrtPulseApp() {
     val activity = LocalContext.current as FragmentActivity
 
     fun doConnect(entity: RouterEntity) {
+        val keyPem = runCatching { entity.privateKey?.let { WrtRuntime.vault.open(it) } }.getOrNull()
         val secret = runCatching { entity.credential?.let { WrtRuntime.vault.open(it) } }.getOrNull()
         flow.host = entity.host
         flow.port = entity.port.toString()
         flow.username = entity.username
-        if (secret == null) {
+        if (keyPem == null && secret == null) {
             // No stored credential (or the Keystore key changed): fall back to onboarding, prefilled.
             flow.password = ""
+            flow.keyPem = null
             dest = Dest.Onboarding1
             return
         }
-        flow.password = String(secret, Charsets.UTF_8)
+        flow.keyPem = keyPem
+        flow.password = secret?.let { String(it, Charsets.UTF_8) } ?: ""
         connectingHost = entity.host
         flow.connect(
             onFirstContact = { connectingHost = null; dest = Dest.Onboarding2 },
@@ -176,7 +191,7 @@ private fun WrtPulseApp() {
     }
 
     fun connectSaved(entity: RouterEntity) {
-        if (unlocked || entity.credential == null) {
+        if (unlocked || !biometricEnabled || (entity.credential == null && entity.privateKey == null)) {
             doConnect(entity)
         } else {
             biometricUnlock(activity) { unlocked = true; doConnect(entity) }
@@ -210,6 +225,7 @@ private fun WrtPulseApp() {
                     onBack = { flow.rejectFirstContact(); dest = Dest.Onboarding1 },
                 )
                 Dest.Onboarding3 -> OnboardingSshKeyScreen(
+                    flow = flow,
                     routerSummary = flow.board?.let { b ->
                         listOf(flow.routerName, b.summary).filter { it.isNotBlank() }.joinToString(" · ")
                     },
@@ -237,7 +253,7 @@ private fun WrtPulseApp() {
                             connectSaved(e)
                         }
                     },
-                    onAdd = { dest = Dest.Onboarding1 },
+                    onAdd = { flow.keyPem = null; flow.password = ""; dest = Dest.Onboarding1 },
                 )
                 Dest.HostKey -> {
                     val change = flow.keyChange
@@ -275,6 +291,7 @@ private fun WrtPulseApp() {
                             MainTab.Network -> WifiEditorScreen(
                                 ticker = ticker,
                                 store = wifiStore,
+                                liveLatencyMs = telemetry?.latencyMs,
                                 routerName = currentRouter,
                                 pendingCount = wifiStore?.pendingCount ?: pendingChanges,
                                 onRouterTap = { showSwitcher = true },
@@ -284,31 +301,58 @@ private fun WrtPulseApp() {
                             MainTab.Clients -> ClientsScreen(
                                 ticker = ticker,
                                 live = inventory,
+                                liveLatencyMs = telemetry?.latencyMs,
                                 routerName = currentRouter,
                                 onRouterTap = { showSwitcher = true },
+                                onRename = { mac, name ->
+                                    scope.launch {
+                                        runCatching {
+                                            WrtRuntime.db.clientNames()
+                                                .upsert(com.vivekkaushik.wrtpulse.db.ClientName(mac, name))
+                                        }
+                                    }
+                                },
                             )
                             MainTab.Terminal -> {
-                                LaunchedEffect(Unit) { termStarted = true }
+                                LaunchedEffect(termSessions) { termSessions?.openIfEmpty() }
                                 TerminalScreen(
-                                    engine = termEngine,
+                                    sessions = termSessions,
                                     routerName = currentRouter,
                                     lines = termLines,
                                     pendingCommand = termPending,
                                     snippetsOpen = snippetsOpen,
                                     onToggleSnippets = { snippetsOpen = it },
                                     onInsertSnippet = { cmd ->
-                                        if (termEngine != null) scope.launch { termEngine.send(cmd) }
-                                        else termPending = cmd
+                                        val shell = termSessions?.current
+                                        if (shell != null) scope.launch { shell.send(cmd) } else termPending = cmd
                                         snippetsOpen = false
                                     },
                                 )
                             }
                             MainTab.System -> if (logsOpen) {
                                 LaunchedEffect(Unit) { logsStarted = true }
-                                LogsScreen(ticker = ticker, live = liveLogs, routerName = currentRouter, onRouterTap = { showSwitcher = true })
+                                LogsScreen(
+                                    ticker = ticker,
+                                    live = liveLogs,
+                                    liveLatencyMs = telemetry?.latencyMs,
+                                    routerName = currentRouter,
+                                    onRouterTap = { showSwitcher = true },
+                                )
                             } else {
                                 SystemScreen(
                                     ticker = ticker,
+                                    live = telemetry,
+                                    board = flow.board,
+                                    country = wifiStore?.radios?.firstOrNull { it.country.isNotBlank() }?.country,
+                                    sshKeyInstalled = if (telemetry != null) {
+                                        savedRouters?.firstOrNull { it.host == WrtRuntime.session?.target?.host }
+                                            ?.privateKey != null
+                                    } else null,
+                                    biometricEnabled = if (telemetry != null) biometricEnabled else null,
+                                    onBiometricToggle = { on ->
+                                        biometricEnabled = on
+                                        prefs.edit().putBoolean("biometric_gate", on).apply()
+                                    },
                                     routerName = currentRouter,
                                     onRouterTap = { showSwitcher = true },
                                     onOpenLogs = { logsOpen = true },

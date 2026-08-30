@@ -30,6 +30,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.vivekkaushik.wrtpulse.data.LiveTicker
+import com.vivekkaushik.wrtpulse.data.Telemetry
+import com.vivekkaushik.wrtpulse.ops.BoardInfo
 import com.vivekkaushik.wrtpulse.ui.ConnectionTopBar
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.SectionLabel
@@ -43,15 +45,22 @@ import com.vivekkaushik.wrtpulse.ui.theme.Wrt
 @Composable
 fun SystemScreen(
     ticker: LiveTicker,
+    live: Telemetry? = null,
+    board: BoardInfo? = null,
+    country: String? = null,
+    sshKeyInstalled: Boolean? = null,
+    biometricEnabled: Boolean? = null,
+    onBiometricToggle: (Boolean) -> Unit = {},
     routerName: String,
     onRouterTap: () -> Unit,
     onOpenLogs: () -> Unit,
 ) {
-    var biometric by remember { mutableStateOf(true) }
+    var biometricDemo by remember { mutableStateOf(true) }
+    val isLive = live != null
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         ConnectionTopBar(
             routerName = routerName,
-            latencyMs = ticker.latencyMs,
+            latencyMs = live?.latencyMs ?: ticker.latencyMs,
             onRouterTap = onRouterTap,
             trailing = { Icon(WrtIcons.MoreVert, "menu", Modifier.size(18.dp), tint = Wrt.TextTertiary) },
         )
@@ -64,38 +73,92 @@ fun SystemScreen(
         ) {
             SectionLabel("MAINTENANCE", tracking = 0.14)
             SystemCard {
-                SystemRow(WrtIcons.Backup, "Backup & restore", "Last backup 6 d ago")
                 SystemRow(
-                    WrtIcons.Firmware, "Firmware upgrade", "23.05.3 → 23.05.4 available",
-                    subColor = Wrt.Amber,
-                    extra = { Box(Modifier.size(6.dp).background(Wrt.Amber, CircleShape)) },
+                    WrtIcons.Backup, "Backup & restore",
+                    if (isLive) "Coming soon" else "Last backup 6 d ago",
                 )
-                SystemRow(WrtIcons.Services, "Services", "31 running · 2 stopped")
+                if (isLive) {
+                    SystemRow(WrtIcons.Firmware, "Firmware", board?.summary?.ifBlank { null } ?: "—")
+                } else {
+                    SystemRow(
+                        WrtIcons.Firmware, "Firmware upgrade", "23.05.3 → 23.05.4 available",
+                        subColor = Wrt.Amber,
+                        extra = { Box(Modifier.size(6.dp).background(Wrt.Amber, CircleShape)) },
+                    )
+                }
+                SystemRow(
+                    WrtIcons.Services, "Services",
+                    if (isLive) "Coming soon" else "31 running · 2 stopped",
+                )
                 SystemRow(WrtIcons.Packages, "Packages", null, sub = {
                     Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Box(Modifier.width(74.dp).height(3.dp).background(Wrt.ProgressTrack, RoundedCornerShape(2.dp))) {
-                            Box(Modifier.fillMaxWidth(0.62f).height(3.dp).background(Wrt.TextTertiary, RoundedCornerShape(2.dp)))
+                            Box(
+                                Modifier
+                                    .fillMaxWidth(if (isLive) ((live!!.flashPct) / 100f).coerceIn(0.02f, 1f) else 0.62f)
+                                    .height(3.dp)
+                                    .background(Wrt.TextTertiary, RoundedCornerShape(2.dp))
+                            )
                         }
-                        Text("38.2 MB free", style = mono(10f, 500, Wrt.TextDim))
+                        Text(
+                            if (isLive) (live!!.flashFree ?: "—") else "38.2 MB free",
+                            style = mono(10f, 500, Wrt.TextDim),
+                        )
                     }
                 })
                 SystemRow(WrtIcons.LiveLogs, "Live logs", "logread -f · streaming", onClick = onOpenLogs)
-                SystemRow(WrtIcons.Clock, "Scheduled tasks", "3 cron jobs", last = true)
+                SystemRow(
+                    WrtIcons.Clock, "Scheduled tasks",
+                    if (isLive) "Coming soon" else "3 cron jobs",
+                    last = true,
+                )
             }
             SectionLabel("ROUTER · APP", tracking = 0.14)
             SystemCard {
-                ValueRow("Hostname · timezone", null, "home.gw · IST")
-                ValueRow("Country / regulatory domain", "Sets which Wi-Fi channels & TX power are legal", "IN · India")
+                ValueRow(
+                    "Hostname · uptime", null,
+                    if (isLive) {
+                        listOfNotNull(
+                            board?.hostname?.ifBlank { null } ?: routerName,
+                            live!!.uptimeLabel.takeIf { it != "—" },
+                        ).joinToString(" · ")
+                    } else "home.gw · IST",
+                )
+                ValueRow(
+                    "Country / regulatory domain",
+                    "Sets which Wi-Fi channels & TX power are legal",
+                    if (isLive) (country?.ifBlank { null } ?: "—") else "IN · India",
+                )
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    Text("Biometric lock", style = sans(13f, 600), modifier = Modifier.weight(1f))
-                    WToggle(biometric) { biometric = !biometric }
+                    Column(Modifier.weight(1f)) {
+                        Text("Biometric lock", style = sans(13f, 600))
+                        if (isLive) {
+                            Text(
+                                "Screen lock gates saved credentials on launch",
+                                style = sans(10.5f, 400, Wrt.TextDim),
+                                modifier = Modifier.padding(top = 2.dp),
+                            )
+                        }
+                    }
+                    val on = biometricEnabled ?: biometricDemo
+                    WToggle(on) {
+                        if (biometricEnabled != null) onBiometricToggle(!on) else biometricDemo = !on
+                    }
                 }
                 Divider()
-                ValueRow("SSH keys", null, "1 installed", last = true)
+                ValueRow(
+                    "SSH keys", null,
+                    when (sshKeyInstalled) {
+                        true -> "1 installed"
+                        false -> "none — using password"
+                        null -> "1 installed"
+                    },
+                    last = true,
+                )
             }
             SectionLabel("DANGER ZONE", color = Wrt.Red, tracking = 0.14)
             Column(

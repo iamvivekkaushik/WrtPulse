@@ -9,6 +9,7 @@ import com.vivekkaushik.wrtpulse.net.RouterSession
 import com.vivekkaushik.wrtpulse.net.SshAuth
 import com.vivekkaushik.wrtpulse.net.SshClient
 import com.vivekkaushik.wrtpulse.net.SshException
+import com.vivekkaushik.wrtpulse.net.SshKeys
 import com.vivekkaushik.wrtpulse.net.SshTarget
 import com.vivekkaushik.wrtpulse.net.WrtRuntime
 import com.vivekkaushik.wrtpulse.db.RouterEntity
@@ -36,6 +37,9 @@ class OnboardingFlow(
     var username by mutableStateOf("root")
     var password by mutableStateOf("")
     var gateway by mutableStateOf<String?>(null)
+
+    /** Set when connecting a saved router that has a stored key, or after installing one. */
+    var keyPem: ByteArray? = null
 
     var busy by mutableStateOf(false)
         private set
@@ -67,7 +71,7 @@ class OnboardingFlow(
             error = "Enter the router's address."
             return
         }
-        if (password.isEmpty()) {
+        if (password.isEmpty() && keyPem == null) {
             error = "Enter the password."
             return
         }
@@ -150,9 +154,15 @@ class OnboardingFlow(
         keyChange = null
     }
 
-    private suspend fun openSession(t: SshTarget) {
+    private fun authProvider(): suspend () -> SshAuth {
+        val pem = if (password.isEmpty()) keyPem else null
+        if (pem != null) return { SshAuth.PrivateKey(pem.copyOf()) }
         val secret = password.toCharArray()
-        val session = RouterSession(t, client, credentials = { SshAuth.Password(secret.copyOf()) })
+        return { SshAuth.Password(secret.copyOf()) }
+    }
+
+    private suspend fun openSession(t: SshTarget) {
+        val session = RouterSession(t, client, credentials = authProvider())
         val live = session.ensureConnected()
         board = Parsers.board(live.exec(Commands.BOARD).requireOk(Commands.BOARD).stdout)
         WrtRuntime.session?.takeIf { it !== session }?.let { old -> runCatching { old.disconnect() } }
@@ -174,10 +184,46 @@ class OnboardingFlow(
                     username = t.username,
                     model = board?.model.orEmpty(),
                     summary = board?.summary.orEmpty(),
-                    credential = WrtRuntime.vault.seal(password.toByteArray()),
+                    credential = if (keyPem == null) WrtRuntime.vault.seal(password.toByteArray()) else null,
+                    privateKey = keyPem?.let { WrtRuntime.vault.seal(it) },
                     lastSeenEpoch = System.currentTimeMillis() / 1000,
                 )
             )
+        }
+    }
+
+    /**
+     * Screen 03's "Install the app's key": generate ed25519 on the phone, append the public
+     * half to dropbear's authorized_keys over the existing session, then PROVE the key works
+     * by opening a fresh key-auth connection before the password is discarded.
+     */
+    fun installAppKey(onDone: (Boolean) -> Unit) {
+        if (busy) return
+        val t = target
+        scope.launch {
+            busy = true
+            error = null
+            try {
+                val live = WrtRuntime.session ?: throw SshException.Disconnected()
+                val generated = SshKeys.generateEd25519()
+                live.exec(Commands.installKey(generated.publicLine), timeoutMs = 10_000)
+                    .requireOk("install authorized key")
+                val keySession = RouterSession(t, client, credentials = {
+                    SshAuth.PrivateKey(generated.privatePem.copyOf())
+                })
+                keySession.ensureConnected()
+                runCatching { live.disconnect() }
+                WrtRuntime.session = keySession
+                keyPem = generated.privatePem
+                password = ""
+                persist(t)
+                onDone(true)
+            } catch (e: SshException) {
+                error = friendly(e)
+                onDone(false)
+            } finally {
+                busy = false
+            }
         }
     }
 
