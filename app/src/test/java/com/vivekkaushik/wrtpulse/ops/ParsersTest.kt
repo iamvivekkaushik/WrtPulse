@@ -65,18 +65,6 @@ class ParsersTest {
         assertTrue(counters.containsKey("lo"))
     }
 
-    @Test
-    fun `wan status gives address and metering device`() {
-        val (address, device) = Parsers.wanStatus(
-            """
-            {"up":true,"pending":false,"available":true,"l3_device":"pppoe-wan","proto":"pppoe",
-             "ipv4-address":[{"address":"82.44.19.7","mask":32}]}
-            """.trimIndent()
-        )
-        assertEquals("82.44.19.7", address)
-        assertEquals("pppoe-wan", device)
-        assertEquals(null to null, Parsers.wanStatus("{}"))
-    }
 
     @Test
     fun `overlay percent read from df`() {

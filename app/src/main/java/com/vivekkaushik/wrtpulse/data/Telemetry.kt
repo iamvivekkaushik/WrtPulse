@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.vivekkaushik.wrtpulse.net.RouterSession
@@ -35,16 +36,29 @@ class Telemetry(private val session: RouterSession) {
     var load5 by mutableFloatStateOf(0f); private set
     var load15 by mutableFloatStateOf(0f); private set
     var uptimeLabel by mutableStateOf("—"); private set
-    var wanIp by mutableStateOf<String?>(null); private set
-    var wanDevice by mutableStateOf<String?>(null); private set
+    /** Every link with a default route, best first — usually one, two on a failover setup. */
+    val upstreams = mutableStateListOf<com.vivekkaushik.wrtpulse.ops.Upstream>()
+
+    /** The one the chart follows: lowest metric, IPv4 preferred. */
+    val upstream: com.vivekkaushik.wrtpulse.ops.Upstream? get() = upstreams.firstOrNull()
+
+    /** device → the rate it is carrying right now, Mbps down/up. */
+    val rates = mutableStateMapOf<String, Pair<Float, Float>>()
+
+    /** device → "↓ 226 MB · ↑ 120 MB" since boot. */
+    val deviceTotals = mutableStateMapOf<String, String>()
+
+    val wanIp: String? get() = upstream?.address
+    val wanDevice: String? get() = upstream?.device
     var totals by mutableStateOf<String?>(null); private set
 
     /** True until the first tick lands, and again whenever a tick fails. */
     var stale by mutableStateOf(true); private set
 
     private var prevCpu: CpuSample? = null
-    private var prevRx = -1L
-    private var prevTx = -1L
+
+    /** device → (rx, tx) at the previous tick. A device with no entry cannot be differenced. */
+    private val prevCounters = mutableMapOf<String, Pair<Long, Long>>()
     private var prevAtNanos = 0L
 
     suspend fun run(tickMs: Long = 1_000L) {
@@ -82,10 +96,14 @@ class Telemetry(private val session: RouterSession) {
                 shift(cpuSpark, cpuPct.toFloat())
             }
         }
-        sections["wan"]?.let { json ->
-            val (address, device) = Parsers.wanStatus(json)
-            wanIp = address ?: wanIp
-            wanDevice = device ?: wanDevice
+        sections["ifaces"]?.let { json ->
+            val essids = Parsers.iwinfoEssids(sections["essid"].orEmpty())
+            // A tick where ubus failed answers '{}'; holding the last known links beats
+            // blinking the card empty for a second.
+            if (json.contains("\"interface\"")) {
+                upstreams.clear()
+                upstreams.addAll(Parsers.upstreams(json, essids))
+            }
         }
         sections["overlay"]?.let { line ->
             flashPct = Parsers.overlayUsedPercent(line)
@@ -93,18 +111,33 @@ class Telemetry(private val session: RouterSession) {
         }
         sections["netdev"]?.let { text ->
             val counters = Parsers.netCounters(text)
-            val wan = wanDevice?.let(counters::get) ?: return@let
-            if (prevRx >= 0) {
-                val dt = (nowNanos - prevAtNanos) / 1e9
-                if (dt > 0.2) {
-                    shift(down, mbps(wan.rxBytes - prevRx, dt))
-                    shift(up, mbps(wan.txBytes - prevTx, dt))
+            // Whether a device can be differenced is decided per device below; all this
+            // needs to know is that enough time passed to divide by.
+            val dt = (nowNanos - prevAtNanos) / 1e9
+            val measurable = dt > 0.2
+            // Counters belong to a device, so they are differenced per device. A link that
+            // has only just appeared — an uplink failing over to Wi-Fi, say — has nothing to
+            // difference against, and seeding it beats reporting the whole of its history as
+            // one second's traffic.
+            upstreams.forEach { link ->
+                val now = counters[link.device] ?: return@forEach
+                val previous = prevCounters[link.device]
+                if (measurable && previous != null) {
+                    val rate = mbps(now.rxBytes - previous.first, dt) to
+                        mbps(now.txBytes - previous.second, dt)
+                    rates[link.device] = rate
+                    if (link == upstreams.first()) {
+                        shift(down, rate.first)
+                        shift(up, rate.second)
+                    }
                 }
+                deviceTotals[link.device] =
+                    "since boot · ↓ ${bytesLabel(now.rxBytes)} · ↑ ${bytesLabel(now.txBytes)}"
             }
-            prevRx = wan.rxBytes
-            prevTx = wan.txBytes
+            prevCounters.clear()
+            counters.forEach { (device, c) -> prevCounters[device] = c.rxBytes to c.txBytes }
             prevAtNanos = nowNanos
-            totals = "since boot · ↓ ${bytesLabel(wan.rxBytes)} · ↑ ${bytesLabel(wan.txBytes)}"
+            totals = upstream?.device?.let(deviceTotals::get)
         }
     }
 

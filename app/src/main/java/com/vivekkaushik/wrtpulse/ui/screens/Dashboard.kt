@@ -1,5 +1,8 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -13,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -23,38 +25,32 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.em
-import com.vivekkaushik.wrtpulse.data.Demo
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.vivekkaushik.wrtpulse.data.Demo
 import com.vivekkaushik.wrtpulse.data.Inventory
+import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.RouterOps
 import com.vivekkaushik.wrtpulse.data.SpeedPhase
 import com.vivekkaushik.wrtpulse.data.SpeedResult
-import com.vivekkaushik.wrtpulse.ops.Commands
-import com.vivekkaushik.wrtpulse.ui.GhostButton
-import com.vivekkaushik.wrtpulse.ui.PrimaryButton
-import kotlinx.coroutines.launch
-import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.Ssid
 import com.vivekkaushik.wrtpulse.data.Telemetry
+import com.vivekkaushik.wrtpulse.ops.Commands
 import com.vivekkaushik.wrtpulse.ui.ConnectionTopBar
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
+import com.vivekkaushik.wrtpulse.ui.GhostButton
 import com.vivekkaushik.wrtpulse.ui.MonoTag
+import com.vivekkaushik.wrtpulse.ui.PrimaryButton
 import com.vivekkaushik.wrtpulse.ui.SectionLabel
 import com.vivekkaushik.wrtpulse.ui.Sparkline
 import com.vivekkaushik.wrtpulse.ui.StatusDot
@@ -64,6 +60,7 @@ import com.vivekkaushik.wrtpulse.ui.WrtIcons
 import com.vivekkaushik.wrtpulse.ui.mono
 import com.vivekkaushik.wrtpulse.ui.sans
 import com.vivekkaushik.wrtpulse.ui.theme.Wrt
+import kotlinx.coroutines.launch
 
 private val cpuSpark = listOf(13f, 11f, 14f, 9f, 12f, 7f, 11f, 5f, 10f, 8f, 12f, 9f)
 private val ramSpark = listOf(10f, 9f, 10f, 8f, 9f, 8f, 7f, 8f, 7f, 8f, 7f, 7f)
@@ -197,8 +194,15 @@ private fun WanCard(ticker: LiveTicker, live: Telemetry?) {
             .background(Wrt.BgCard, RoundedCornerShape(13.dp))
             .padding(start = 13.dp, end = 13.dp, top = 12.dp, bottom = 10.dp)
     ) {
+        val up = live?.upstream
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SectionLabel("WAN · ${(live?.wanDevice ?: "pppoe-wan").uppercase()}", size = 9.5f)
+            // Named after whatever holds the default route, not a fixed "wan" — a router
+            // upstreamed through a Wi-Fi client has neither the name nor the device.
+            SectionLabel(
+                "UPSTREAM · ${(up?.name ?: if (live != null) "—" else "wan").uppercase()}",
+                size = 9.5f,
+            )
+            if (up?.wireless == true) MonoTag("CLIENT", color = Wrt.Blue, border = Wrt.Blue.copy(alpha = 0.5f))
             FlexSpacer()
             val isStale = live?.stale == true
             StatusDot(if (isStale) Wrt.Amber else Wrt.Accent, 5.dp, pulse = !isStale)
@@ -213,7 +217,7 @@ private fun WanCard(ticker: LiveTicker, live: Telemetry?) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(live?.wanIp ?: (if (live != null) "—" else "82.44.19.7"), style = mono(16f, 600))
-            Icon(WrtIcons.Copy, "copy WAN IP", Modifier.size(14.dp), tint = Wrt.TextDim)
+            Icon(WrtIcons.Copy, "copy upstream IP", Modifier.size(14.dp), tint = Wrt.TextDim)
             FlexSpacer()
             Text("↓ ${String.format("%.1f", (live?.down ?: ticker.down).last())}", style = mono(12.5f, 600, Wrt.Accent))
             Text("↑ ${String.format("%.1f", (live?.up ?: ticker.up).last())}", style = mono(12.5f, 600, Wrt.Blue))
@@ -227,6 +231,22 @@ private fun WanCard(ticker: LiveTicker, live: Telemetry?) {
             up = chartUp,
             modifier = Modifier.fillMaxWidth().height(88.dp).padding(top = 6.dp),
         )
+        // What the upstream actually is, under the numbers it produces.
+        up?.let { u ->
+            // The metric only explains anything when the links disagree about it.
+            val several = live?.upstreams.orEmpty().map { it.metric }.distinct().size > 1
+            Text(
+                listOfNotNull(
+                    u.ssid?.let { "via $it" },
+                    u.device.ifBlank { null },
+                    u.proto.ifBlank { null },
+                    // Only worth showing when there is another link to compare it against.
+                    if (several) "metric ${u.metric}" else null,
+                ).joinToString(" · "),
+                style = mono(10f, 500, if (u.wireless) Wrt.Blue else Wrt.TextDim),
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
         Row(Modifier.padding(top = 6.dp)) {
             Text("60 s window", style = mono(10f, 500, Wrt.TextDim))
             FlexSpacer()
@@ -235,6 +255,63 @@ private fun WanCard(ticker: LiveTicker, live: Telemetry?) {
                 style = mono(10f, 500, Wrt.TextDim),
             )
         }
+        // A second link with its own default route is a real thing on a failover setup, and
+        // the chart can only follow one of them. The rest get a line each.
+        val others = live?.upstreams?.drop(1).orEmpty()
+        if (others.isNotEmpty()) {
+            Box(Modifier.fillMaxWidth().padding(top = 10.dp).height(1.dp).background(Wrt.BorderHair))
+            Text(
+                "ALSO UP",
+                style = mono(9f, 600, Wrt.TextDim, letterSpacing = 0.14.em),
+                modifier = Modifier.padding(top = 9.dp),
+            )
+            val ranked = live?.upstreams.orEmpty().map { it.metric }.distinct().size > 1
+            others.forEach { link -> OtherUpstreamRow(link, live?.rates?.get(link.device), ranked) }
+        }
+    }
+}
+
+/** One extra upstream: what it is, where it goes, and what it is carrying. */
+@Composable
+private fun OtherUpstreamRow(
+    link: com.vivekkaushik.wrtpulse.ops.Upstream,
+    rate: Pair<Float, Float>?,
+    showMetric: Boolean,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                Text(link.name.uppercase(), style = mono(11f, 600))
+                if (link.wireless) {
+                    MonoTag("CLIENT", color = Wrt.Blue, border = Wrt.Blue.copy(alpha = 0.5f), size = 8.5f)
+                }
+                if (!link.hasV4) MonoTag("IPv6", size = 8.5f)
+            }
+            Text(
+                listOfNotNull(
+                    link.ssid?.let { "via $it" } ?: link.address,
+                    link.device.ifBlank { null },
+                    if (showMetric) "metric ${link.metric}" else null,
+                ).joinToString(" · "),
+                style = mono(9.5f, 500, Wrt.TextDim),
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                softWrap = false,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+        Text(
+            "↓ ${String.format("%.1f", rate?.first ?: 0f)}",
+            style = mono(11f, 600, Wrt.Accent.copy(alpha = 0.75f)),
+        )
+        Text(
+            "↑ ${String.format("%.1f", rate?.second ?: 0f)}",
+            style = mono(11f, 600, Wrt.Blue.copy(alpha = 0.75f)),
+        )
     }
 }
 

@@ -20,12 +20,31 @@ object Commands {
         "echo $SECTION stat" to "grep '^cpu ' /proc/stat",
         "echo $SECTION netdev" to "cat /proc/net/dev",
         "echo $SECTION overlay" to "df -k /overlay | tail -n1",
-        "echo $SECTION wan" to "ubus call network.interface.wan status 2>/dev/null || " +
-            "ubus call network.interface.wan6 status 2>/dev/null || echo '{}'",
+        // Every interface, so the upstream can be found by which one holds the default
+        // route rather than by assuming it is called "wan".
+        "echo $SECTION ifaces" to "ubus call network.interface dump 2>/dev/null || echo '{}'",
+        "echo $SECTION essid" to "iwinfo 2>/dev/null | grep ESSID || true",
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
     /** Wireless config as UCI key=value lines. */
     const val WIRELESS_CONFIG = "uci show wireless"
+
+    /** Network config, read alongside it so a new uplink can be given an unused name. */
+    const val NETWORK_CONFIG = "uci show network"
+
+    /** Firewall config — which zone each network sits in, for the interface list. */
+    const val FIREWALL_CONFIG = "uci show firewall"
+
+    /** Every wireless interface that is actually up: mode, channel, and a station's signal. */
+    const val IWINFO = "iwinfo 2>/dev/null"
+
+    /** Associated stations per interface, so each SSID can report how many clients it has. */
+    const val ASSOC_COUNTS =
+        "for i in \$(iwinfo 2>/dev/null | grep ESSID | cut -d' ' -f1); do " +
+        "echo \"# \$i\"; iwinfo \$i assoclist 2>/dev/null; done"
+
+    /** The raw uci lines behind one wifi-iface — what a long-press reveals. */
+    fun showSection(section: String) = "uci show wireless.$section 2>/dev/null"
 
     /** Everything needed to build the client list, in one round trip. */
     val CLIENTS = listOf(
@@ -150,12 +169,45 @@ object Commands {
      * is committed. Reload happens only after a successful commit.
      */
     fun uciBatch(operations: List<String>, commitPackage: String, reload: String): String =
+        uciBatch(operations, listOf(commitPackage), reload)
+
+    /**
+     * The same, across more than one config file — joining an upstream network touches
+     * `wireless` and `network` together, and half of that landing would leave a station
+     * with nowhere to get an address.
+     */
+    fun uciBatch(operations: List<String>, commitPackages: List<String>, reload: String): String =
         buildString {
             append("uci batch <<'WRTPULSE_EOF'\n")
             operations.forEach { append(it).append('\n') }
             append("WRTPULSE_EOF\n")
-            append("uci commit $commitPackage && $reload")
+            append(commitPackages.joinToString(" && ") { "uci commit $it" })
+            append(" && ").append(reload)
         }
+
+    /** The uci network a router-as-client interface is bridged to. */
+    const val WWAN = "wwan"
+
+    /**
+     * Puts the upstream client interface in the WAN firewall zone. Without this the station
+     * associates and gets an address, but nothing behind the router is masqueraded onto it —
+     * the router joins the network and the LAN still has no way out.
+     *
+     * The zone is found by walking `@zone[i]` and matching its name, because the wan zone is
+     * an anonymous section in every stock config, and matching `name='wan'` textually would
+     * also hit a firewall rule that happens to be called wan.
+     */
+    fun attachToWanZone(network: String): String = attachToZone(network, "wan")
+
+    /** The same for any named zone — a guest AP belongs somewhere other than wan. */
+    fun attachToZone(network: String, zone: String): String =
+        "i=0; z=''; " +
+        "while uci -q get firewall.@zone[\$i] >/dev/null 2>&1; do " +
+        "[ \"\$(uci -q get firewall.@zone[\$i].name)\" = '$zone' ] && { z=\"@zone[\$i]\"; break; }; " +
+        "i=\$((i+1)); done; " +
+        "[ -n \"\$z\" ] && { uci -q del_list firewall.\$z.network='$network'; " +
+        "uci add_list firewall.\$z.network='$network'; uci commit firewall; " +
+        "/etc/init.d/firewall reload >/dev/null 2>&1; }; :"
 
     /**
      * Appends the app's public key to dropbear's authorized_keys, idempotently.

@@ -23,8 +23,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -34,7 +32,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vivekkaushik.wrtpulse.data.Demo
@@ -198,7 +195,8 @@ fun DiffSheetContent(
     onApply: () -> Unit,
     onRevertAll: () -> Unit,
 ) {
-    val opsCount = store?.pendingCount ?: 3
+    val opsCount = store?.opCount ?: 3
+    val changeCount = store?.pendingCount ?: 3
     Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 22.dp)) {
         Row(Modifier.padding(top = 14.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Review changes", style = sans(16f, 650))
@@ -223,6 +221,19 @@ fun DiffSheetContent(
                 store.diffLines().forEach { (line, added) ->
                     DiffLine(line, if (added) Wrt.Green else Wrt.Red)
                 }
+                // Joining an upstream network reaches past wireless — show that too.
+                val netOps = store.networkOps()
+                if (netOps.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    DiffLine("# network", Wrt.TextDim)
+                    netOps.forEach { DiffLine("+ ${it.removePrefix("set ")}", Wrt.Green) }
+                }
+                val fw = store.firewallLines()
+                if (fw.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    DiffLine("# firewall", Wrt.TextDim)
+                    fw.forEach { DiffLine(it, Wrt.Green) }
+                }
             } else {
                 DiffLine("- radio0.channel='6'", Wrt.Red)
                 DiffLine("+ radio0.channel='11'", Wrt.Green)
@@ -231,7 +242,7 @@ fun DiffSheetContent(
                 DiffLine("+ @wifi-iface[2].disabled='0'", Wrt.Green)
             }
             Spacer(Modifier.height(8.dp))
-            DiffLine("$ uci commit wireless && wifi reload", Wrt.TextDim)
+            DiffLine(store?.commitLine() ?: "$ uci commit wireless && wifi reload", Wrt.TextDim)
         }
         Row(
             Modifier
@@ -251,6 +262,22 @@ fun DiffSheetContent(
                 style = sans(12f, 400, Wrt.AmberText, lineHeight = 18.sp),
             )
         }
+        // A change the router would reject must not reach the Apply button.
+        val problems = store?.problems().orEmpty()
+        problems.forEach { problem ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp)
+                    .border(1.dp, Wrt.Red.copy(alpha = 0.4f), RoundedCornerShape(11.dp))
+                    .background(Wrt.Red.copy(alpha = 0.06f), RoundedCornerShape(11.dp))
+                    .padding(horizontal = 13.dp, vertical = 11.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(WrtIcons.Warning, null, Modifier.padding(top = 1.dp).size(16.dp), tint = Wrt.Red)
+                Text(problem, style = sans(12f, 500, Wrt.Red, lineHeight = 18.sp))
+            }
+        }
         if (store?.error != null) {
             Text(
                 store.error!!,
@@ -259,14 +286,25 @@ fun DiffSheetContent(
             )
         }
         Spacer(Modifier.height(14.dp))
-        PrimaryButton(
-            when {
-                store?.applying == true -> "Applying…"
-                opsCount == 1 -> "Apply 1 change"
-                else -> "Apply $opsCount changes"
-            },
-            onClick = onApply,
-        )
+        val label = when {
+            store?.applying == true -> "Applying…"
+            changeCount == 1 -> "Apply 1 change"
+            else -> "Apply $changeCount changes"
+        }
+        if (problems.isEmpty()) {
+            PrimaryButton(label, onClick = onApply)
+        } else {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(46.dp)
+                    .background(Wrt.BgDeep, RoundedCornerShape(11.dp))
+                    .border(1.dp, Wrt.BorderInput, RoundedCornerShape(11.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(label, style = sans(13.5f, 650, Wrt.TextDim))
+            }
+        }
         Box(
             Modifier
                 .fillMaxWidth()

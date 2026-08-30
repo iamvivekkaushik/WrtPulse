@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -80,8 +79,14 @@ fun mono(
 
 /** Mono section label, e.g. "HOST" / "MAINTENANCE". */
 @Composable
-fun SectionLabel(text: String, color: Color = Wrt.TextDim, size: Float = 10f, tracking: Double = 0.12) {
-    Text(text, style = mono(size, 600, color, letterSpacing = tracking.em))
+fun SectionLabel(
+    text: String,
+    color: Color = Wrt.TextDim,
+    size: Float = 10f,
+    tracking: Double = 0.12,
+    modifier: Modifier = Modifier,
+) {
+    Text(text, style = mono(size, 600, color, letterSpacing = tracking.em), modifier = modifier)
 }
 
 // ---------- surfaces ----------

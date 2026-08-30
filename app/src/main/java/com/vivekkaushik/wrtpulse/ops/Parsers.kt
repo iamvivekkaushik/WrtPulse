@@ -52,6 +52,27 @@ data class CpuSample(val idle: Long, val total: Long) {
     }
 }
 
+/**
+ * Whatever the router is actually reaching the internet through right now — the interface
+ * holding the default route, wired or wireless.
+ */
+data class Upstream(
+    /** The uci interface: "wan", "wwan", … */
+    val name: String,
+    /** The netdev its counters live under: "eth1", "phy0-sta0", … */
+    val device: String,
+    val address: String?,
+    val proto: String,
+    /** Set when the upstream is a wireless client, so the card can name the network joined. */
+    val ssid: String? = null,
+    /** Route metric: with more than one default route, the lowest is the one Linux uses. */
+    val metric: Int = 0,
+    /** False for an interface whose only default route is IPv6. */
+    val hasV4: Boolean = true,
+) {
+    val wireless: Boolean get() = ssid != null
+}
+
 /** Cumulative byte counters for one interface. */
 data class NetCounters(val iface: String, val rxBytes: Long, val txBytes: Long)
 
@@ -66,6 +87,7 @@ data class WifiIface(
     val ssid: String,
     val band: String,     // "2.4G", "5G", "6G"
     val up: Boolean,
+    val mode: String = "ap",
 )
 
 /** One `wifi-device` section from `uci show wireless`. */
@@ -78,7 +100,7 @@ data class WifiRadio(
     val country: String = "",  // regulatory domain, e.g. "IN"
 )
 
-/** One AP `wifi-iface` section from `uci show wireless`. */
+/** One `wifi-iface` section from `uci show wireless` — an AP we serve or a network we join. */
 data class WifiNetwork(
     val section: String,       // "default_radio0" or "@wifi-iface[0]"
     val device: String,        // "radio0"
@@ -86,7 +108,13 @@ data class WifiNetwork(
     val encryption: String,    // raw uci value: "psk2", "sae", "none", ...
     val key: String,
     val disabled: Boolean,
-)
+    val mode: String = "ap",   // "ap" broadcasts, "sta" joins someone else's network
+    val network: String = "",  // the uci network it is bridged to: "lan", "wwan", ...
+    val hidden: Boolean = false,
+    val isolate: Boolean = false,
+) {
+    val isClient: Boolean get() = mode == "sta"
+}
 
 /** Cumulative per-host byte counters from `nlbw -c json`, client's perspective. */
 data class NlbwHost(
@@ -115,7 +143,41 @@ data class InstallPlan(
 }
 
 /** One neighbouring AP from `iwinfo <iface> scan`. */
-data class ScanCell(val channel: Int, val signalDbm: Int, val ssid: String)
+data class ScanCell(
+    val channel: Int,
+    val signalDbm: Int,
+    val ssid: String,
+    val bssid: String = "",
+    /** Already in the form the UI shows: "WPA2", "WPA3", "OPEN". */
+    val encryption: String = "",
+) {
+    /** iwinfo reports a hidden network's name literally as "unknown". */
+    val named: Boolean get() = ssid.isNotBlank() && ssid != "unknown"
+
+    /** Four-bar scale: -55 dBm and better is full, -85 and worse is one. */
+    val bars: Int get() = when {
+        signalDbm >= -55 -> 4
+        signalDbm >= -68 -> 3
+        signalDbm >= -78 -> 2
+        else -> 1
+    }
+}
+
+/** One interface as `iwinfo` (no arguments) describes it — AP or station alike. */
+data class IwinfoIface(
+    val ifname: String,
+    val essid: String,
+    val bssid: String,
+    val mode: String,        // "Master" for an AP, "Client" for a station
+    val channel: Int?,
+    val signalDbm: Int?,     // stations report this; APs usually say "unknown"
+    val encryption: String,
+) {
+    val isClient: Boolean get() = mode.equals("Client", true)
+}
+
+/** One `zone` section of /etc/config/firewall. */
+data class FirewallZone(val section: String, val name: String, val networks: List<String>)
 
 /** One `logread -f` line, split for the log screen. */
 data class LogEntry(
@@ -209,13 +271,76 @@ object Parsers {
             }
             .toMap()
 
-    /** WAN interface status from ubus: address plus the L3 device to meter. */
-    fun wanStatus(json: String): Pair<String?, String?> {
-        val o = runCatching { JSONObject(json) }.getOrNull() ?: return null to null
-        val address = o.optJSONArray("ipv4-address")?.optJSONObject(0)?.optString("address")
-        val device = o.optString("l3_device").ifBlank { o.optString("device") }.ifBlank { null }
-        return address?.ifBlank { null } to device
+    /**
+     * `ubus call network.interface dump` → the interface carrying the default route.
+     *
+     * Asking for `network.interface.wan` was the old approach and it only ever answered for
+     * a wired uplink; a router reaching the internet through a Wi-Fi client has its default
+     * route on a completely different interface. The route table is the only honest source.
+     */
+    fun upstream(dumpJson: String, essids: Map<String, String> = emptyMap()): Upstream? =
+        upstreams(dumpJson, essids).firstOrNull()
+
+    /**
+     * Every interface that could carry traffic out, best first.
+     *
+     * Grouped by device on purpose: `wan` and `wan6` are the same cable with a v4 and a v6
+     * default route on it, and listing them as two upstreams would invent a redundancy the
+     * router does not have. Two entries here means two actual links.
+     */
+    fun upstreams(dumpJson: String, essids: Map<String, String> = emptyMap()): List<Upstream> {
+        val root = runCatching { JSONObject(dumpJson) }.getOrNull() ?: return emptyList()
+        val list = root.optJSONArray("interface") ?: return emptyList()
+        val byDevice = linkedMapOf<String, Upstream>()
+        for (i in 0 until list.length()) {
+            val o = list.optJSONObject(i) ?: continue
+            if (!o.optBoolean("up")) continue
+            val routes = o.optJSONArray("route") ?: continue
+            var v4 = false
+            var anyDefault = false
+            for (r in 0 until routes.length()) {
+                val route = routes.optJSONObject(r) ?: continue
+                if (route.optInt("mask", -1) != 0) continue
+                when (route.optString("target")) {
+                    "0.0.0.0" -> { v4 = true; anyDefault = true }
+                    "::" -> anyDefault = true
+                }
+            }
+            if (!anyDefault) continue
+            val device = o.optString("l3_device").ifBlank { o.optString("device") }
+            if (device.isBlank()) continue
+            val candidate = Upstream(
+                name = o.optString("interface"),
+                device = device,
+                address = o.optJSONArray("ipv4-address")?.optJSONObject(0)
+                    ?.optString("address")?.ifBlank { null },
+                proto = o.optString("proto"),
+                ssid = essids[device],
+                metric = o.optInt("metric", 0),
+                hasV4 = v4,
+            )
+            val held = byDevice[device]
+            // One entry per link: the v4 side of a dual-stack pair is the one worth naming,
+            // since it is the one with an address the card can show.
+            if (held == null || (!held.hasV4 && v4)) byDevice[device] = candidate
+        }
+        // Lowest metric wins in the kernel, so that is the order to present them in.
+        return byDevice.values.sortedWith(compareBy({ !it.hasV4 }, { it.metric }))
     }
+
+    /**
+     * The ESSID line of bare `iwinfo`, per interface. One grep-able line each, which is all
+     * the dashboard needs to say which network an upstream client is joined to.
+     */
+    fun iwinfoEssids(text: String): Map<String, String> = text.lineSequence()
+        .mapNotNull { line ->
+            if (!line.contains("ESSID:")) return@mapNotNull null
+            val ifname = line.substringBefore("ESSID:").trim()
+            val essid = line.substringAfter("ESSID:").trim().removeSurrounding("\"")
+            if (ifname.isEmpty() || essid.isEmpty() || essid.equals("unknown", true)) null
+            else ifname to essid
+        }
+        .toMap()
 
     /** `df -k /overlay | tail -n1` → available kilobytes, null if the line doesn't parse. */
     fun overlayAvailKb(dfLine: String): Long? {
@@ -260,7 +385,9 @@ object Parsers {
                 val o = ifaces.optJSONObject(i) ?: continue
                 val cfg = o.optJSONObject("config")
                 val ssid = cfg?.optString("ssid").orEmpty()
-                if (ssid.isEmpty() || cfg?.optString("mode", "ap") != "ap") continue
+                val mode = cfg?.optString("mode", "ap").orEmpty().ifEmpty { "ap" }
+                // sta belongs here too: an uplink needs its ifname to report signal.
+                if (ssid.isEmpty() || (mode != "ap" && mode != "sta")) continue
                 result += WifiIface(
                     radio = radio,
                     section = o.optString("section"),
@@ -268,6 +395,7 @@ object Parsers {
                     ssid = ssid,
                     band = band,
                     up = up && o.optString("ifname").isNotEmpty(),
+                    mode = mode,
                 )
             }
         }
@@ -305,24 +433,32 @@ object Parsers {
      *             ESSID: "neighbor"
      *             Mode: Master  Channel: 6
      *             Signal: -72 dBm  Quality: 38/70
+     *             Encryption: WPA2 PSK (CCMP)
      */
     fun scanCells(text: String): List<ScanCell> {
         val cells = mutableListOf<ScanCell>()
         var ssid = ""
+        var bssid = ""
+        var encryption = ""
         var channel: Int? = null
         var signal: Int? = null
         fun flush() {
             val ch = channel
             val sig = signal
-            if (ch != null && sig != null) cells += ScanCell(ch, sig, ssid)
-            ssid = ""; channel = null; signal = null
+            if (ch != null && sig != null) cells += ScanCell(ch, sig, ssid, bssid, encryption)
+            ssid = ""; bssid = ""; encryption = ""; channel = null; signal = null
         }
         text.lineSequence().forEach { raw ->
             val line = raw.trim()
             when {
-                line.startsWith("Cell ") -> flush()
+                line.startsWith("Cell ") -> {
+                    flush()
+                    bssid = MAC_ANY.find(line)?.value?.uppercase().orEmpty()
+                }
                 line.startsWith("ESSID:") ->
                     ssid = line.removePrefix("ESSID:").trim().removeSurrounding("\"")
+                line.startsWith("Encryption:") ->
+                    encryption = securityLabel(line.removePrefix("Encryption:").trim())
                 else -> {
                     Regex("Channel: (\\d+)").find(line)?.let { channel = it.groupValues[1].toInt() }
                     Regex("Signal: (-?\\d+) dBm").find(line)?.let { signal = it.groupValues[1].toInt() }
@@ -331,6 +467,84 @@ object Parsers {
         }
         flush()
         return cells
+    }
+
+    /**
+     * iwinfo's free-text encryption line ("WPA2 PSK (CCMP)", "mixed WPA/WPA2 PSK", "none")
+     * reduced to the tag the scan list shows.
+     */
+    fun securityLabel(raw: String): String = when {
+        raw.isBlank() || raw.equals("none", true) || raw.startsWith("unknown", true) -> "OPEN"
+        raw.contains("WPA3", true) || raw.contains("SAE", true) -> "WPA3"
+        raw.contains("WPA2", true) -> "WPA2"
+        raw.contains("WEP", true) -> "WEP"
+        raw.contains("WPA", true) -> "WPA"
+        else -> raw.take(8).uppercase()
+    }
+
+    /**
+     * Bare `iwinfo` — every wireless interface the router has up, one block each. This is
+     * the only place a station's own signal is reported, so it is what tells the interface
+     * list how well an uplink is actually doing.
+     */
+    fun iwinfo(text: String): List<IwinfoIface> {
+        val result = mutableListOf<IwinfoIface>()
+        var ifname = ""
+        var essid = ""
+        var bssid = ""
+        var mode = ""
+        var channel: Int? = null
+        var signal: Int? = null
+        var encryption = ""
+        fun flush() {
+            if (ifname.isNotEmpty()) {
+                result += IwinfoIface(ifname, essid, bssid, mode, channel, signal, encryption)
+            }
+            ifname = ""; essid = ""; bssid = ""; mode = ""; channel = null; signal = null; encryption = ""
+        }
+        text.lineSequence().forEach { raw ->
+            // A block starts at column 0 with "<ifname>  ESSID: ..."; the rest is indented.
+            if (raw.isNotEmpty() && !raw[0].isWhitespace() && raw.contains("ESSID:")) {
+                flush()
+                ifname = raw.substringBefore("ESSID:").trim()
+                essid = raw.substringAfter("ESSID:").trim().removeSurrounding("\"")
+                if (essid.equals("unknown", true)) essid = ""
+                return@forEach
+            }
+            val line = raw.trim()
+            when {
+                line.startsWith("Access Point:") ->
+                    bssid = MAC_ANY.find(line)?.value?.uppercase().orEmpty()
+                line.startsWith("Encryption:") ->
+                    encryption = line.removePrefix("Encryption:").trim()
+                else -> {
+                    Regex("Mode: (\\w+)").find(line)?.let { mode = it.groupValues[1] }
+                    Regex("Channel: (\\d+)").find(line)?.let { channel = it.groupValues[1].toInt() }
+                    Regex("Signal: (-?\\d+) dBm").find(line)?.let { signal = it.groupValues[1].toInt() }
+                }
+            }
+        }
+        flush()
+        return result
+    }
+
+    /**
+     * `uci show firewall` → the zones and the networks each covers. The interface list uses
+     * it to say which zone an SSID actually lands in, which is the thing that decides
+     * whether guests can reach the LAN.
+     */
+    fun firewallZones(uci: Map<String, String>): List<FirewallZone> {
+        val zones = mutableListOf<FirewallZone>()
+        uci.forEach { (key, value) ->
+            if (value != "zone" || key.count { it == '.' } != 1) return@forEach
+            val section = key.substringAfter('.')
+            val name = uci["firewall.$section.name"].orEmpty()
+            // uci show renders a list as one space-separated value.
+            val networks = uci["firewall.$section.network"].orEmpty()
+                .split(' ', '\n').map { it.trim() }.filter { it.isNotEmpty() }
+            zones += FirewallZone(section, name, networks)
+        }
+        return zones
     }
 
     /**
@@ -428,7 +642,13 @@ object Parsers {
     fun blockedMacs(text: String): Set<String> =
         BLOCKED_MAC.findAll(text).map { it.groupValues[1].lowercase() }.toSet()
 
-    /** `uci show wireless` → structured radios and AP networks. */
+    /** `uci show network` → the interface section names already in use. */
+    fun networkInterfaces(uci: Map<String, String>): Set<String> = uci.entries
+        .filter { (key, value) -> value == "interface" && key.startsWith("network.") && key.count { it == '.' } == 1 }
+        .map { it.key.removePrefix("network.") }
+        .toSet()
+
+    /** `uci show wireless` → structured radios and their wifi-iface sections. */
     fun wireless(uci: Map<String, String>): Pair<List<WifiRadio>, List<WifiNetwork>> {
         val radios = mutableListOf<WifiRadio>()
         val networks = mutableListOf<WifiNetwork>()
@@ -445,14 +665,21 @@ object Parsers {
                     disabled = opt(section, "disabled") == "1",
                     country = opt(section, "country").orEmpty(),
                 )
-                "wifi-iface" -> if ((opt(section, "mode") ?: "ap") == "ap") networks += WifiNetwork(
-                    section = section,
-                    device = opt(section, "device").orEmpty(),
-                    ssid = opt(section, "ssid").orEmpty(),
-                    encryption = opt(section, "encryption").orEmpty().ifEmpty { "none" },
-                    key = opt(section, "key").orEmpty(),
-                    disabled = opt(section, "disabled") == "1",
-                )
+                // ap and sta only: mesh/adhoc/monitor have no SSID card to draw.
+                "wifi-iface" -> (opt(section, "mode") ?: "ap").let { mode ->
+                    if (mode == "ap" || mode == "sta") networks += WifiNetwork(
+                        section = section,
+                        device = opt(section, "device").orEmpty(),
+                        ssid = opt(section, "ssid").orEmpty(),
+                        encryption = opt(section, "encryption").orEmpty().ifEmpty { "none" },
+                        key = opt(section, "key").orEmpty(),
+                        disabled = opt(section, "disabled") == "1",
+                        mode = mode,
+                        network = opt(section, "network").orEmpty(),
+                        hidden = opt(section, "hidden") == "1",
+                        isolate = opt(section, "isolate") == "1",
+                    )
+                }
             }
         }
         return radios to networks
@@ -546,6 +773,9 @@ object Parsers {
         Regex("([\\d.]+)\\s*MBit/s").find(line)?.groupValues?.get(1)?.toDoubleOrNull() ?: 0.0
 
     private val MAC_HEAD = Regex("^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
+
+    /** The same, anywhere in the line — iwinfo prints the BSSID after a label. */
+    private val MAC_ANY = Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
 
     /**
      * `uci show wireless` → flat key/value map, quotes stripped.

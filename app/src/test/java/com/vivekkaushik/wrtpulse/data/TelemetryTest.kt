@@ -7,6 +7,7 @@ import com.vivekkaushik.wrtpulse.net.SshConnection
 import com.vivekkaushik.wrtpulse.net.SshTarget
 import com.vivekkaushik.wrtpulse.ops.Parsers
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TelemetryTest {
@@ -32,8 +33,15 @@ class TelemetryTest {
         br-lan: 999 9 0 0 0 0 0 0 999 9 0 0 0 0 0 0
         ___wrt___ overlay
         /dev/loop0 104857600 35651584 69206016 34% /overlay
-        ___wrt___ wan
-        {"ipv4-address": [{"address": "82.44.19.7", "mask": 24}], "l3_device": "eth0"}
+        ___wrt___ ifaces
+        {"interface": [
+          {"interface": "lan", "up": true, "l3_device": "br-lan", "proto": "static",
+           "ipv4-address": [{"address": "192.168.1.1", "mask": 24}], "route": []},
+          {"interface": "wan", "up": true, "l3_device": "eth0", "proto": "dhcp",
+           "ipv4-address": [{"address": "82.44.19.7", "mask": 24}],
+           "route": [{"target": "0.0.0.0", "mask": 0, "nexthop": "82.44.19.1"}]}
+        ]}
+        ___wrt___ essid
     """.trimIndent()
 
     @Test
@@ -87,5 +95,94 @@ class TelemetryTest {
         assertEquals(100f, down.last(), 0.001f)
         assertEquals(50f, up.last(), 0.001f)
         assertEquals(25f, down[1], 0.001f)
+    }
+
+    /** The same tick shape after the default route has moved to a Wi-Fi client. */
+    private fun movedUpstream(rxBytes: Long, txBytes: Long) = """
+        ___wrt___ info
+        {"uptime": 1566725, "load": [27520, 24896, 22336], "memory": {"total": 1024000000, "free": 256000000, "buffered": 128000000, "cached": 128000000}}
+        ___wrt___ stat
+        cpu  1100 0 0 1100 0 0 0 0
+        ___wrt___ netdev
+        Inter-|   Receive                                                |  Transmit
+         face |bytes    packets errs drop fifo frame compressed multicast|bytes      packets errs drop fifo colls carrier compressed
+        eth0: 9000000000 100 0 0 0 0 0 0 9000000000 50 0 0 0 0 0 0
+        phy0-sta0: $rxBytes 10 0 0 0 0 0 0 $txBytes 5 0 0 0 0 0 0
+        ___wrt___ overlay
+        /dev/loop0 104857600 35651584 69206016 34% /overlay
+        ___wrt___ ifaces
+        {"interface": [
+          {"interface": "wan", "up": false, "l3_device": "eth0", "proto": "dhcp", "route": []},
+          {"interface": "wwan", "up": true, "l3_device": "phy0-sta0", "proto": "dhcp",
+           "ipv4-address": [{"address": "192.168.29.51", "mask": 24}],
+           "route": [{"target": "0.0.0.0", "mask": 0}]}
+        ]}
+        ___wrt___ essid
+        phy0-sta0 ESSID: "VivekWifi"
+    """.trimIndent()
+
+    /**
+     * Byte counters belong to a device. When the upstream moves — a wired WAN dropping and a
+     * Wi-Fi client taking over — differencing the new device's totals against the old one's
+     * would report a fictitious multi-gigabit spike.
+     */
+    @Test
+    fun `a change of upstream device does not spike the throughput chart`() {
+        val t = telemetry()
+        t.ingest(Parsers.sections(tickOutput(1000, 1000, rxBytes = 9_000_000_000L, txBytes = 9_000_000_000L)), 0L)
+        assertEquals("eth0", t.wanDevice)
+
+        t.ingest(Parsers.sections(movedUpstream(rxBytes = 1_000, txBytes = 500)), 1_000_000_000L)
+        assertEquals("phy0-sta0", t.wanDevice)
+        assertEquals("wwan", t.upstream?.name)
+        assertEquals("VivekWifi", t.upstream?.ssid)
+        // No delta is drawn across the switch; that tick only seeds the new device.
+        assertEquals(0f, t.down.last(), 0.001f)
+        assertEquals(0f, t.up.last(), 0.001f)
+
+        // The tick after it measures the new interface normally.
+        t.ingest(Parsers.sections(movedUpstream(rxBytes = 1_250_000, txBytes = 500)), 2_000_000_000L)
+        assertEquals(10f, t.down.last(), 0.1f)   // 1.249 MB in 1 s ≈ 10 Mbps
+    }
+
+    /** Two live links: each is measured on its own counters, and only one drives the chart. */
+    @Test
+    fun `both upstreams get their own rate`() {
+        val t = telemetry()
+        fun tick(wanRx: Long, staRx: Long) = """
+            ___wrt___ info
+            {"uptime": 1, "load": [0,0,0], "memory": {"total": 100, "free": 50, "buffered": 0, "cached": 0}}
+            ___wrt___ stat
+            cpu  1000 0 0 1000 0 0 0 0
+            ___wrt___ netdev
+            Inter-|   Receive                                                |  Transmit
+             face |bytes    packets errs drop fifo frame compressed multicast|bytes      packets errs drop fifo colls carrier compressed
+            eth1: $wanRx 100 0 0 0 0 0 0 0 50 0 0 0 0 0 0
+            phy0-sta0: $staRx 10 0 0 0 0 0 0 0 5 0 0 0 0 0 0
+            ___wrt___ overlay
+            /dev/loop0 104857600 35651584 69206016 34% /overlay
+            ___wrt___ ifaces
+            {"interface": [
+              {"interface": "wan", "up": true, "l3_device": "eth1", "proto": "dhcp", "metric": 10,
+               "ipv4-address": [{"address": "10.0.0.2", "mask": 24}],
+               "route": [{"target": "0.0.0.0", "mask": 0}]},
+              {"interface": "wwan_2", "up": true, "l3_device": "phy0-sta0", "proto": "dhcp", "metric": 30,
+               "ipv4-address": [{"address": "192.168.1.126", "mask": 24}],
+               "route": [{"target": "0.0.0.0", "mask": 0}]}
+            ]}
+            ___wrt___ essid
+            phy0-sta0 ESSID: "Airtel"
+        """.trimIndent()
+
+        t.ingest(Parsers.sections(tick(0, 0)), 0L)
+        assertEquals(2, t.upstreams.size)
+        t.ingest(Parsers.sections(tick(1_250_000, 625_000)), 1_000_000_000L)
+
+        assertEquals(10f, t.rates["eth1"]!!.first, 0.1f)
+        assertEquals(5f, t.rates["phy0-sta0"]!!.first, 0.1f)
+        // The chart follows the lowest-metric link, not the busiest or the last seen.
+        assertEquals("eth1", t.wanDevice)
+        assertEquals(10f, t.down.last(), 0.1f)
+        assertTrue(t.deviceTotals["phy0-sta0"]!!.startsWith("since boot"))
     }
 }

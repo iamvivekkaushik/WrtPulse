@@ -1,11 +1,12 @@
 package com.vivekkaushik.wrtpulse
 
-import android.graphics.Color as AndroidColor
 import android.os.Bundle
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,39 +17,32 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
-import androidx.biometric.BiometricManager
-import androidx.biometric.BiometricPrompt
+import androidx.compose.ui.text.AnnotatedString
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
-import com.vivekkaushik.wrtpulse.db.RouterEntity
-import com.vivekkaushik.wrtpulse.data.Demo
 import com.vivekkaushik.wrtpulse.data.Inventory
-import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.LiveLogs
+import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.RouterOps
+import com.vivekkaushik.wrtpulse.data.RouterStatus
 import com.vivekkaushik.wrtpulse.data.Telemetry
 import com.vivekkaushik.wrtpulse.data.TerminalSessions
 import com.vivekkaushik.wrtpulse.data.WifiStore
-import kotlinx.coroutines.launch
+import com.vivekkaushik.wrtpulse.db.RouterEntity
 import com.vivekkaushik.wrtpulse.net.WrtRuntime
-import com.vivekkaushik.wrtpulse.ui.screens.OnboardingFlow
-import com.vivekkaushik.wrtpulse.data.RouterStatus
 import com.vivekkaushik.wrtpulse.ui.MainTab
 import com.vivekkaushik.wrtpulse.ui.WrtBottomNav
 import com.vivekkaushik.wrtpulse.ui.screens.ClientsScreen
@@ -58,6 +52,7 @@ import com.vivekkaushik.wrtpulse.ui.screens.HostKeyScreen
 import com.vivekkaushik.wrtpulse.ui.screens.LogsScreen
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingConnectScreen
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingFingerprintScreen
+import com.vivekkaushik.wrtpulse.ui.screens.OnboardingFlow
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingSshKeyScreen
 import com.vivekkaushik.wrtpulse.ui.screens.RouterListScreen
 import com.vivekkaushik.wrtpulse.ui.screens.SheetHost
@@ -65,10 +60,12 @@ import com.vivekkaushik.wrtpulse.ui.screens.SwitcherSheetContent
 import com.vivekkaushik.wrtpulse.ui.screens.SystemScreen
 import com.vivekkaushik.wrtpulse.ui.screens.TermLine
 import com.vivekkaushik.wrtpulse.ui.screens.TerminalScreen
-import com.vivekkaushik.wrtpulse.ui.screens.WifiEditorScreen
+import com.vivekkaushik.wrtpulse.ui.screens.WifiSection
 import com.vivekkaushik.wrtpulse.ui.screens.initialTerminalLines
 import com.vivekkaushik.wrtpulse.ui.theme.Wrt
 import com.vivekkaushik.wrtpulse.ui.theme.WrtPulseTheme
+import kotlinx.coroutines.launch
+import android.graphics.Color as AndroidColor
 
 private enum class Dest { Boot, Onboarding1, Onboarding2, Onboarding3, RouterList, Main, HostKey }
 
@@ -101,6 +98,8 @@ private fun WrtPulseApp() {
     LaunchedEffect(Unit) { flow.gateway = WrtRuntime.defaultGateway(context) }
 
     var dest by remember { mutableStateOf(Dest.Boot) }
+    // The wireless add/edit steps take the whole screen, tab bar included.
+    var networkFullScreen by remember { mutableStateOf(false) }
     var currentRouter by remember { mutableStateOf("home.gw") }
 
     // Saved routers drive the start destination: returning users land on their list.
@@ -291,7 +290,7 @@ private fun WrtPulseApp() {
                                 onRouterTap = { showSwitcher = true },
                                 onOpenTerminal = { tab = MainTab.Terminal },
                             )
-                            MainTab.Network -> WifiEditorScreen(
+                            MainTab.Network -> WifiSection(
                                 ticker = ticker,
                                 store = wifiStore,
                                 liveLatencyMs = telemetry?.latencyMs,
@@ -300,6 +299,7 @@ private fun WrtPulseApp() {
                                 onRouterTap = { showSwitcher = true },
                                 onReviewApply = { showDiff = true },
                                 onRevert = { wifiStore?.revert() ?: run { pendingChanges = 0 } },
+                                onFullScreen = { networkFullScreen = it },
                             )
                             MainTab.Clients -> ClientsScreen(
                                 ticker = ticker,
@@ -363,9 +363,11 @@ private fun WrtPulseApp() {
                             }
                         }
                     }
-                    WrtBottomNav(current = tab) { picked ->
-                        if (picked != MainTab.System) logsOpen = false
-                        tab = picked
+                    if (!(tab == MainTab.Network && networkFullScreen)) {
+                        WrtBottomNav(current = tab) { picked ->
+                            if (picked != MainTab.System) logsOpen = false
+                            tab = picked
+                        }
                     }
                 }
             }
@@ -406,10 +408,13 @@ private fun WrtPulseApp() {
                     clientCount = inventory?.clients?.size?.takeIf { it > 0 },
                     onApply = {
                         if (wifiStore != null) {
+                            // Read before applying: apply() clears the pending set.
+                            val touched = if (wifiStore.networkOps().isEmpty()) "wireless"
+                                else "wireless, network, firewall"
                             scope.launch {
                                 if (wifiStore.apply()) {
                                     showDiff = false
-                                    termLines.add(TermLine(AnnotatedString("uci: committed wireless · wifi reloading…"), false))
+                                    termLines.add(TermLine(AnnotatedString("uci: committed $touched · wifi reloading…"), false))
                                 }
                             }
                         } else {

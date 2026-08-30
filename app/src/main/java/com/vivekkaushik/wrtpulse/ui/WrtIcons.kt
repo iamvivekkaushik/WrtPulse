@@ -71,6 +71,7 @@ object WrtIcons {
     val ChevronDown = stroked("chevDown", 2.2f, "M6 9l6 6 6-6")
     val ChevronUp = stroked("chevUp", 2.2f, "M6 15l6-6 6 6")
     val ChevronRight = stroked("chevRight", 2f, "M9 6l6 6-6 6")
+    val ChevronLeft = stroked("chevLeft", 2f, "M15 6l-6 6 6 6")
     val Check = stroked("check", 2.2f, "M4.5 12.5l5 5 10-11")
     val Close = stroked("close", 2f, "M6 6l12 12", "M18 6L6 18")
     val Eye = stroked(
