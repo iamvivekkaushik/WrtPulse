@@ -186,16 +186,6 @@ object Commands {
         "uci add_list firewall.\$z.network='$network'; uci commit firewall; " +
         "/etc/init.d/firewall reload >/dev/null 2>&1; }; :"
 
-    /**
-     * Appends the app's public key to dropbear's authorized_keys, idempotently.
-     * The key line is base64 + spaces — safe inside single quotes.
-     */
-    fun installKey(publicLine: String): String {
-        val f = "/etc/dropbear/authorized_keys"
-        return "mkdir -p /etc/dropbear && touch $f && " +
-            "(grep -qF '$publicLine' $f || echo '$publicLine' >> $f) && chmod 600 $f"
-    }
-
     /** Package manager differs across releases: apk on 24.10+, opkg before it. */
     const val DETECT_PACKAGE_MANAGER = "command -v apk >/dev/null && echo apk || echo opkg"
 
@@ -454,5 +444,255 @@ object Commands {
      */
     fun serviceAction(name: String, action: ServiceAction): String =
         "'/etc/init.d/$name' ${action.verb}; rc=\$?; sleep 1; exit \$rc"
+
+    // ── Firmware ──────────────────────────────────────────────────────────────
+    // Flashing is the one action here that cannot be taken back, so every step before it is
+    // a read: what tool the router has, what the upgrade server says, what the image hashes
+    // to, and whether sysupgrade itself accepts the file. The write is one line at the end.
+
+    /**
+     * An image path is about to be interpolated into a shell command, and unlike a package
+     * name it arrives from a directory listing rather than a fixed alphabet. Confining it to
+     * /tmp is also a safety property in its own right: the image has to live in RAM, and a
+     * path pointing anywhere else means something has gone wrong upstream.
+     */
+    fun safeImagePath(path: String): Boolean =
+        path.startsWith("/tmp/") && path.length <= 200 && !path.contains("..") &&
+            path.all { it.isLetterOrDigit() || it in "._/-+" }
+
+    /** A pasted download URL, kept to characters that cannot end a quoted shell word. */
+    fun safeImageUrl(url: String): Boolean =
+        (url.startsWith("https://") || url.startsWith("http://")) && url.length <= 400 &&
+            url.all { it.isLetterOrDigit() || it in ":/._~%?=&+-" }
+
+    /** A pasted sha256, checked before it is compared against anything. */
+    fun safeSha256(sha: String): Boolean =
+        sha.length == 64 && sha.all { it.isDigit() || it in "abcdefABCDEF" }
+
+    /**
+     * owut on 24.10 and later, auc before it, and neither on a stripped build — in which case
+     * the screen falls back to a URL the user supplies.
+     */
+    const val DETECT_UPGRADE_TOOL =
+        "if command -v owut >/dev/null 2>&1; then echo owut; " +
+        "elif command -v auc >/dev/null 2>&1; then echo auc; else echo none; fi"
+
+    /**
+     * Sysupgrade images already sitting in /tmp, as `path|bytes`.
+     *
+     * The net is wide on purpose: owut names its download `/tmp/firmware.bin`, with nothing
+     * in the name to say what it is. An earlier version globbed `*sysupgrade*` and so
+     * reported a perfectly good download as a failure.
+     */
+    private const val STAGED_IMAGES =
+        "for f in /tmp/*.bin /tmp/*.itb /tmp/*.img /tmp/*.img.gz; do " +
+        "[ -f \"\$f\" ] || continue; echo \"\$f|\$(wc -c < \"\$f\")\"; done"
+
+    /** Everything the firmware screen reads on entry, in one round trip. */
+    val FIRMWARE: String = listOf(
+        "echo $SECTION board",
+        BOARD,
+        "echo $SECTION tool",
+        DETECT_UPGRADE_TOOL,
+        // /tmp is tmpfs — this is the RAM the image has to fit into, not flash.
+        "echo $SECTION tmp",
+        "df -k /tmp | tail -n1",
+        "echo $SECTION images",
+        STAGED_IMAGES,
+    ).joinToString("; ")
+
+    /**
+     * Asks the upgrade server what it would build. Read-only: it resolves the profile,
+     * compares versions and package lists, and prints its own verdict on whether upgrading
+     * is safe. Talks to the network, so it is slower than it looks.
+     */
+    const val UPGRADE_CHECK = "owut check 2>&1"
+
+    /** The same with owut's reasoning, shown when the verdict is not the safe one. */
+    const val UPGRADE_CHECK_VERBOSE = "owut check --verbose 2>&1"
+
+    /**
+     * Builds the image on the ASU server, downloads it and verifies it — owut does all three
+     * under `download`. Deliberately not `owut upgrade`, which would install it too and take
+     * the confirmation step away from the user.
+     */
+    const val UPGRADE_DOWNLOAD = "owut download 2>&1"
+
+    /** The config archive sysupgrade itself would carry across, written where it can be read. */
+    const val BACKUP_FILE = "/tmp/wrtpulse-backup.tar.gz"
+
+    /** Writes the backup and answers with its size, so the app can refuse an absurd one. */
+    const val BACKUP_CREATE =
+        "rm -f $BACKUP_FILE; sysupgrade -b $BACKUP_FILE >/dev/null 2>&1 && wc -c < $BACKUP_FILE"
+
+    /**
+     * The hex encoder, used when no base64 exists. `/1 "%02x"` is one byte per iteration,
+     * so the output is continuous hex with nothing to strip.
+     */
+    private const val HEXDUMP = "hexdump -v -e '/1 \"%02x\"'"
+
+    /**
+     * Reads the archive back through the exec channel, which carries text, so the bytes have
+     * to be encoded on the router.
+     *
+     * There is no encoder that is always present, and this took three passes against a real
+     * router to get right. The reference device has NO `base64`, no `openssl` and no `od` —
+     * `busybox --list` does not work there either. What it does have is `hexdump`. So the
+     * encoders are tried in order against a one-byte probe, cheaper than encoding the file
+     * twice to find out, and base64 is preferred only because it halves the transfer.
+     *
+     * Every encoder is fed on STDIN, never a file operand: some builds' `base64` takes no
+     * filename, which produced a marker line and an empty payload. Redirection is the one
+     * calling convention all of them share.
+     *
+     * The first line names the encoding — `b64`, `hex`, or `none` when the router cannot do
+     * it at all, which is a real answer and not a failure to parse.
+     */
+    const val BACKUP_READ =
+        "F=$BACKUP_FILE; " +
+        "if echo t | base64 >/dev/null 2>&1; then echo b64; base64 < \"\$F\"; " +
+        "elif echo t | busybox base64 >/dev/null 2>&1; then echo b64; busybox base64 < \"\$F\"; " +
+        "elif echo t | openssl base64 >/dev/null 2>&1; then echo b64; openssl base64 -in \"\$F\"; " +
+        "elif echo t | $HEXDUMP >/dev/null 2>&1; then echo hex; $HEXDUMP < \"\$F\"; " +
+        "elif echo t | od -An -v -tx1 >/dev/null 2>&1; then echo hex; od -An -v -tx1 < \"\$F\" | tr -d ' \\n'; " +
+        "else echo none; fi"
+
+    /** /tmp is RAM. The copy on the router goes as soon as the phone has it. */
+    const val BACKUP_CLEANUP = "rm -f $BACKUP_FILE"
+
+    /** Where a manually supplied image is put, so it lands under [safeImagePath] too. */
+    const val MANUAL_IMAGE = "/tmp/wrtpulse-sysupgrade.bin"
+
+    /** Fetches a user-supplied image and answers with the byte count actually written. */
+    fun downloadImage(url: String, dest: String = MANUAL_IMAGE): String =
+        "rm -f '$dest'; { curl -fsSL -o '$dest' '$url' 2>/dev/null || " +
+        "uclient-fetch -q -O '$dest' '$url'; } && wc -c < '$dest'"
+
+    fun imageSha256(path: String): String = "sha256sum '$path' | cut -d' ' -f1"
+
+    /**
+     * Gives the RAM back. A downloaded image sits in tmpfs until the router reboots, and the
+     * app is what put it there, so the app can take it away again.
+     */
+    fun discardImage(path: String): String = "rm -f '$path'"
+
+    /**
+     * What the server says the image weighs, so the RAM check can run BEFORE /tmp is filled
+     * with a truncated file. Only curl can ask; a router without it simply gets no answer,
+     * and the app treats "unknown" as "don't block" rather than inventing a number.
+     */
+    fun urlContentLength(url: String): String =
+        "curl -sIL '$url' 2>/dev/null | " +
+        "awk 'tolower(\$1)==\"content-length:\"{print \$2}' | tr -d '\\r' | tail -n1"
+
+    /**
+     * sysupgrade's own dry run: it reads the image's metadata and refuses one built for a
+     * different device. This is the check that stands between a typo and a brick, so it runs
+     * even when owut has already verified the download.
+     */
+    fun imageTest(path: String): String = "sysupgrade -T '$path' 2>&1"
+
+    /**
+     * The flash. Detached like [REBOOT] and for the same reason — sysupgrade takes the
+     * connection down with it, and a foreground command would never get to answer.
+     *
+     * `-n` discards config, which also resets the LAN address and regenerates dropbear's
+     * host key; [FirmwareStore] is where the user is told that.
+     */
+    fun flash(path: String, keepSettings: Boolean): String =
+        "(sleep 1; sysupgrade ${if (keepSettings) "" else "-n "}'$path') >/dev/null 2>&1 & echo flashing"
+
+    // ── SSH keys ──────────────────────────────────────────────────────────────
+    // dropbear reads /etc/dropbear/authorized_keys, one key per line. The file is the whole
+    // access-control list for this router, and the app is holding one of its entries, so
+    // every write here is narrower than it looks: never rewrite the file wholesale, only
+    // append a validated line or drop the one line that carries a known blob.
+
+    const val AUTHORIZED_KEYS = "/etc/dropbear/authorized_keys"
+
+    /**
+     * A public key as it may be interpolated into a shell command and appended to the file
+     * that decides who can log in.
+     *
+     * The blob is base64 and the type is from a fixed set, so both are checked against their
+     * own alphabet rather than escaped. Anything with a newline is refused outright: one
+     * line is one key, and a smuggled newline would be a second entry nobody agreed to.
+     */
+    fun safePublicKeyLine(line: String): Boolean = parsePublicKey(line) != null
+
+    /** The types dropbear actually accepts, so a typo cannot become a dead entry. */
+    private val KEY_TYPES = setOf(
+        "ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+        "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com",
+    )
+
+    /**
+     * Splits a pasted line into (type, blob, comment), or null when it is not a key.
+     *
+     * The comment is rebuilt from a safe alphabet rather than trusted: it is free text that
+     * would otherwise reach a shell, and no key stops working for want of punctuation in
+     * its label.
+     */
+    fun parsePublicKey(line: String): Triple<String, String, String>? {
+        val text = line.trim()
+        if (text.isEmpty() || text.length > 4096) return null
+        if (text.any { it == '\n' || it == '\r' }) return null
+        val parts = text.split(Regex("\\s+"), limit = 3)
+        if (parts.size < 2) return null
+        val type = parts[0]
+        val blob = parts[1]
+        if (type !in KEY_TYPES) return null
+        if (blob.length < 16 || !blob.all { it.isLetterOrDigit() || it in "+/=" }) return null
+        val comment = parts.getOrElse(2) { "" }
+            .filter { it.isLetterOrDigit() || it in "._@- " }
+            .trim()
+            .take(120)
+        return Triple(type, blob, comment)
+    }
+
+    /** Everything the SSH keys screen needs, in one round trip. */
+    val SSH_KEYS: String = listOf(
+        "echo $SECTION keys",
+        "cat $AUTHORIZED_KEYS 2>/dev/null",
+        "echo $SECTION perms",
+        "ls -l $AUTHORIZED_KEYS 2>/dev/null",
+        "echo $SECTION dropbear",
+        "uci show dropbear 2>/dev/null",
+    ).joinToString("; ")
+
+    /**
+     * Appends the app's public key to dropbear's authorized_keys, idempotently.
+     * The key line is base64 + spaces — safe inside single quotes.
+     */
+    fun installKey(publicLine: String): String {
+        val f = AUTHORIZED_KEYS
+        return "mkdir -p /etc/dropbear && touch $f && " +
+            "(grep -qF '$publicLine' $f || echo '$publicLine' >> $f) && chmod 600 $f"
+    }
+
+    /**
+     * Drops the one line carrying this blob. Matched on the blob rather than the whole line
+     * because the comment is cosmetic and may have been edited on the router; the blob is
+     * the key. `grep -vF` on a fixed string, written to a temp file and moved into place, so
+     * a full disk truncates the temp copy rather than the access list.
+     */
+    fun removeKey(blob: String): String {
+        val f = AUTHORIZED_KEYS
+        // grep exits 1 when it prints nothing, which for `-v` is the perfectly good outcome
+        // of removing the only line. Chaining on && therefore skipped the mv and left the
+        // key in place — exactly in the last-key case that matters most. Exit 2 is the real
+        // error, so the status is checked rather than assumed.
+        return "[ -f $f ] || { echo missing; exit 1; }; " +
+            "grep -vF '$blob' $f > $f.tmp; rc=\$?; " +
+            "if [ \$rc -le 1 ]; then mv $f.tmp $f && chmod 600 $f && echo removed; " +
+            "else rm -f $f.tmp; echo \"grep failed: \$rc\"; exit 1; fi"
+    }
+
+    /** dropbear's own view of whether a password will still get you in. */
+    const val PASSWORD_AUTH_HELP =
+        "uci set dropbear.@dropbear[0].PasswordAuth='off'; " +
+        "uci set dropbear.@dropbear[0].RootPasswordAuth='off'; " +
+        "uci commit dropbear; /etc/init.d/dropbear restart"
 
 }

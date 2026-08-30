@@ -205,6 +205,109 @@ data class RouterService(
     }
 }
 
+/** What the router can tell the firmware screen before anything is asked of the network. */
+data class FirmwareStatus(
+    /** "owut", "auc", or "none" — a build with neither can still flash a supplied URL. */
+    val tool: String = "none",
+    /** Free space in /tmp, which is tmpfs: this is RAM, and it is what the image must fit. */
+    val tmpFreeKb: Long? = null,
+    /** Sysupgrade images already staged in /tmp, as path to size. */
+    val images: List<Pair<String, Long>> = emptyList(),
+) {
+    val hasTool: Boolean get() = tool == "owut" || tool == "auc"
+}
+
+/**
+ * `owut check` — the upgrade server's account of what it would build.
+ *
+ * [safe] is owut's OWN verdict, not one this app derived: it knows about package breakages
+ * and build failures that nothing on the router can see. The app gates on it rather than
+ * second-guessing it.
+ */
+data class UpgradeCheck(
+    val fields: Map<String, String> = emptyMap(),
+    /** The free-text lines under the table, kept in order and shown as written. */
+    val notes: List<String> = emptyList(),
+    val safe: Boolean = false,
+    val raw: String = "",
+) {
+    val versionFrom: String? get() = fields["Version-from"]
+    val versionTo: String? get() = fields["Version-to"]
+    val target: String? get() = fields["Target"]
+    val profile: String? get() = fields["Profile"]
+    val server: String? get() = fields["ASU-Server"]
+
+    /**
+     * The case the version numbers alone would hide: no newer release exists, but packages
+     * have moved, so the server would rebuild THIS version with current ones. Calling that
+     * "up to date" would remove the only reason to run an attended sysupgrade at all.
+     */
+    val sameVersion: Boolean
+        get() = versionFrom != null && versionFrom == versionTo
+
+    val outdatedPackages: Int?
+        get() = notes.firstNotNullOfOrNull {
+            Regex("(\\d+) packages? (?:are|is) out-of-date").find(it)?.groupValues?.get(1)?.toIntOrNull()
+        }
+
+    val missingPackages: Int?
+        get() = notes.firstNotNullOfOrNull {
+            Regex("There are (\\d+) missing").find(it)?.groupValues?.get(1)?.toIntOrNull()
+        }
+
+    val modifiedPackages: Int?
+        get() = notes.firstNotNullOfOrNull {
+            Regex("and (\\d+) modified default").find(it)?.groupValues?.get(1)?.toIntOrNull()
+        }
+
+    /** Something worth doing exists, even when the version is unchanged. */
+    val hasWork: Boolean
+        get() = !sameVersion || (outdatedPackages ?: 0) > 0
+}
+
+/** One staged image and everything that has been established about it. */
+data class ImageCheck(
+    val path: String,
+    val sizeBytes: Long? = null,
+    val sha256: String? = null,
+    /** Null until `sysupgrade -T` has been run; false means it refused the image. */
+    val testPassed: Boolean? = null,
+    val testOutput: String = "",
+) {
+    val verified: Boolean get() = testPassed == true
+}
+
+/**
+ * One line of dropbear's authorized_keys — one identity that can log into this router.
+ *
+ * [fingerprint] is the SHA256 form OpenSSH prints, so what the screen shows can be compared
+ * against `ssh-keygen -lf` on the user's own machine.
+ */
+data class AuthorizedKey(
+    val type: String,
+    val blob: String,
+    val comment: String,
+    /** True for the key this app is holding — the one it must not offer to delete. */
+    val isAppKey: Boolean = false,
+) {
+    val fingerprint: String get() = Parsers.keyFingerprint(blob)
+
+    /** "ed25519", "rsa" — the type without the protocol noise. */
+    val shortType: String get() = type
+        .removePrefix("sk-").removePrefix("ssh-")
+        .substringBefore('@').removePrefix("ecdsa-sha2-")
+}
+
+/** dropbear's login policy, as `uci show dropbear` reports it. */
+data class DropbearAuth(
+    /** Null when the option is not set; dropbear then defaults to allowing passwords. */
+    val passwordAuth: Boolean? = null,
+    val rootPasswordAuth: Boolean? = null,
+) {
+    /** Whether a password will still get someone in, taking dropbear's defaults as given. */
+    val passwordsAccepted: Boolean get() = passwordAuth != false || rootPasswordAuth != false
+}
+
 /** One neighbouring AP from `iwinfo <iface> scan`. */
 data class ScanCell(
     val channel: Int,
@@ -894,6 +997,106 @@ object Parsers {
             RouterService(name, running = true, procd = true, instances = run.first, pid = run.second)
         }
         return (merged + orphans).sortedBy { it.name }
+    }
+
+    /** The `tmp` / `images` / `tool` sections of [Commands.FIRMWARE]. */
+    fun firmwareStatus(sections: Map<String, String>): FirmwareStatus = FirmwareStatus(
+        tool = sections["tool"].orEmpty().trim().lines().lastOrNull()?.trim().orEmpty()
+            .ifEmpty { "none" },
+        tmpFreeKb = overlayAvailKb(sections["tmp"].orEmpty()),
+        images = stagedImages(sections["images"].orEmpty()),
+    )
+
+    /** `path|bytes` per staged image, newest-looking last; empty when nothing is staged. */
+    fun stagedImages(text: String): List<Pair<String, Long>> =
+        text.lineSequence().mapNotNull { line ->
+            val fields = line.trim().split('|')
+            if (fields.size < 2) return@mapNotNull null
+            val path = fields[0].trim()
+            val size = fields[1].trim().toLongOrNull()
+            if (path.isBlank() || size == null || size <= 0) null else path to size
+        }.distinctBy { it.first }.toList()
+
+    // owut states where it put the image: "Image saved : /tmp/firmware.bin".
+    private val SAVED_IMAGE = Regex("[Ii]mage saved\\s*:\\s*(\\S+)")
+
+    /**
+     * The image path out of owut's own output, which beats guessing from a directory listing
+     * — the file is called `firmware.bin` and nothing about the name says what it is.
+     */
+    fun savedImagePath(text: String): String? =
+        SAVED_IMAGE.find(text)?.groupValues?.get(1)?.trim()?.takeIf { it.isNotEmpty() }
+
+    // Label and value are separated by a run of spaces; the value keeps its own single
+    // spaces, because "25.12.5 r33051-f5dae5ece4 (kernel 6.12.94)" is one value.
+    private val OWUT_FIELD = Regex("^([A-Za-z][A-Za-z0-9-]*) {2,}(.+)$")
+
+    /**
+     * `owut check`. The table becomes fields, everything else becomes a note shown as
+     * written — including the verdict line, which the app gates on but does not paraphrase.
+     */
+    fun upgradeCheck(text: String): UpgradeCheck {
+        val fields = linkedMapOf<String, String>()
+        val notes = mutableListOf<String>()
+        text.lines().forEach { line ->
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) return@forEach
+            val match = OWUT_FIELD.find(trimmed)
+            if (match != null) fields[match.groupValues[1]] = match.groupValues[2].trim()
+            else notes += trimmed
+        }
+        return UpgradeCheck(
+            fields = fields,
+            notes = notes,
+            // Match the statement, not the word: "not safe to proceed" contains "safe".
+            safe = notes.any { it.contains("is safe to proceed", ignoreCase = true) },
+            raw = text.trim(),
+        )
+    }
+
+    /** First line that looks like a bare sha256, from `sha256sum | cut`. */
+    fun sha256(text: String): String? = text.lineSequence()
+        .map { it.trim() }
+        .firstOrNull { it.length == 64 && it.all { c -> c.isDigit() || c in "abcdefABCDEF" } }
+        ?.lowercase()
+
+    /** The byte count a `wc -c` answered with, ignoring anything printed around it. */
+    fun byteCount(text: String): Long? = text.lineSequence()
+        .map { it.trim() }
+        .lastOrNull { it.isNotEmpty() && it.all(Char::isDigit) }
+        ?.toLongOrNull()
+
+    /**
+     * The SHA256 fingerprint OpenSSH prints: base64 of the digest of the DECODED blob, with
+     * the padding dropped. Hashing the base64 text instead would produce a plausible-looking
+     * string that matches nothing.
+     */
+    fun keyFingerprint(blob: String): String = runCatching {
+        val raw = java.util.Base64.getDecoder().decode(blob)
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(raw)
+        "SHA256:" + java.util.Base64.getEncoder().withoutPadding().encodeToString(digest)
+    }.getOrElse { "unreadable" }
+
+    /**
+     * dropbear's authorized_keys. Blank lines and `#` comments are skipped, and anything
+     * that does not parse as a key is dropped rather than shown as a mystery entry.
+     */
+    fun authorizedKeys(text: String, appLine: String? = null): List<AuthorizedKey> {
+        val appBlob = appLine?.let { Commands.parsePublicKey(it)?.second }
+        return text.lineSequence().mapNotNull { line ->
+            val trimmed = line.trim()
+            if (trimmed.isEmpty() || trimmed.startsWith("#")) return@mapNotNull null
+            val (type, blob, comment) = Commands.parsePublicKey(trimmed) ?: return@mapNotNull null
+            AuthorizedKey(type, blob, comment, isAppKey = appBlob != null && blob == appBlob)
+        }.distinctBy { it.blob }.toList()
+    }
+
+    /** `uci show dropbear` → whether passwords are still accepted. */
+    fun dropbearAuth(text: String): DropbearAuth {
+        fun flag(option: String): Boolean? = Regex("\\.$option='([^']*)'")
+            .find(text)?.groupValues?.get(1)?.lowercase()
+            ?.let { it == "on" || it == "1" || it == "true" }
+        return DropbearAuth(flag("PasswordAuth"), flag("RootPasswordAuth"))
     }
 
     private val BLOCKED_MAC = Regex("wrtpulse-block-((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})")

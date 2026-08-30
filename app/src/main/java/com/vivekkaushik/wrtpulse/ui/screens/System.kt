@@ -34,6 +34,7 @@ import com.vivekkaushik.wrtpulse.data.PackageStore
 import com.vivekkaushik.wrtpulse.data.ServiceStore
 import com.vivekkaushik.wrtpulse.data.Telemetry
 import com.vivekkaushik.wrtpulse.ops.BoardInfo
+import com.vivekkaushik.wrtpulse.ops.Regulatory
 import com.vivekkaushik.wrtpulse.ui.ConnectionTopBar
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.SectionLabel
@@ -60,6 +61,9 @@ fun SystemScreen(
     onOpenLogs: () -> Unit,
     onOpenPackages: () -> Unit = {},
     onOpenServices: () -> Unit = {},
+    onOpenFirmware: () -> Unit = {},
+    onOpenCountry: () -> Unit = {},
+    onOpenSshKeys: () -> Unit = {},
 ) {
     var biometricDemo by remember { mutableStateOf(true) }
     val isLive = live != null
@@ -84,7 +88,11 @@ fun SystemScreen(
                     if (isLive) "Coming soon" else "Last backup 6 d ago",
                 )
                 if (isLive) {
-                    SystemRow(WrtIcons.Firmware, "Firmware", board?.summary?.ifBlank { null } ?: "—")
+                    SystemRow(
+                        WrtIcons.Firmware, "Firmware",
+                        board?.summary?.ifBlank { null } ?: "—",
+                        onClick = onOpenFirmware,
+                    )
                 } else {
                     SystemRow(
                         WrtIcons.Firmware, "Firmware upgrade", "23.05.3 → 23.05.4 available",
@@ -163,7 +171,10 @@ fun SystemScreen(
                 ValueRow(
                     "Country / regulatory domain",
                     "Sets which Wi-Fi channels & TX power are legal",
-                    if (isLive) (country?.ifBlank { null } ?: "—") else "IN · India",
+                    if (isLive) {
+                        country?.ifBlank { null }?.let { "$it · ${Regulatory.nameOf(it)}" } ?: "unset"
+                    } else "IN · India",
+                    onClick = if (isLive) onOpenCountry else null,
                 )
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 10.dp),
@@ -189,11 +200,12 @@ fun SystemScreen(
                 ValueRow(
                     "SSH keys", null,
                     when (sshKeyInstalled) {
-                        true -> "1 installed"
+                        true -> "app key in use"
                         false -> "none — using password"
                         null -> "1 installed"
                     },
                     last = true,
+                    onClick = if (isLive) onOpenSshKeys else null,
                 )
             }
             SectionLabel("DANGER ZONE", color = Wrt.Red, tracking = 0.14)
@@ -206,7 +218,12 @@ fun SystemScreen(
             ) {
                 DangerRow(WrtIcons.Warning, "Factory reset", "Erases all settings · type RESET to confirm")
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Wrt.Red.copy(alpha = 0.15f)))
-                DangerRow(WrtIcons.Lightning, "Reflash firmware", "Multi-step wizard · sysupgrade -n", last = true)
+                DangerRow(
+                    WrtIcons.Lightning, "Reflash firmware",
+                    "Multi-step wizard · sysupgrade -n",
+                    last = true,
+                    onClick = if (isLive) onOpenFirmware else null,
+                )
             }
         }
     }
@@ -260,9 +277,18 @@ private fun SystemRow(
 }
 
 @Composable
-private fun ValueRow(title: String, subtitle: String?, value: String, last: Boolean = false) {
+private fun ValueRow(
+    title: String,
+    subtitle: String?,
+    value: String,
+    last: Boolean = false,
+    onClick: (() -> Unit)? = null,
+) {
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 10.dp),
+        Modifier
+            .fillMaxWidth()
+            .let { if (onClick != null) it.clickable(onClick = onClick) else it }
+            .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -277,9 +303,18 @@ private fun ValueRow(title: String, subtitle: String?, value: String, last: Bool
 }
 
 @Composable
-private fun DangerRow(icon: ImageVector, title: String, subtitle: String, last: Boolean = false) {
+private fun DangerRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    last: Boolean = false,
+    onClick: (() -> Unit)? = null,
+) {
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 11.dp),
+        Modifier
+            .fillMaxWidth()
+            .let { if (onClick != null) it.clickable(onClick = onClick) else it }
+            .padding(vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {

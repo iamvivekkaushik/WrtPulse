@@ -518,9 +518,9 @@ private fun SpeedtestDialog(ops: RouterOps, onDismiss: () -> Unit) {
     }
 }
 
-/** Fills over a 3 s hold; letting go early cancels. */
+/** Fills over a 3 s hold; letting go early cancels. Shared with the firmware flash. */
 @Composable
-private fun HoldToConfirm(label: String, onConfirm: () -> Unit) {
+fun HoldToConfirm(label: String, onConfirm: () -> Unit) {
     val progress = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
     var done by remember { mutableStateOf(false) }

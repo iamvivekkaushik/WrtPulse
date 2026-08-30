@@ -33,6 +33,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import com.vivekkaushik.wrtpulse.data.FirmwareStore
 import com.vivekkaushik.wrtpulse.data.Inventory
 import com.vivekkaushik.wrtpulse.data.LiveLogs
 import com.vivekkaushik.wrtpulse.data.LiveTicker
@@ -40,16 +41,20 @@ import com.vivekkaushik.wrtpulse.data.PackageStore
 import com.vivekkaushik.wrtpulse.data.RouterOps
 import com.vivekkaushik.wrtpulse.data.RouterStatus
 import com.vivekkaushik.wrtpulse.data.ServiceStore
+import com.vivekkaushik.wrtpulse.data.SshKeyStore
 import com.vivekkaushik.wrtpulse.data.Telemetry
 import com.vivekkaushik.wrtpulse.data.TerminalSessions
 import com.vivekkaushik.wrtpulse.data.WifiStore
 import com.vivekkaushik.wrtpulse.db.RouterEntity
+import com.vivekkaushik.wrtpulse.net.SshKeys
 import com.vivekkaushik.wrtpulse.net.WrtRuntime
 import com.vivekkaushik.wrtpulse.ui.MainTab
 import com.vivekkaushik.wrtpulse.ui.WrtBottomNav
 import com.vivekkaushik.wrtpulse.ui.screens.ClientsScreen
+import com.vivekkaushik.wrtpulse.ui.screens.CountryScreen
 import com.vivekkaushik.wrtpulse.ui.screens.DashboardScreen
 import com.vivekkaushik.wrtpulse.ui.screens.DiffSheetContent
+import com.vivekkaushik.wrtpulse.ui.screens.FirmwareScreen
 import com.vivekkaushik.wrtpulse.ui.screens.HostKeyScreen
 import com.vivekkaushik.wrtpulse.ui.screens.LogsScreen
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingConnectScreen
@@ -60,6 +65,7 @@ import com.vivekkaushik.wrtpulse.ui.screens.PackagesScreen
 import com.vivekkaushik.wrtpulse.ui.screens.RouterListScreen
 import com.vivekkaushik.wrtpulse.ui.screens.ServicesScreen
 import com.vivekkaushik.wrtpulse.ui.screens.SheetHost
+import com.vivekkaushik.wrtpulse.ui.screens.SshKeysScreen
 import com.vivekkaushik.wrtpulse.ui.screens.SwitcherSheetContent
 import com.vivekkaushik.wrtpulse.ui.screens.SystemScreen
 import com.vivekkaushik.wrtpulse.ui.screens.TermLine
@@ -134,6 +140,18 @@ private fun WrtPulseApp() {
     // Same bargain for the init scripts: listing them walks /etc/init.d, so it waits
     // until the Services screen is actually opened.
     val serviceStore = remember(session) { session?.let { ServiceStore(it) } }
+    val firmwareStore = remember(session) { session?.let { FirmwareStore(it) } }
+    // The app's own public key, so the keys screen can recognise the entry it is signed in
+    // with and refuse to delete it. Derived from the sealed private key, keyed on the saved
+    // row so a routine lastSeen touch does not re-open the Keystore.
+    val savedEntity = savedRouters?.firstOrNull { it.host == WrtRuntime.session?.target?.host }
+    val appPublicLine = remember(savedEntity?.id, savedEntity?.privateKey?.size) {
+        runCatching { savedEntity?.privateKey?.let { WrtRuntime.vault.open(it) } }.getOrNull()
+            ?.let { SshKeys.publicLineFrom(it) }
+    }
+    val sshKeyStore = remember(session, appPublicLine) {
+        session?.let { SshKeyStore(it, appPublicLine) }
+    }
     var logsStarted by remember(session) { mutableStateOf(false) }
     // Polling pauses while the app is in the background; the terminal shell stays attached.
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -166,6 +184,9 @@ private fun WrtPulseApp() {
     var logsOpen by remember { mutableStateOf(false) }
     var packagesOpen by remember { mutableStateOf(false) }
     var servicesOpen by remember { mutableStateOf(false) }
+    var firmwareOpen by remember { mutableStateOf(false) }
+    var countryOpen by remember { mutableStateOf(false) }
+    var sshKeysOpen by remember { mutableStateOf(false) }
     var pendingChanges by remember { mutableIntStateOf(3) }
     val termLines = remember { mutableStateListOf<TermLine>().apply { addAll(initialTerminalLines()) } }
     var termPending by remember { mutableStateOf("") }
@@ -344,7 +365,24 @@ private fun WrtPulseApp() {
                                     },
                                 )
                             }
-                            MainTab.System -> if (servicesOpen) {
+                            MainTab.System -> if (sshKeysOpen) {
+                                SshKeysScreen(
+                                    store = sshKeyStore,
+                                    latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
+                                    onBack = { sshKeysOpen = false },
+                                )
+                            } else if (countryOpen) {
+                                CountryScreen(
+                                    store = wifiStore,
+                                    onBack = { countryOpen = false },
+                                )
+                            } else if (firmwareOpen) {
+                                FirmwareScreen(
+                                    store = firmwareStore,
+                                    latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
+                                    onBack = { firmwareOpen = false },
+                                )
+                            } else if (servicesOpen) {
                                 ServicesScreen(
                                     store = serviceStore,
                                     latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
@@ -388,6 +426,9 @@ private fun WrtPulseApp() {
                                     onOpenLogs = { logsOpen = true },
                                     onOpenPackages = { packagesOpen = true },
                                     onOpenServices = { servicesOpen = true },
+                                    onOpenFirmware = { firmwareOpen = true },
+                                    onOpenCountry = { countryOpen = true },
+                                    onOpenSshKeys = { sshKeysOpen = true },
                                 )
                             }
                         }
@@ -395,7 +436,9 @@ private fun WrtPulseApp() {
                     if (!(tab == MainTab.Network && networkFullScreen)) {
                         WrtBottomNav(current = tab) { picked ->
                             if (picked != MainTab.System) {
-                                logsOpen = false; packagesOpen = false; servicesOpen = false
+                                logsOpen = false; packagesOpen = false
+                                servicesOpen = false; firmwareOpen = false
+                                countryOpen = false; sshKeysOpen = false
                             }
                             tab = picked
                         }
@@ -473,6 +516,9 @@ private fun WrtPulseApp() {
             dest == Dest.Main && showDiff -> showDiff = false
             dest == Dest.Main && showSwitcher -> showSwitcher = false
             dest == Dest.Main && snippetsOpen -> snippetsOpen = false
+            dest == Dest.Main && tab == MainTab.System && sshKeysOpen -> sshKeysOpen = false
+            dest == Dest.Main && tab == MainTab.System && countryOpen -> countryOpen = false
+            dest == Dest.Main && tab == MainTab.System && firmwareOpen -> firmwareOpen = false
             dest == Dest.Main && tab == MainTab.System && servicesOpen -> servicesOpen = false
             dest == Dest.Main && tab == MainTab.System && packagesOpen -> packagesOpen = false
             dest == Dest.Main && tab == MainTab.System && logsOpen -> logsOpen = false
