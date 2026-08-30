@@ -107,6 +107,22 @@ object WrtIcons {
         "M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z",
         "M8 12h8", "M8 8.5h8", "M8 15.5h4",
     )
+
+    /**
+     * An RJ45 plug with its cable — housing, three contact stripes, the latch, and the lead
+     * going off the bottom. [WiredDevice] is a panel with three lines on it, which reads as
+     * a document long before it reads as a network cable.
+     */
+    val Ethernet = stroked(
+        "ethernet", 1.6f,
+        // The jack, landscape — a port really is wider than tall, and the latch slot on top
+        // is the cue that says ethernet rather than "some socket".
+        "M4.3 8.6h15.4a1.4 1.4 0 0 1 1.4 1.4v5a1.4 1.4 0 0 1-1.4 1.4H4.3a1.4 1.4 0 0 1-1.4-1.4V10a1.4 1.4 0 0 1 1.4-1.4Z",
+        // latch slot
+        "M10.1 8.6V6.4h3.8v2.2",
+        // contacts, hanging up from the mating face
+        "M7.2 16.4v-2.6", "M12 16.4v-2.6", "M16.8 16.4v-2.6",
+    )
     val Warning = stroked("warning", 1.7f, "M12 3L1.8 20.2h20.4L12 3z", "M12 10v4.5", "M12 17.5v.5")
     val Shield = stroked(
         "shield", 1.4f,

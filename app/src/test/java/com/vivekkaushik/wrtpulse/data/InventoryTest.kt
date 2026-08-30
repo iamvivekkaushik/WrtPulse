@@ -3,6 +3,7 @@ package com.vivekkaushik.wrtpulse.data
 import com.vivekkaushik.wrtpulse.ops.Parsers
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -216,5 +217,26 @@ class InventoryTest {
         assertEquals("lease 23 h", Inventory.leaseLabel(1_000_000 + 82_800, 1_000_000))
         assertEquals("lease 30 min", Inventory.leaseLabel(1_000_000 + 1_800, 1_000_000))
         assertNull(Inventory.leaseLabel(0, 1_000_000))
+    }
+
+    /**
+     * Wired and offline clients both carry `bars = -1`, so the list icon used to render them
+     * identically — a machine on the cable looked exactly like one that had gone home. The
+     * two are only separable together with [Client.offline].
+     */
+    @Test
+    fun `a wired client is not confused with an offline one`() {
+        val wired = Client(name = "NitishPC", ip = "192.168.2.170", mac = "d8:c4:97:d5:eb:d1", network = "LAN", bars = -1)
+        val gone = wired.copy(name = "laptop", offline = true)
+        assertTrue(wired.wired)
+        assertFalse(gone.wired)
+    }
+
+    @Test
+    fun `a wireless client is never wired, whatever its signal`() {
+        val strong = Client(name = "phone", ip = "192.168.2.1", mac = "a", network = "5G", bars = 4)
+        val weak = strong.copy(bars = 1)
+        assertFalse(strong.wired)
+        assertFalse(weak.wired)
     }
 }

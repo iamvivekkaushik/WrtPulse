@@ -38,6 +38,13 @@ data class Client(
     val staticIp: String? = null,
 ) {
     val usageTotal: Long get() = (usageDown ?: 0) + (usageUp ?: 0)
+
+    /**
+     * On the LAN cable right now. Wired and offline clients both carry `bars = -1`, so the
+     * two are only distinguishable together with [offline] — reading `bars < 0` alone made a
+     * live wired client render exactly like a device that had gone away.
+     */
+    val wired: Boolean get() = bars < 0 && !offline
 }
 
 data class Ssid(

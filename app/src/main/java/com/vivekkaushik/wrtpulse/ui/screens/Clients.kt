@@ -406,8 +406,7 @@ private fun ExpandedClientCard(
             .padding(horizontal = 14.dp, vertical = 13.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
-            if (client.bars > 0) SignalBars(client.bars, client.barColor)
-            else Icon(WrtIcons.WiredDevice, "wired", Modifier.size(15.dp), tint = Wrt.TextTertiary)
+            ClientLinkIcon(client)
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text(client.name, style = sans(14f, 650))
@@ -620,6 +619,26 @@ private fun ClientAction(
     }
 }
 
+/**
+ * How this client is attached, in one glyph.
+ *
+ * Wired and offline both carry `bars = -1`, and both used to render the same grey plug — so
+ * a machine sitting on the cable looked exactly like one that had gone home. A live cable is
+ * a good link, so it gets the same green a strong signal does; an absent device gets a
+ * faint generic one, because nothing here knows how it used to be connected.
+ */
+@Composable
+private fun ClientLinkIcon(client: Client) {
+    when {
+        client.blocked -> Icon(WrtIcons.Blocked, "blocked", Modifier.size(15.dp), tint = Wrt.Red)
+        // The row already carries alpha 0.65 for offline; dimming the tint as well made the
+        // glyph almost invisible rather than merely inactive.
+        client.offline -> Icon(WrtIcons.Clients, "offline", Modifier.size(15.dp), tint = Wrt.TextTertiary)
+        client.wired -> Icon(WrtIcons.Ethernet, "wired", Modifier.size(16.dp), tint = Wrt.Green)
+        else -> SignalBars(client.bars, client.barColor)
+    }
+}
+
 @Composable
 private fun ClientRow(client: Client, onClick: () -> Unit) {
     Column(Modifier.padding(horizontal = 10.dp).alpha(if (client.blocked || client.offline) 0.65f else 1f)) {
@@ -631,11 +650,7 @@ private fun ClientRow(client: Client, onClick: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(11.dp),
         ) {
-            when {
-                client.blocked -> Icon(WrtIcons.Blocked, "blocked", Modifier.size(15.dp), tint = Wrt.Red)
-                client.bars < 0 -> Icon(WrtIcons.WiredDevice, "wired", Modifier.size(15.dp), tint = Wrt.TextTertiary)
-                else -> SignalBars(client.bars, client.barColor)
-            }
+            ClientLinkIcon(client)
             Column(Modifier.weight(1f)) {
                 Text(client.name, style = sans(13.5f, 600, if (client.blocked || client.offline) Wrt.TextSecondary else Wrt.TextPrimary))
                 Text(
