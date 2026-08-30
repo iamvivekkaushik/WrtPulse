@@ -150,7 +150,57 @@ class InventoryTest {
 
         val reserve = com.vivekkaushik.wrtpulse.ops.Commands.reserveIp("aa:bb:cc:dd:ee:ff", "192.168.2.34", "pixel-8")
         assertTrue(reserve.contains("dhcp.@host[-1].ip='192.168.2.34'"))
-        assertTrue(reserve.startsWith("uci show dhcp")) // idempotence guard first
+        assertTrue(reserve.startsWith("s=")) // looks for an existing section for this MAC first
+    }
+
+    @Test
+    fun `dhcp reservations are read back and attached to the client`() {
+        val uci = Parsers.uciShow(
+            """
+            dhcp.@host[0]=host
+            dhcp.@host[0].name='pixel-8'
+            dhcp.@host[0].mac='AA:5C:1E:88:04:2B'
+            dhcp.@host[0].ip='192.168.2.50'
+            dhcp.printer=host
+            dhcp.printer.mac='00:11:32:6f:b2:44'
+            dhcp.printer.ip='192.168.2.51'
+            dhcp.@host[1]=host
+            dhcp.@host[1].mac='de:ad:be:ef:00:09'
+            dhcp.lan=dhcp
+            dhcp.lan.interface='lan'
+            """.trimIndent()
+        )
+        val reservations = Parsers.dhcpReservations(uci)
+        // Named and anonymous sections both count; one without an ip does not.
+        assertEquals(2, reservations.size)
+        assertEquals("192.168.2.50", reservations["aa:5c:1e:88:04:2b"]) // lower-cased to match leases
+        assertEquals("192.168.2.51", reservations["00:11:32:6f:b2:44"])
+
+        val now = 1_000_000L
+        val leases = Parsers.leases("${now + 3600} aa:5c:1e:88:04:2b 192.168.2.34 pixel-8 *")
+        val neigh = Parsers.neighEntries("192.168.2.34 dev br-lan lladdr aa:5c:1e:88:04:2b REACHABLE")
+        val client = Inventory.merge(
+            leases, neigh, emptyList(), emptyList(), now, reservations = reservations,
+        ).single()
+        // Still on its old pool address until the lease renews — both are worth showing.
+        assertEquals("192.168.2.34", client.ip)
+        assertEquals("192.168.2.50", client.staticIp)
+    }
+
+    @Test
+    fun `reserve updates an existing entry and release removes it`() {
+        val reserve = com.vivekkaushik.wrtpulse.ops.Commands.reserveIp(
+            "aa:bb:cc:dd:ee:ff", "192.168.2.50", "pixel",
+        )
+        // Reuses the section when the MAC already has one, instead of silently doing nothing.
+        assertTrue(reserve.contains("uci set dhcp.\$s.ip='192.168.2.50'"))
+        assertTrue(reserve.contains("uci add dhcp host"))
+        assertTrue(reserve.contains("/etc/init.d/dnsmasq restart"))
+
+        val release = com.vivekkaushik.wrtpulse.ops.Commands.releaseIp("aa:bb:cc:dd:ee:ff")
+        assertTrue(release.contains("uci delete dhcp.\$s"))
+        assertTrue(release.contains("grep -i"))          // uci may store the MAC upper-cased
+        assertTrue(release.trimEnd().endsWith("; :"))    // no reservation is success, not failure
     }
 
     @Test

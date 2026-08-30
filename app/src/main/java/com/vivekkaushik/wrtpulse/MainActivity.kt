@@ -41,6 +41,7 @@ import com.vivekkaushik.wrtpulse.data.Demo
 import com.vivekkaushik.wrtpulse.data.Inventory
 import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.LiveLogs
+import com.vivekkaushik.wrtpulse.data.RouterOps
 import com.vivekkaushik.wrtpulse.data.Telemetry
 import com.vivekkaushik.wrtpulse.data.TerminalSessions
 import com.vivekkaushik.wrtpulse.data.WifiStore
@@ -122,6 +123,7 @@ private fun WrtPulseApp() {
     val inventory = remember(session) { session?.let { Inventory(it) } }
     val wifiStore = remember(session) { session?.let { WifiStore(it) } }
     val termSessions = remember(session) { session?.let { TerminalSessions(it, scope) } }
+    val routerOps = remember(session) { session?.let { RouterOps(it) } }
     val liveLogs = remember(session) { session?.let { LiveLogs(it) } }
     var logsStarted by remember(session) { mutableStateOf(false) }
     // Polling pauses while the app is in the background; the terminal shell stays attached.
@@ -284,6 +286,7 @@ private fun WrtPulseApp() {
                                 ticker = ticker,
                                 live = telemetry,
                                 inventory = inventory,
+                                ops = routerOps,
                                 routerName = currentRouter,
                                 onRouterTap = { showSwitcher = true },
                                 onOpenTerminal = { tab = MainTab.Terminal },

@@ -327,6 +327,19 @@ class TermEngineTest {
         assertNull(Parsers.logread("not a syslog line"))
     }
 
+    /**
+     * `logread -f` emits only what is logged from now on, so a quiet router showed an empty
+     * screen; the recent buffer has to be printed first.
+     */
+    @Test
+    fun `log stream prints the recent buffer before following`() {
+        val cmd = com.vivekkaushik.wrtpulse.ops.Commands.LOG_FOLLOW
+        assertTrue(cmd.startsWith("logread -l ${com.vivekkaushik.wrtpulse.ops.Commands.LOG_BACKLOG}"))
+        assertTrue(cmd.trimEnd().endsWith("logread -f"))
+        // A build whose logread lacks -l must still reach the follow.
+        assertTrue(cmd.contains("2>/dev/null;"))
+    }
+
     @Test
     fun `log colors follow severity then source`() {
         assertEquals(com.vivekkaushik.wrtpulse.ui.theme.Wrt.Red, LiveLogs.colorFor("err", "dnsmasq"))

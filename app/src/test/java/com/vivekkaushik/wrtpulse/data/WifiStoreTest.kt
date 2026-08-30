@@ -118,6 +118,27 @@ class WifiStoreTest {
     }
 }
 
+class ScanCommandTest {
+
+    /**
+     * A band with no SSID has no netdev, so iwinfo has nothing to scan through. The temp
+     * interface must be removed whether or not the scan itself worked.
+     */
+    @org.junit.Test
+    fun `temporary scan interface is created and always torn down`() {
+        val cmd = com.vivekkaushik.wrtpulse.ops.Commands.scanViaTempInterface("phy0")
+        org.junit.Assert.assertTrue(cmd.contains("iw phy phy0 interface add wrtpulse-scan type managed"))
+        org.junit.Assert.assertTrue(cmd.contains("ip link set wrtpulse-scan up"))
+        org.junit.Assert.assertTrue(cmd.contains("iwinfo wrtpulse-scan scan"))
+        // Deleted before creating (stale leftovers) and after scanning, so nothing persists.
+        org.junit.Assert.assertEquals(2, Regex("iw dev wrtpulse-scan del").findAll(cmd).count())
+        // Output is captured first so the teardown cannot swallow the results.
+        org.junit.Assert.assertTrue(cmd.indexOf("R=") < cmd.lastIndexOf("iw dev wrtpulse-scan del"))
+        org.junit.Assert.assertTrue(cmd.trimEnd().endsWith("echo \"\$R\""))
+        org.junit.Assert.assertTrue(!cmd.contains("uci"))   // nothing persistent is written
+    }
+}
+
 class ScanParserTest {
     @org.junit.Test
     fun `iwinfo scan cells parse`() {

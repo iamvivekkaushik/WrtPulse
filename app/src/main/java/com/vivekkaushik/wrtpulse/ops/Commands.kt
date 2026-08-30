@@ -36,6 +36,7 @@ object Commands {
             "for i in \$(iwinfo 2>/dev/null | grep ESSID | cut -d' ' -f1); do " +
             "echo \"# \$i\"; iwinfo \$i assoclist; done",
         "echo $SECTION blocked" to "uci show firewall 2>/dev/null | grep wrtpulse-block- || true",
+        "echo $SECTION resv" to "uci show dhcp 2>/dev/null | grep -i host || true",
         "echo $SECTION nlbwbin" to "command -v nlbw 2>/dev/null || true",
         "echo $SECTION nlbw" to "nlbw -c json 2>/dev/null || true",
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
@@ -95,20 +96,51 @@ object Commands {
     fun wake(mac: String): String =
         "ether-wake -i br-lan '$mac' 2>/dev/null || etherwake -i br-lan '$mac'"
 
-    /** DHCP reservation, idempotent per MAC. */
-    fun reserveIp(mac: String, ip: String, name: String): String =
-        "uci show dhcp 2>/dev/null | grep -iq \"$mac\" || (" +
-        "uci add dhcp host >/dev/null && " +
-        "uci set dhcp.@host[-1].name='$name' && " +
-        "uci set dhcp.@host[-1].mac='$mac' && " +
-        "uci set dhcp.@host[-1].ip='$ip' && " +
-        "uci commit dhcp && /etc/init.d/dnsmasq restart >/dev/null 2>&1)"
+    /** Finds the dhcp host section holding a MAC, if any. */
+    private fun hostSectionFor(mac: String) =
+        "uci show dhcp 2>/dev/null | grep -i \"\\.mac='$mac'\" | cut -d. -f2 | head -1"
 
-    /** Neighbour survey for the channel chart. */
+    /** DHCP reservation: updates the existing entry for this MAC, or adds one. */
+    fun reserveIp(mac: String, ip: String, name: String): String =
+        "s=\$(${hostSectionFor(mac)}); " +
+        "if [ -n \"\$s\" ]; then uci set dhcp.\$s.ip='$ip'; else " +
+        "uci add dhcp host >/dev/null; uci set dhcp.@host[-1].name='$name'; " +
+        "uci set dhcp.@host[-1].mac='$mac'; uci set dhcp.@host[-1].ip='$ip'; fi && " +
+        "uci commit dhcp && /etc/init.d/dnsmasq restart >/dev/null 2>&1"
+
+    /** Drops the reservation so the client goes back to a pool address. */
+    fun releaseIp(mac: String): String =
+        "s=\$(${hostSectionFor(mac)}); " +
+        "[ -n \"\$s\" ] && uci delete dhcp.\$s && uci commit dhcp && " +
+        "/etc/init.d/dnsmasq restart >/dev/null 2>&1; :"
+
+    /** Neighbour survey for the channel chart, through an interface already on the radio. */
     fun scan(radioIface: String) = "iwinfo $radioIface scan"
 
-    /** Streams the system log. Cancelling the collector closes the channel. */
-    const val LOG_FOLLOW = "logread -f"
+    /**
+     * Survey a radio that has no interface of its own — a band with no SSID configured has
+     * no netdev, so nothing can scan through it. Adds a station interface just long enough
+     * to scan, then removes it. Nothing is written to uci.
+     */
+    fun scanViaTempInterface(phy: String): String {
+        val temp = "wrtpulse-scan"
+        return "iw dev $temp del >/dev/null 2>&1; " +
+            "iw phy $phy interface add $temp type managed >/dev/null 2>&1 || " +
+            "{ echo 'ERR add'; exit 1; }; " +
+            "ip link set $temp up >/dev/null 2>&1; " +
+            "R=\$(iwinfo $temp scan 2>&1); " +
+            "iw dev $temp del >/dev/null 2>&1; " +
+            "echo \"\$R\""
+    }
+
+    /**
+     * Streams the system log. `logread -f` only emits entries logged from now on, which
+     * leaves the screen blank on a quiet router, so the recent buffer is printed first.
+     * If this build's logread lacks -l the dump fails quietly and the follow still runs.
+     */
+    const val LOG_BACKLOG = 200
+
+    const val LOG_FOLLOW = "logread -l $LOG_BACKLOG 2>/dev/null; logread -f"
 
     /** Snapshot of the current wireless config, used as the "before" side of the diff. */
     const val WIRELESS_EXPORT = "uci export wireless"
@@ -138,5 +170,39 @@ object Commands {
     /** Package manager differs across releases: apk on 24.10+, opkg before it. */
     const val DETECT_PACKAGE_MANAGER = "command -v apk >/dev/null && echo apk || echo opkg"
 
-    const val REBOOT = "reboot"
+    /**
+     * Reboots a second after the exec returns, so the app gets a clean reply instead of
+     * losing the channel mid-command and having to guess whether the reboot took.
+     */
+    const val REBOOT = "(sleep 1; reboot) >/dev/null 2>&1 & echo scheduled"
+
+    /** Public, unauthenticated fixed-size download; the app times the round trip itself. */
+    const val SPEEDTEST_HOST = "speed.cloudflare.com"
+
+    /**
+     * Pulls [bytes] from the speed-test endpoint on the router and discards it. Echoes the
+     * byte count so a silent failure can't be mistaken for an instant download.
+     */
+    fun speedtestDownload(bytes: Long): String =
+        "URL='https://$SPEEDTEST_HOST/__down?bytes=$bytes'; " +
+        "{ uclient-fetch -q -O /dev/null \"\$URL\" || wget -q -O /dev/null \"\$URL\"; } && echo $bytes"
+
+    /** Scratch payload for the upload leg; /tmp is RAM, so it is cleaned up straight after. */
+    const val SPEEDTEST_UPLOAD_FILE = "/tmp/wrtpulse-speedtest.bin"
+
+    /** Built before the timed leg so writing the file isn't counted as upload time. */
+    fun speedtestPrepareUpload(bytes: Long): String =
+        "dd if=/dev/zero of=$SPEEDTEST_UPLOAD_FILE bs=1024 count=${bytes / 1024} 2>/dev/null && echo ready"
+
+    /**
+     * curl first: OpenWrt's uclient-fetch accepts --post-file but stalls partway through a
+     * large body and the far end resets, so it cannot measure an upload.
+     */
+    fun speedtestUpload(bytes: Long): String =
+        "URL='https://$SPEEDTEST_HOST/__up'; " +
+        "if command -v curl >/dev/null 2>&1; then " +
+        "curl -s -o /dev/null --data-binary @$SPEEDTEST_UPLOAD_FILE \"\$URL\"; else " +
+        "uclient-fetch -q -O /dev/null --post-file=$SPEEDTEST_UPLOAD_FILE \"\$URL\"; fi && echo $bytes"
+
+    const val SPEEDTEST_CLEANUP = "rm -f $SPEEDTEST_UPLOAD_FILE"
 }

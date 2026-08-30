@@ -387,7 +387,7 @@ private fun ExpandedClientCard(
         WrtInputDialog(
             title = "Static IP for ${client.name}",
             label = "IP ADDRESS",
-            initial = client.ip.takeIf { it != "—" } ?: "",
+            initial = client.staticIp ?: client.ip.takeIf { it != "—" } ?: "",
             confirmLabel = "Reserve",
             keyboard = KeyboardType.Number,
             onDismiss = { reserveOpen = false },
@@ -422,7 +422,20 @@ private fun ExpandedClientCard(
                     modifier = Modifier.padding(top = 3.dp),
                 )
             }
+            if (client.staticIp != null) {
+                MonoTag("STATIC", color = Wrt.Blue, border = Wrt.Blue.copy(alpha = 0.45f), size = 9f)
+            }
             if (client.network.isNotEmpty()) MonoTag(client.network, size = 9f)
+        }
+        if (client.staticIp != null && client.staticIp != client.ip) {
+            // The reservation only takes effect on the client's next DHCP renewal.
+            Text(
+                "reserved ${client.staticIp} · applies on next renewal",
+                style = mono(9.5f, 500, Wrt.Blue),
+                maxLines = 1,
+                softWrap = false,
+                modifier = Modifier.padding(top = 6.dp),
+            )
         }
         Row(
             Modifier
@@ -512,8 +525,14 @@ private fun ExpandedClientCard(
                     runAction { live!!.setBlocked(client.mac, true) }
                 }
             }
-            ClientAction(Modifier.weight(1f), "Static IP", Wrt.TextSecondary, Wrt.BorderInput) {
-                if (live != null) reserveOpen = true
+            if (client.staticIp != null) {
+                ClientAction(Modifier.weight(1f), "Un-static", Wrt.Blue, Wrt.Blue.copy(alpha = 0.45f)) {
+                    runAction { live!!.release(client.mac) }
+                }
+            } else {
+                ClientAction(Modifier.weight(1f), "Static IP", Wrt.TextSecondary, Wrt.BorderInput) {
+                    if (live != null) reserveOpen = true
+                }
             }
             ClientAction(Modifier.weight(1f), "WoL", Wrt.TextSecondary, Wrt.BorderInput) {
                 runAction { live!!.wake(client.mac) }
@@ -633,6 +652,15 @@ private fun ClientRow(client: Client, onClick: () -> Unit) {
                     client.blocked -> MonoTag("BLOCKED", color = Wrt.Red, border = Wrt.Red.copy(alpha = 0.45f), size = 9f)
                     client.offline -> MonoTag("OFFLINE", color = Wrt.TextDim, border = Wrt.BorderFaint, size = 9f)
                     client.network.isNotEmpty() -> MonoTag(client.network, size = 9f)
+                }
+                if (client.staticIp != null) {
+                    Text(
+                        "STATIC",
+                        style = mono(8.5f, 600, Wrt.Blue),
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
                 }
                 if (client.usageTotal > 0) {
                     Text(

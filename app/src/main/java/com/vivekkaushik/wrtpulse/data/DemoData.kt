@@ -34,6 +34,8 @@ data class Client(
     val usageDown: Long? = null,
     val usageUp: Long? = null,
     val apps: List<Pair<String, Long>> = emptyList(),
+    /** Address reserved for this MAC in dnsmasq, when one is set. */
+    val staticIp: String? = null,
 ) {
     val usageTotal: Long get() = (usageDown ?: 0) + (usageUp ?: 0)
 }

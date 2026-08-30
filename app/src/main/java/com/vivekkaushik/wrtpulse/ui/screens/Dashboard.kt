@@ -31,7 +31,24 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import com.vivekkaushik.wrtpulse.data.Demo
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.vivekkaushik.wrtpulse.data.Inventory
+import com.vivekkaushik.wrtpulse.data.RouterOps
+import com.vivekkaushik.wrtpulse.data.SpeedPhase
+import com.vivekkaushik.wrtpulse.data.SpeedResult
+import com.vivekkaushik.wrtpulse.ops.Commands
+import com.vivekkaushik.wrtpulse.ui.GhostButton
+import com.vivekkaushik.wrtpulse.ui.PrimaryButton
+import kotlinx.coroutines.launch
 import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.Ssid
 import com.vivekkaushik.wrtpulse.data.Telemetry
@@ -56,10 +73,19 @@ fun DashboardScreen(
     ticker: LiveTicker,
     live: Telemetry?,
     inventory: Inventory?,
+    ops: RouterOps? = null,
     routerName: String,
     onRouterTap: () -> Unit,
     onOpenTerminal: () -> Unit,
 ) {
+    var rebootOpen by remember { mutableStateOf(false) }
+    var speedOpen by remember { mutableStateOf(false) }
+    if (rebootOpen && ops != null) {
+        RebootDialog(ops, routerName, onDismiss = { rebootOpen = false })
+    }
+    if (speedOpen && ops != null) {
+        SpeedtestDialog(ops, onDismiss = { speedOpen = false })
+    }
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         ConnectionTopBar(
             routerName = routerName,
@@ -114,9 +140,15 @@ fun DashboardScreen(
             WanCard(ticker, live)
             SsidCard(if (inventory != null) inventory.ssids.toList() else null)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                QuickAction(Modifier.weight(1f), WrtIcons.Reboot, "Reboot")
+                QuickAction(
+                    Modifier.weight(1f), WrtIcons.Reboot, "Reboot",
+                    onClick = if (ops != null) ({ rebootOpen = true }) else null,
+                )
                 QuickAction(Modifier.weight(1f), WrtIcons.GuestWifi, "Guest Wi-Fi")
-                QuickAction(Modifier.weight(1f), WrtIcons.Speedtest, "Speedtest")
+                QuickAction(
+                    Modifier.weight(1f), WrtIcons.Speedtest, "Speedtest",
+                    onClick = if (ops != null) ({ speedOpen = true }) else null,
+                )
                 QuickAction(Modifier.weight(1f), WrtIcons.Prompt, "Terminal", onClick = onOpenTerminal)
             }
         }
@@ -249,6 +281,213 @@ private fun SsidCard(liveSsids: List<Ssid>?) {
             }
             if (i < ssids.lastIndex) Box(Modifier.fillMaxWidth().height(1.dp).background(Wrt.BorderHair))
         }
+    }
+}
+
+/** Rebooting cuts the network for everyone, so it takes a deliberate 3 s hold. */
+@Composable
+private fun RebootDialog(ops: RouterOps, routerName: String, onDismiss: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var result by remember { mutableStateOf<String?>(null) }
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .border(1.dp, Wrt.Red.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+                .background(Wrt.BgBar, RoundedCornerShape(16.dp))
+                .padding(18.dp)
+        ) {
+            Text("Reboot $routerName?", style = sans(15f, 650, Wrt.Red))
+            Text(
+                "Wi-Fi and internet drop for a minute or two while it restarts. " +
+                    "The app reconnects on its own once it is back.",
+                style = sans(12f, 400, Wrt.TextSecondary, lineHeight = 18.sp),
+                modifier = Modifier.padding(top = 6.dp),
+            )
+            if (result != null) {
+                Text(
+                    result!!,
+                    style = mono(10.5f, 500, if (result!!.startsWith("Failed")) Wrt.Red else Wrt.Accent),
+                    modifier = Modifier.padding(top = 12.dp),
+                )
+                Spacer(Modifier.height(14.dp))
+                PrimaryButton("Done", onClick = onDismiss)
+            } else {
+                Spacer(Modifier.height(16.dp))
+                HoldToConfirm("Hold to reboot") {
+                    scope.launch { result = ops.reboot() }
+                }
+                Text(
+                    "Hold 3 s to confirm",
+                    style = sans(10.5f, 400, Wrt.TextDim),
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(6.dp))
+                GhostButton("Cancel", onClick = onDismiss)
+            }
+        }
+    }
+}
+
+/** A speed test leaves the house, so it says where it goes and how much it pulls. */
+@Composable
+private fun SpeedtestDialog(ops: RouterOps, onDismiss: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var running by remember { mutableStateOf(false) }
+    var phase by remember { mutableStateOf(SpeedPhase.Download) }
+    var result by remember { mutableStateOf<SpeedResult?>(null) }
+    Dialog(onDismissRequest = { if (!running) onDismiss() }) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .border(1.dp, Wrt.BorderCard, RoundedCornerShape(16.dp))
+                .background(Wrt.BgBar, RoundedCornerShape(16.dp))
+                .padding(18.dp)
+        ) {
+            Text("Measure download speed", style = sans(15f, 650))
+            Text(
+                "The router downloads 20 MB from ${Commands.SPEEDTEST_HOST} and uploads 5 MB back. " +
+                    "This uses your internet data.",
+                style = sans(12f, 400, Wrt.TextSecondary, lineHeight = 18.sp),
+                modifier = Modifier.padding(top = 6.dp),
+            )
+            val outcome = result
+            if (outcome != null) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(top = 14.dp)
+                        .border(1.dp, Wrt.BorderHair, RoundedCornerShape(11.dp))
+                        .background(Wrt.BgDeep, RoundedCornerShape(11.dp))
+                        .padding(horizontal = 13.dp, vertical = 12.dp)
+                ) {
+                    if (outcome.error != null) {
+                        Text(outcome.error, style = sans(12f, 500, Wrt.Red))
+                    } else {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.Bottom,
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    "↓ ${String.format("%.1f", outcome.downMbps)}",
+                                    style = mono(18f, 600, Wrt.Accent),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
+                                Text(
+                                    "${Telemetry.bytesLabel(outcome.downBytes)} · " +
+                                        "${String.format("%.1f", outcome.downSeconds)} s",
+                                    style = mono(10f, 500, Wrt.TextDim),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    modifier = Modifier.padding(top = 4.dp),
+                                )
+                            }
+                            Column(Modifier.weight(1f)) {
+                                if (outcome.hasUpload) {
+                                    Text(
+                                        "↑ ${String.format("%.1f", outcome.upMbps)}",
+                                        style = mono(18f, 600, Wrt.Blue),
+                                        maxLines = 1,
+                                        softWrap = false,
+                                    )
+                                    Text(
+                                        "${Telemetry.bytesLabel(outcome.upBytes)} · " +
+                                            "${String.format("%.1f", outcome.upSeconds)} s",
+                                        style = mono(10f, 500, Wrt.TextDim),
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        modifier = Modifier.padding(top = 4.dp),
+                                    )
+                                } else {
+                                    Text("↑ —", style = mono(18f, 600, Wrt.TextDim), maxLines = 1)
+                                }
+                            }
+                            Text("Mbps", style = mono(10.5f, 500, Wrt.TextDim), modifier = Modifier.padding(bottom = 3.dp))
+                        }
+                        Text(
+                            outcome.uploadError ?: "Includes connection setup, so both read a little low.",
+                            style = sans(10f, 400, if (outcome.uploadError != null) Wrt.Amber else Wrt.TextDim),
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            PrimaryButton(
+                when {
+                    running && phase == SpeedPhase.Download -> "Downloading…"
+                    running -> "Uploading…"
+                    result != null -> "Run again"
+                    else -> "Run test"
+                },
+                onClick = {
+                    if (!running) {
+                        running = true
+                        scope.launch {
+                            phase = SpeedPhase.Download
+                            result = ops.speedtest(onPhase = { phase = it })
+                            running = false
+                        }
+                    }
+                },
+            )
+            Spacer(Modifier.height(6.dp))
+            GhostButton(if (result != null) "Close" else "Cancel", onClick = { if (!running) onDismiss() })
+        }
+    }
+}
+
+/** Fills over a 3 s hold; letting go early cancels. */
+@Composable
+private fun HoldToConfirm(label: String, onConfirm: () -> Unit) {
+    val progress = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    var done by remember { mutableStateOf(false) }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(46.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .border(1.dp, Wrt.Red.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        awaitPointerEvent()
+                        val pressed = currentEvent.changes.any { it.pressed }
+                        if (pressed && !done && !progress.isRunning) {
+                            scope.launch {
+                                progress.animateTo(
+                                    1f,
+                                    tween(((1f - progress.value) * 3000).toInt(), easing = LinearEasing),
+                                )
+                                if (progress.value >= 1f) {
+                                    done = true
+                                    onConfirm()
+                                }
+                            }
+                        } else if (!pressed && !done) {
+                            scope.launch {
+                                progress.stop()
+                                progress.animateTo(0f, tween(180))
+                            }
+                        }
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .align(Alignment.CenterStart)
+                .fillMaxWidth(progress.value)
+                .height(46.dp)
+                .background(Wrt.Red.copy(alpha = 0.3f))
+        )
+        Text(label, style = sans(13.5f, 650, Wrt.Red))
     }
 }
 

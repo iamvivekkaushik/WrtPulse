@@ -60,21 +60,29 @@ class WifiStore(private val session: RouterSession) {
     }
 
     /** Neighbour survey on one radio. Takes a few seconds; the radio stays up. */
+    /**
+     * Neighbour survey. Scans through the radio's own interface when it has one; a band with
+     * no SSID configured has no interface, so a station interface is added for the scan and
+     * removed straight after.
+     */
     suspend fun scan(radio: String) {
         if (scanning) return
-        val ifname = ifnames[radio]
-        if (ifname == null) {
-            error = "No running interface on $radio to scan with."
-            return
-        }
         scanning = true
+        error = null
         try {
-            val out = session.exec(Commands.scan(ifname), timeoutMs = 25_000)
-            if (out.ok) {
-                scans[radio] = Parsers.scanCells(out.stdout)
-                error = null
-            } else {
-                error = "Scan failed: ${out.stderr.trim().ifEmpty { "exit ${out.exitCode}" }}"
+            val ifname = ifnames[radio]
+            val command =
+                if (ifname != null) Commands.scan(ifname)
+                else Commands.scanViaTempInterface(phyFor(radio))
+            val out = session.exec(command, timeoutMs = 60_000)
+            val cells = Parsers.scanCells(out.stdout)
+            when {
+                cells.isNotEmpty() -> scans[radio] = cells
+                out.stdout.contains("ERR add") ->
+                    error = "This radio has no interface to scan with, and one couldn't be created."
+                !out.ok || out.stdout.contains("Not supported", true) || out.stdout.contains("failed", true) ->
+                    error = "Scan failed: ${out.stdout.trim().lines().lastOrNull()?.take(90).orEmpty()}"
+                else -> scans[radio] = emptyList()   // scanned fine, genuinely nothing heard
             }
         } catch (e: SshException) {
             error = "Scan failed: ${e.message}"
@@ -82,6 +90,9 @@ class WifiStore(private val session: RouterSession) {
             scanning = false
         }
     }
+
+    /** OpenWrt numbers radios and phys alike: radio0 sits on phy0. */
+    private fun phyFor(radio: String) = "phy" + radio.filter { it.isDigit() }.ifEmpty { "0" }
 
     /** Stages one option; staging the saved value back un-stages it. */
     fun stage(section: String, option: String, saved: String, value: String) {

@@ -132,7 +132,10 @@ class Inventory(private val session: RouterSession) {
         action(Commands.wake(mac), "Magic packet sent")
 
     suspend fun reserve(mac: String, ip: String, name: String): String =
-        action(Commands.reserveIp(mac, ip, name), "Reserved $ip — dnsmasq restarted")
+        action(Commands.reserveIp(mac, ip, name), "Reserved $ip — reconnect the device to pick it up")
+
+    suspend fun release(mac: String): String =
+        action(Commands.releaseIp(mac), "Back to DHCP — reconnect the device to pick it up")
 
     internal fun ingest(sections: Map<String, String>, nowEpoch: Long, updateRates: Boolean = true) {
         lastSections = sections
@@ -141,6 +144,7 @@ class Inventory(private val session: RouterSession) {
         val stations = Parsers.stations(sections["assoc"].orEmpty())
         val wifi = Parsers.wirelessStatus(sections["wifi"].orEmpty())
         val blocked = Parsers.blockedMacs(sections["blocked"].orEmpty())
+        val reservations = Parsers.dhcpReservations(Parsers.uciShow(sections["resv"].orEmpty()))
 
         sections["nlbwbin"]?.let { nlbwPresent = it.isNotBlank() }
         val hosts = Parsers.nlbwHosts(sections["nlbw"].orEmpty())
@@ -151,7 +155,8 @@ class Inventory(private val session: RouterSession) {
         // a MAC with no data must read "—", never its link rate.
         val usage = if (nlbwPresent == true) lastUsage else null
 
-        val merged = merge(leases, neigh, stations, wifi, nowEpoch, blocked, nameOverrides, usage, totals)
+        val merged =
+            merge(leases, neigh, stations, wifi, nowEpoch, blocked, nameOverrides, usage, totals, reservations)
         clients.clear(); clients.addAll(merged)
 
         val bySsid = wifi.groupBy { it.ssid }
@@ -205,6 +210,7 @@ class Inventory(private val session: RouterSession) {
             nameOverrides: Map<String, String> = emptyMap(),
             usage: Map<String, Pair<Float, Float>>? = null,
             totals: Map<String, NlbwHost> = emptyMap(),
+            reservations: Map<String, String> = emptyMap(),
         ): List<Client> {
             val leaseByMac = leases.associateBy { it.mac }
             val ifaceInfo = wifi.associateBy { it.ifname }
@@ -240,6 +246,7 @@ class Inventory(private val session: RouterSession) {
                     usageDown = totals[st.mac]?.downBytes,
                     usageUp = totals[st.mac]?.upBytes,
                     apps = totals[st.mac]?.topApps.orEmpty(),
+                    staticIp = reservations[st.mac],
                 )
             }
             val wirelessMacs = wireless.map { it.mac }.toSet()
@@ -261,6 +268,7 @@ class Inventory(private val session: RouterSession) {
                         usageDown = totals[n.mac]?.downBytes,
                         usageUp = totals[n.mac]?.upBytes,
                         apps = totals[n.mac]?.topApps.orEmpty(),
+                        staticIp = reservations[n.mac],
                     )
                 }
             val onlineMacs = wirelessMacs + wired.map { it.mac }
@@ -280,6 +288,7 @@ class Inventory(private val session: RouterSession) {
                         usageDown = totals[l.mac]?.downBytes,
                         usageUp = totals[l.mac]?.upBytes,
                         apps = totals[l.mac]?.topApps.orEmpty(),
+                        staticIp = reservations[l.mac],
                     )
                 }
 

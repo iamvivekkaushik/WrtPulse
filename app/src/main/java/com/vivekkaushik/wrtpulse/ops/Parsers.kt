@@ -458,6 +458,22 @@ object Parsers {
         return radios to networks
     }
 
+    /**
+     * `uci show dhcp` → MAC to reserved address, for every `host` section that has both.
+     * MACs are lower-cased so they match the ones iwinfo and the lease file report.
+     */
+    fun dhcpReservations(uci: Map<String, String>): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        uci.forEach { (key, value) ->
+            if (value != "host" || key.count { it == '.' } != 1) return@forEach
+            val section = key.substringAfter('.')
+            val mac = uci["dhcp.$section.mac"]?.lowercase()
+            val ip = uci["dhcp.$section.ip"]
+            if (!mac.isNullOrBlank() && !ip.isNullOrBlank()) result[mac] = ip
+        }
+        return result
+    }
+
     /** "psk2" → the tag the design shows on the SSID card. */
     fun encryptionLabel(encryption: String): String = when {
         encryption.startsWith("sae-mixed") -> "WPA2/3"

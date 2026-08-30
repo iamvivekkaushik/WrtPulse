@@ -40,6 +40,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
+import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.rememberCoroutineScope
 import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.WifiStore
@@ -396,6 +397,14 @@ private fun LiveChannelChartCard(store: WifiStore, radio: WifiRadio, channel: St
             Text(
                 "Survey nearby access points to judge how crowded this channel is.",
                 style = sans(11f, 400, Wrt.TextDim),
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+        // A scan that fails has to say so here; the card is the only place the user is looking.
+        store.error?.let { message ->
+            Text(
+                message,
+                style = sans(11f, 500, Wrt.Red, lineHeight = 16.sp),
                 modifier = Modifier.padding(top = 8.dp),
             )
         }
