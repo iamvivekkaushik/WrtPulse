@@ -142,6 +142,69 @@ data class InstallPlan(
         if (packages.isNotEmpty() && packages.all { it.second != null }) packages.sumOf { it.second!! } else null
 }
 
+/** What removing a package would take with it — the mirror of [InstallPlan]. */
+data class RemovePlan(
+    val packageManager: String,
+    /** Name to the space it occupies now, as far as the installed list knows. */
+    val packages: List<Pair<String, Long?>>,
+    val availKb: Long?,                  // overlay space before removal
+    val problem: String?,                // the manager refused, or has nothing to remove
+) {
+    val totalBytes: Long? get() =
+        if (packages.isNotEmpty() && packages.all { it.second != null }) packages.sumOf { it.second!! } else null
+}
+
+/** One package as the router's package manager describes it. */
+data class RouterPackage(
+    val name: String,
+    val version: String = "",
+    val sizeBytes: Long? = null,
+    val installed: Boolean = true,
+    /** Pulled in to satisfy a dependency rather than asked for. opkg records this; apk doesn't. */
+    val auto: Boolean = false,
+    val description: String = "",
+    /** The version the feed offers, set only when it is newer than [version]. */
+    val upgradeTo: String? = null,
+)
+
+/** The verbs an OpenWrt init script understands, and what a button calls them. */
+enum class ServiceAction(val verb: String, val label: String) {
+    Start("start", "Start"),
+    Stop("stop", "Stop"),
+    Restart("restart", "Restart"),
+    Reload("reload", "Reload"),
+    Enable("enable", "Enable at boot"),
+    Disable("disable", "Disable at boot"),
+}
+
+/**
+ * One entry in `/etc/init.d`, merged with what procd says about it.
+ *
+ * [procd] is what separates a daemon from a one-shot boot script, and the distinction
+ * matters more than it looks: `sysfixtime` is not "stopped", it ran at boot and exited.
+ * Only a procd service has a state worth calling stopped.
+ */
+data class RouterService(
+    val name: String,
+    /** Has an rc.d symlink — it starts at boot. */
+    val enabled: Boolean = false,
+    val running: Boolean = false,
+    val procd: Boolean = false,
+    /** `START=` from the script; decides boot order, and null when the script sets none. */
+    val start: Int? = null,
+    val pid: Int? = null,
+    val instances: Int = 0,
+) {
+    /** A boot script has nothing to stop, so the screen offers it nothing to stop with. */
+    val oneShot: Boolean get() = !procd
+
+    val statusLabel: String get() = when {
+        running -> "running"
+        procd -> "stopped"
+        else -> "boot script"
+    }
+}
+
 /** One neighbouring AP from `iwinfo <iface> scan`. */
 data class ScanCell(
     val channel: Int,
@@ -603,18 +666,18 @@ object Parsers {
         return (value * scale).toLong()
     }
 
-    /** Sections of [Commands.NLBW_PLAN] → the consent dialog's numbers. */
-    fun installPlan(sections: Map<String, String>): InstallPlan {
+    /** Sections of [Commands.installPlan] → the consent dialog's numbers. */
+    fun installPlan(sections: Map<String, String>, pkg: String = "nlbwmon"): InstallPlan {
         val pm = sections["pm"].orEmpty().trim().ifEmpty { "opkg" }
         val plan = sections["plan"].orEmpty()
         val problem = when {
             plan.contains("Unknown package", ignoreCase = true) ||
                 plan.contains("unable to select packages", ignoreCase = true) ||
                 (pm == "apk" && plan.contains("ERROR")) ->
-                "The $pm feed doesn't offer nlbwmon — is the router online?"
+                "The $pm feed doesn't offer $pkg — is the router online, and is the package list fresh?"
             // Package present but the binary wasn't found: the service exists, just isn't running.
             plan.contains("is up to date", ignoreCase = true) ->
-                "nlbwmon is already installed — it only needs to be started."
+                "$pkg is already installed — it only needs to be started."
             !plan.contains("Installing", ignoreCase = true) ->
                 "Couldn't resolve the install — is the router online?"
             else -> null
@@ -634,6 +697,203 @@ object Parsers {
             availKb = overlayAvailKb(sections["df"].orEmpty()),
             problem = problem,
         )
+    }
+
+    // apk says "(1/2) Purging nlbwmon (1.2-r3)"; opkg says "Removing package nlbwmon from root...".
+    private val PLAN_REMOVE = Regex("(?:Purging|Removing|Deleting)\\s+(?:package\\s+)?([A-Za-z0-9._+-]+)")
+
+    /**
+     * Sections of [Commands.removePlan] → what would actually go. [sizes] comes from the
+     * installed list, because a package that is already on the router doesn't need its size
+     * looked up again.
+     */
+    fun removePlan(sections: Map<String, String>, sizes: Map<String, Long?> = emptyMap()): RemovePlan {
+        val pm = sections["pm"].orEmpty().trim().ifEmpty { "opkg" }
+        val plan = sections["plan"].orEmpty()
+        val names = PLAN_REMOVE.findAll(plan).map { it.groupValues[1] }.distinct().toList()
+        val problem = when {
+            plan.contains("depended upon by", ignoreCase = true) ||
+                plan.contains("cannot remove", ignoreCase = true) ||
+                plan.contains("would break dependency", ignoreCase = true) ->
+                "Another installed package depends on it. Remove that one first."
+            names.isNotEmpty() -> null
+            plan.contains("ERROR", ignoreCase = true) ->
+                plan.lineSequence().firstOrNull { it.contains("ERROR", ignoreCase = true) }?.trim()
+                    ?: "$pm refused the removal."
+            else -> "$pm has nothing to remove under that name."
+        }
+        return RemovePlan(
+            packageManager = pm,
+            packages = names.map { it to sizes[it] },
+            availKb = overlayAvailKb(sections["df"].orEmpty()),
+            problem = problem,
+        )
+    }
+
+    /** `apk info --size` answers in human units; opkg's status file answers in bare bytes. */
+    fun packageSize(raw: String): Long? {
+        val text = raw.trim()
+        if (text.isEmpty()) return null
+        return text.toLongOrNull() ?: humanBytes(text)
+    }
+
+    // apk joins name and version with the same dash it allows inside names, so the split is
+    // anchored on the version: a digit, then anything but a dash, then an optional -rN.
+    private val APK_NAME_VERSION = Regex("^(.+)-([0-9][^-]*(?:-r[0-9]+)?)$")
+
+    /** "kmod-nf-conntrack-6.6.63-r1" → name and version; a bare name keeps an empty version. */
+    fun splitNameVersion(nameVersion: String): Pair<String, String> {
+        val text = nameVersion.trim()
+        val m = APK_NAME_VERSION.find(text) ?: return text to ""
+        return m.groupValues[1] to m.groupValues[2]
+    }
+
+    /**
+     * The `installed` section of [Commands.PACKAGES]. apk lines are `<name>-<version>|<size>`
+     * because its database is binary and only reports the two joined; opkg lines carry every
+     * field separately, including whether the package arrived as somebody else's dependency.
+     */
+    fun installedPackages(text: String, manager: String): List<RouterPackage> =
+        text.lineSequence().mapNotNull { line ->
+            if (!line.contains('|')) return@mapNotNull null
+            val fields = line.split('|')
+            if (manager == "apk") {
+                val (name, version) = splitNameVersion(fields[0])
+                if (name.isBlank()) return@mapNotNull null
+                RouterPackage(name, version, packageSize(fields.getOrElse(1) { "" }))
+            } else {
+                val name = fields[0].trim()
+                if (name.isBlank()) return@mapNotNull null
+                RouterPackage(
+                    name = name,
+                    version = fields.getOrElse(1) { "" }.trim(),
+                    sizeBytes = packageSize(fields.getOrElse(2) { "" }),
+                    auto = fields.getOrElse(3) { "" }.trim() == "auto",
+                )
+            }
+        }.distinctBy { it.name }.sortedBy { it.name }.toList()
+
+    /**
+     * `apk list --upgradable` / `opkg list-upgradable`. [RouterPackage.version] is what is
+     * installed now and [RouterPackage.upgradeTo] is what the feed offers.
+     */
+    fun upgradablePackages(text: String, manager: String): List<RouterPackage> =
+        text.lineSequence().mapNotNull { line ->
+            val t = line.trim()
+            if (t.isEmpty()) return@mapNotNull null
+            if (manager == "apk") {
+                // "foo-1.2-r3 aarch64 {foo} (GPL-2.0) [upgradable from: foo-1.1-r1]"
+                val (name, offered) = splitNameVersion(t.substringBefore(' '))
+                if (name.isBlank()) return@mapNotNull null
+                val from = Regex("upgradable from:\\s*([^\\]\\s]+)").find(t)?.groupValues?.get(1)
+                RouterPackage(
+                    name = name,
+                    version = from?.let { splitNameVersion(it).second }.orEmpty(),
+                    upgradeTo = offered,
+                )
+            } else {
+                // "luci-base - git-23.1 - git-24.2"
+                val parts = t.split(" - ").map { it.trim() }
+                if (parts.size < 3 || parts[0].contains(' ')) return@mapNotNull null
+                RouterPackage(parts[0], parts[1], upgradeTo = parts[2])
+            }
+        }.distinctBy { it.name }.toList()
+
+    /**
+     * Feed search results. apk's list carries no description — the `{...}` field is the
+     * source package, not prose — so a search result there is a name, a version and whether
+     * it is already on the router.
+     */
+    fun packageSearchResults(text: String, manager: String): List<RouterPackage> =
+        text.lineSequence().mapNotNull { line ->
+            val t = line.trim()
+            if (t.isEmpty()) return@mapNotNull null
+            if (manager == "apk") {
+                val (name, version) = splitNameVersion(t.substringBefore(' '))
+                if (name.isBlank()) return@mapNotNull null
+                RouterPackage(name, version, installed = t.contains("[installed]"))
+            } else {
+                val parts = t.split(" - ")
+                val name = parts[0].trim()
+                if (name.isBlank() || name.contains(' ')) return@mapNotNull null
+                RouterPackage(
+                    name = name,
+                    version = parts.getOrElse(1) { "" }.trim(),
+                    installed = false,
+                    description = parts.drop(2).joinToString(" - ").trim(),
+                )
+            }
+        }.distinctBy { it.name }.toList()
+
+    /** Seconds since the package index was last written; null when no index was found. */
+    fun feedAgeSeconds(text: String): Long? =
+        text.trim().lines().lastOrNull()?.trim()?.toLongOrNull()?.takeIf { it >= 0 }
+
+    /**
+     * The `scripts` section of [Commands.SERVICES]: `name|start|enabled|procd`, one line per
+     * executable init script. Nothing here knows whether the service is running — that
+     * answer only exists in procd, and [services] is where the two meet.
+     */
+    fun initScripts(text: String): List<RouterService> =
+        text.lineSequence().mapNotNull { line ->
+            if (!line.contains('|')) return@mapNotNull null
+            val fields = line.split('|')
+            val name = fields[0].trim()
+            if (name.isBlank()) return@mapNotNull null
+            RouterService(
+                name = name,
+                enabled = fields.getOrElse(2) { "" }.trim() == "enabled",
+                procd = fields.getOrElse(3) { "" }.trim() == "procd",
+                start = fields.getOrElse(1) { "" }.trim().toIntOrNull(),
+            )
+        }.distinctBy { it.name }.toList()
+
+    /**
+     * `ubus call service list` → name to (running instances, the lowest pid among them).
+     *
+     * procd drops a service from this table when it stops, so absence is the whole signal
+     * for "not running". An instance that procd is still holding but has no pid — killed,
+     * or between respawns — is not counted as running.
+     *
+     * The lowest pid rather than the first one because JSON object keys carry no order: a
+     * multi-instance service would otherwise show a different pid on each read.
+     */
+    fun runningServices(json: String): Map<String, Pair<Int, Int?>> {
+        val root = runCatching { JSONObject(json) }.getOrNull() ?: return emptyMap()
+        val result = linkedMapOf<String, Pair<Int, Int?>>()
+        root.keys().forEach { name ->
+            val instances = root.optJSONObject(name)?.optJSONObject("instances") ?: return@forEach
+            val pids = mutableListOf<Int>()
+            var live = 0
+            instances.keys().forEach { key ->
+                val instance = instances.optJSONObject(key) ?: return@forEach
+                val instancePid = instance.optInt("pid", 0).takeIf { it > 0 }
+                if (instancePid == null && !instance.optBoolean("running")) return@forEach
+                live++
+                instancePid?.let { pids += it }
+            }
+            if (live > 0) result[name] = live to pids.minOrNull()
+        }
+        return result
+    }
+
+    /** [initScripts] merged with [runningServices] — what the services screen lists. */
+    fun services(scripts: String, runningJson: String): List<RouterService> {
+        val live = runningServices(runningJson)
+        val listed = initScripts(scripts)
+        val known = listed.mapTo(mutableSetOf()) { it.name }
+        val merged = listed.map { service ->
+            val run = live[service.name] ?: return@map service
+            // Running under procd settles the question of whether it is procd-managed, even
+            // if the script reached that through a library rather than a literal USE_PROCD.
+            service.copy(running = true, procd = true, instances = run.first, pid = run.second)
+        }
+        // procd can carry a service whose init script is gone — a package removed while it
+        // was still up. It is running on this router, so it is shown rather than dropped.
+        val orphans = live.filterKeys { it !in known }.map { (name, run) ->
+            RouterService(name, running = true, procd = true, instances = run.first, pid = run.second)
+        }
+        return (merged + orphans).sortedBy { it.name }
     }
 
     private val BLOCKED_MAC = Regex("wrtpulse-block-((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})")

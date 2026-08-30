@@ -461,7 +461,7 @@ class InterfaceRowTest {
 
     private fun store() = WifiStore(
         com.vivekkaushik.wrtpulse.net.RouterSession(
-            com.vøivekkaushik.wrtpulse.net.SshTarget("t"), unusedClient, { error("unused") },
+            com.vivekkaushik.wrtpulse.net.SshTarget("t"), unusedClient, { error("unused") },
         )
     ).apply {
         radios.add(com.vivekkaushik.wrtpulse.ops.WifiRadio("radio0", "2.4G", "11", "HT40", false))

@@ -30,6 +30,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.vivekkaushik.wrtpulse.data.LiveTicker
+import com.vivekkaushik.wrtpulse.data.PackageStore
+import com.vivekkaushik.wrtpulse.data.ServiceStore
 import com.vivekkaushik.wrtpulse.data.Telemetry
 import com.vivekkaushik.wrtpulse.ops.BoardInfo
 import com.vivekkaushik.wrtpulse.ui.ConnectionTopBar
@@ -51,9 +53,13 @@ fun SystemScreen(
     sshKeyInstalled: Boolean? = null,
     biometricEnabled: Boolean? = null,
     onBiometricToggle: (Boolean) -> Unit = {},
+    packages: PackageStore? = null,
+    services: ServiceStore? = null,
     routerName: String,
     onRouterTap: () -> Unit,
     onOpenLogs: () -> Unit,
+    onOpenPackages: () -> Unit = {},
+    onOpenServices: () -> Unit = {},
 ) {
     var biometricDemo by remember { mutableStateOf(true) }
     val isLive = live != null
@@ -86,26 +92,56 @@ fun SystemScreen(
                         extra = { Box(Modifier.size(6.dp).background(Wrt.Amber, CircleShape)) },
                     )
                 }
+                // Like Packages below, the counts only appear once the screen has been
+                // opened — listing services walks every file in /etc/init.d, and the System
+                // screen shouldn't pay for that on the way past.
+                val stalled = services?.failedCount ?: 0
                 SystemRow(
                     WrtIcons.Services, "Services",
-                    if (isLive) "Coming soon" else "31 running · 2 stopped",
+                    when {
+                        !isLive -> "31 running · 2 stopped"
+                        services?.loaded == true ->
+                            "${services.runningCount} running · ${services.stoppedCount} stopped" +
+                                if (stalled > 0) " · $stalled not up" else ""
+                        else -> "/etc/init.d · procd"
+                    },
+                    subColor = if (stalled > 0) Wrt.Amber else Wrt.TextDim,
+                    onClick = if (isLive) onOpenServices else null,
+                    extra = if (stalled > 0) {
+                        { Box(Modifier.size(6.dp).background(Wrt.Amber, CircleShape)) }
+                    } else null,
                 )
-                SystemRow(WrtIcons.Packages, "Packages", null, sub = {
-                    Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Box(Modifier.width(74.dp).height(3.dp).background(Wrt.ProgressTrack, RoundedCornerShape(2.dp))) {
-                            Box(
-                                Modifier
-                                    .fillMaxWidth(if (isLive) ((live!!.flashPct) / 100f).coerceIn(0.02f, 1f) else 0.62f)
-                                    .height(3.dp)
-                                    .background(Wrt.TextTertiary, RoundedCornerShape(2.dp))
+                val updates = packages?.upgrades?.size ?: 0
+                SystemRow(
+                    WrtIcons.Packages, "Packages", null,
+                    onClick = if (isLive) onOpenPackages else null,
+                    // The counts only appear once the package screen has been opened: reading
+                    // the installed list is a full sweep of the package database, and the
+                    // System screen shouldn't pay for it on the way past.
+                    extra = if (updates > 0) {
+                        { Box(Modifier.size(6.dp).background(Wrt.Amber, CircleShape)) }
+                    } else null,
+                    sub = {
+                        Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Box(Modifier.width(74.dp).height(3.dp).background(Wrt.ProgressTrack, RoundedCornerShape(2.dp))) {
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth(if (isLive) ((live!!.flashPct) / 100f).coerceIn(0.02f, 1f) else 0.62f)
+                                        .height(3.dp)
+                                        .background(Wrt.TextTertiary, RoundedCornerShape(2.dp))
+                                )
+                            }
+                            Text(
+                                listOfNotNull(
+                                    if (isLive) (live!!.flashFree ?: "—") else "38.2 MB free",
+                                    packages?.installed?.size?.takeIf { it > 0 }?.let { "$it installed" },
+                                    updates.takeIf { it > 0 }?.let { "$it update${if (it == 1) "" else "s"}" },
+                                ).joinToString(" · "),
+                                style = mono(10f, 500, if (updates > 0) Wrt.Amber else Wrt.TextDim),
                             )
                         }
-                        Text(
-                            if (isLive) (live!!.flashFree ?: "—") else "38.2 MB free",
-                            style = mono(10f, 500, Wrt.TextDim),
-                        )
-                    }
-                })
+                    },
+                )
                 SystemRow(WrtIcons.LiveLogs, "Live logs", "logread -f · streaming", onClick = onOpenLogs)
                 SystemRow(
                     WrtIcons.Clock, "Scheduled tasks",

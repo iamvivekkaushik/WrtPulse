@@ -331,7 +331,7 @@ private fun NlbwInstallDialog(live: Inventory, onDismiss: () -> Unit) {
 }
 
 /** Enough precision that a small install still visibly moves the "after" figure. */
-private fun preciseBytes(bytes: Long): String = when {
+fun preciseBytes(bytes: Long): String = when {
     bytes >= 1_000_000_000L -> "%.2f GB".format(bytes / 1e9)
     bytes >= 1_000_000L -> "%.1f MB".format(bytes / 1e6)
     bytes >= 1_000L -> "%.0f kB".format(bytes / 1e3)
@@ -339,7 +339,7 @@ private fun preciseBytes(bytes: Long): String = when {
 }
 
 @Composable
-private fun PlanRow(label: String, value: String, highlight: Boolean = false) {
+fun PlanRow(label: String, value: String, highlight: Boolean = false) {
     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, style = mono(10.5f, 500, Wrt.TextDim))
         FlexSpacer()

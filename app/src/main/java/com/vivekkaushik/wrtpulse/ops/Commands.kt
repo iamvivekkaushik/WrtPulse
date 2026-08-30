@@ -60,31 +60,8 @@ object Commands {
         "echo $SECTION nlbw" to "nlbw -c json 2>/dev/null || true",
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
-    /**
-     * Everything the install-consent dialog needs, one round trip: package manager, the
-     * packages an install would pull in, the space each will occupy, and free overlay space.
-     * The resolve runs once and is reused for the size lookup. `opkg update` first — its
-     * package lists live in /tmp and vanish on reboot.
-     */
-    val NLBW_PLAN: String = listOf(
-        "echo $SECTION pm",
-        DETECT_PACKAGE_MANAGER,
-        "if command -v apk >/dev/null 2>&1; then PLAN=\$(apk add --simulate nlbwmon 2>&1); " +
-            "else opkg update >/dev/null 2>&1; PLAN=\$(opkg install --noaction nlbwmon 2>&1); fi",
-        "echo $SECTION plan",
-        "echo \"\$PLAN\"",
-        "echo $SECTION sizes",
-        // "<package>|<size>" per resolved package; apk reports human units, opkg raw bytes.
-        "for p in \$(echo \"\$PLAN\" | sed -n 's/.*Installing \\([^ ]*\\).*/\\1/p'); do " +
-            "if command -v apk >/dev/null 2>&1; then " +
-            "s=\$(apk info --size \"\$p\" 2>/dev/null | sed -n '2p'); " +
-            "else s=\$(opkg info \"\$p\" 2>/dev/null | sed -n 's/^Installed-Size: *//p' | head -1); " +
-            "[ -z \"\$s\" ] && s=\$(opkg info \"\$p\" 2>/dev/null | sed -n 's/^Size: *//p' | head -1); " +
-            "s=\"\$s B\"; fi; " +
-            "echo \"\$p|\$s\"; done",
-        "echo $SECTION df",
-        "df -k /overlay | tail -n1",
-    ).joinToString("; ")
+    /** The install-consent plan for the usage meter the Clients screen offers. */
+    val NLBW_PLAN: String = installPlan("nlbwmon")
 
     /** Installs, enables, and starts nlbwmon; succeeds only if the nlbw binary lands. */
     val NLBW_INSTALL: String =
@@ -257,4 +234,225 @@ object Commands {
         "uclient-fetch -q -O /dev/null --post-file=$SPEEDTEST_UPLOAD_FILE \"\$URL\"; fi && echo $bytes"
 
     const val SPEEDTEST_CLEANUP = "rm -f $SPEEDTEST_UPLOAD_FILE"
+
+    // ── Packages ──────────────────────────────────────────────────────────────
+    // 24.10 and later ship apk, everything before it ships opkg, and a single build of the
+    // app is expected to manage both. Every command below asks which one is present rather
+    // than assuming, and normalises the answer so the parsers don't have to know.
+
+    /**
+     * A package name is about to be interpolated into a shell command, so the alphabet is
+     * the guard: feed names are letters, digits and `._+-`, and a leading dash would read
+     * as a flag.
+     */
+    fun safePackageName(name: String): Boolean =
+        name.isNotEmpty() && name.length <= 96 &&
+            name.first().isLetterOrDigit() &&
+            name.all { it.isLetterOrDigit() || it in "._+-" }
+
+    /**
+     * Installed packages as `name|version|size|auto`. opkg keeps a plain-text status file
+     * that already carries every field, including whether the package was pulled in as a
+     * dependency, so one awk pass over it is the whole answer.
+     */
+    private const val OPKG_INSTALLED =
+        "awk -F': ' '" +
+        "/^Package: /{p=\$2} " +
+        "/^Version: /{v=\$2} " +
+        "/^Installed-Size: /{s=\$2} " +
+        "/^Auto-Installed: yes/{a=\"auto\"} " +
+        "/^\$/{if(p!=\"\")print p\"|\"v\"|\"s\"|\"a; p=\"\";v=\"\";s=\"\";a=\"\"} " +
+        "END{if(p!=\"\")print p\"|\"v\"|\"s\"|\"a}' /usr/lib/opkg/status 2>/dev/null"
+
+    /**
+     * The same for apk, whose database is binary. `apk info --size` is handed every
+     * installed name at once — one process for the list rather than one per package, which
+     * on a router with 200 packages is the difference between a screen and a wait. It
+     * answers in pairs (a `<name>-<version> installed size:` header, then the number), so
+     * awk folds each pair onto one line.
+     *
+     * Both lookups have a fallback because apk's subcommands have moved between major
+     * versions: worst case the list arrives with no sizes, which the UI shows as "—".
+     */
+    private const val APK_INSTALLED =
+        "N=\$(apk info 2>/dev/null); " +
+        "[ -z \"\$N\" ] && N=\$(apk list --installed 2>/dev/null | cut -d' ' -f1); " +
+        "S=\$(apk info --size \$N 2>/dev/null | awk '/size:/{n=\$1; if((getline v)>0) print n\"|\"v}'); " +
+        "[ -z \"\$S\" ] && S=\$(echo \"\$N\" | sed 's/\$/|/'); " +
+        "echo \"\$S\""
+
+    /**
+     * How long ago the package index was refreshed. A stale index is the usual reason a
+     * package "doesn't exist", so the screen says the age rather than leaving the user to
+     * guess. -1 means no index directory was found — the age is then simply not shown.
+     */
+    private const val FEED_AGE =
+        "L=\$(ls -1t /var/opkg-lists/* /tmp/opkg-lists/* /usr/lib/opkg/lists/* " +
+        "/var/cache/apk/* /tmp/apk/* 2>/dev/null | head -n1); " +
+        "if [ -n \"\$L\" ]; then echo \$(( \$(date +%s) - \$(date -r \"\$L\" +%s) )); else echo -1; fi"
+
+    /** Everything the package screen needs, in one round trip. */
+    val PACKAGES: String = listOf(
+        "echo $SECTION pm",
+        DETECT_PACKAGE_MANAGER,
+        "echo $SECTION installed",
+        "if command -v apk >/dev/null 2>&1; then $APK_INSTALLED; else $OPKG_INSTALLED; fi",
+        "echo $SECTION upgradable",
+        "if command -v apk >/dev/null 2>&1; then apk list --upgradable 2>/dev/null; " +
+            "else opkg list-upgradable 2>/dev/null; fi",
+        "echo $SECTION feed",
+        FEED_AGE,
+        "echo $SECTION df",
+        "df -k /overlay | tail -n1",
+    ).joinToString("; ")
+
+    /**
+     * Searches the feed. The grep runs on the router: the full package list is megabytes on
+     * a router with the standard feeds enabled, and only the matches are worth the air time.
+     */
+    fun searchPackages(term: String, limit: Int = 80): String =
+        "{ if command -v apk >/dev/null 2>&1; then apk list 2>/dev/null; " +
+        "else opkg list 2>/dev/null; fi; } | grep -i -- '$term' | head -n $limit"
+
+    /** Whatever the package manager can say about one package, shown raw. */
+    fun packageInfo(name: String): String =
+        "if command -v apk >/dev/null 2>&1; then " +
+        "apk list '$name' 2>/dev/null | head -n 4; " +
+        "apk info --description '$name' 2>/dev/null; " +
+        "apk info --size '$name' 2>/dev/null; " +
+        "else opkg info '$name' 2>/dev/null; fi"
+
+    /** Re-downloads the package index. */
+    const val UPDATE_FEED = "if command -v apk >/dev/null 2>&1; then apk update; else opkg update; fi"
+
+    /**
+     * Everything the install-consent dialog needs, one round trip: package manager, the
+     * packages an install would pull in, the space each will occupy, and free overlay space.
+     * The resolve runs once and is reused for the size lookup. `opkg update` first — its
+     * package lists live in /tmp and vanish on reboot.
+     */
+    fun installPlan(pkg: String): String = listOf(
+        "echo $SECTION pm",
+        DETECT_PACKAGE_MANAGER,
+        "if command -v apk >/dev/null 2>&1; then PLAN=\$(apk add --simulate '$pkg' 2>&1); " +
+            "else opkg update >/dev/null 2>&1; PLAN=\$(opkg install --noaction '$pkg' 2>&1); fi",
+        "echo $SECTION plan",
+        "echo \"\$PLAN\"",
+        "echo $SECTION sizes",
+        // "<package>|<size>" per resolved package; apk reports human units, opkg raw bytes.
+        "for p in \$(echo \"\$PLAN\" | sed -n 's/.*Installing \\([^ ]*\\).*/\\1/p'); do " +
+            "if command -v apk >/dev/null 2>&1; then " +
+            "s=\$(apk info --size \"\$p\" 2>/dev/null | sed -n '2p'); " +
+            "else s=\$(opkg info \"\$p\" 2>/dev/null | sed -n 's/^Installed-Size: *//p' | head -1); " +
+            "[ -z \"\$s\" ] && s=\$(opkg info \"\$p\" 2>/dev/null | sed -n 's/^Size: *//p' | head -1); " +
+            "s=\"\$s B\"; fi; " +
+            "echo \"\$p|\$s\"; done",
+        "echo $SECTION df",
+        "df -k /overlay | tail -n1",
+    ).joinToString("; ")
+
+    /**
+     * The mirror image, for removal: what the manager would take out. Sizes aren't asked for
+     * here — the packages are installed, so the app already knows what each one occupies.
+     */
+    fun removePlan(pkg: String): String = listOf(
+        "echo $SECTION pm",
+        DETECT_PACKAGE_MANAGER,
+        "if command -v apk >/dev/null 2>&1; then PLAN=\$(apk del --simulate '$pkg' 2>&1); " +
+            "else PLAN=\$(opkg remove --noaction '$pkg' 2>&1); fi",
+        "echo $SECTION plan",
+        "echo \"\$PLAN\"",
+        "echo $SECTION df",
+        "df -k /overlay | tail -n1",
+    ).joinToString("; ")
+
+    /**
+     * Installs, then starts the service if the package ships one — an OpenWrt package's
+     * init script is installed disabled often enough that "installed but doing nothing" is
+     * the more surprising outcome. Failure keeps its exit code so the app can report it.
+     */
+    fun installPackage(pkg: String): String =
+        "if command -v apk >/dev/null 2>&1; then apk add '$pkg' || exit 1; " +
+        "else opkg install '$pkg' || exit 1; fi; " +
+        "if [ -x /etc/init.d/$pkg ]; then /etc/init.d/$pkg enable >/dev/null 2>&1; " +
+        "/etc/init.d/$pkg start >/dev/null 2>&1; fi; echo installed"
+
+    /** Stops the service first so removal doesn't leave a running daemon with no files. */
+    fun removePackage(pkg: String): String =
+        "if [ -x /etc/init.d/$pkg ]; then /etc/init.d/$pkg stop >/dev/null 2>&1; " +
+        "/etc/init.d/$pkg disable >/dev/null 2>&1; fi; " +
+        "if command -v apk >/dev/null 2>&1; then apk del '$pkg'; else opkg remove '$pkg'; fi"
+
+    /** One package at a time, deliberately — see PackageStore for why there is no upgrade-all. */
+    fun upgradePackage(pkg: String): String =
+        "if command -v apk >/dev/null 2>&1; then apk upgrade '$pkg'; else opkg upgrade '$pkg'; fi"
+
+    // ── Services ──────────────────────────────────────────────────────────────
+    // An init script's state lives in three places, and none of them knows the other two:
+    // the script itself carries its START order and whether procd manages it, /etc/rc.d
+    // says whether it starts at boot, and procd's own table says whether it is running now.
+    // One round trip reads all three so the list can't show a half-answer.
+
+    /** Init script names arrive from a directory listing, but they still reach a shell. */
+    fun safeServiceName(name: String): Boolean = safePackageName(name)
+
+    /**
+     * Every executable init script as `name|start|enabled|daemon`.
+     *
+     * The last field answers "would this still be running if it worked", which is the whole
+     * basis for calling anything stopped. `USE_PROCD=1` is NOT that test, though it reads
+     * like it: it marks a script that uses procd's helpers, which the one-shots use too.
+     * On the reference router `firewall`, `system`, `ucitrack`, `urandom_seed`,
+     * `packet_steering` and `gpio_switch` all set it, all ran correctly at boot, and all
+     * exited — reporting six healthy scripts as stopped services.
+     *
+     * `procd_set_param respawn` is the real signal — it is the script asking procd to keep
+     * the process alive, which is exactly the claim "it should still be running" needs.
+     * A supervised `command` alone is not enough: the same router's `urandom_seed` declares
+     * one, and `/sbin/urandom_seed` seeds the pool and exits by design.
+     *
+     * A daemon that deliberately omits respawn reads as a boot script, and that is the
+     * direction to fail in: it suppresses an alarm rather than inventing one, and
+     * [Parsers.services] corrects it the moment procd reports the thing running.
+     */
+    private const val INIT_SCRIPTS =
+        "for f in /etc/init.d/*; do " +
+        "[ -f \"\$f\" ] && [ -x \"\$f\" ] || continue; " +
+        "n=\${f##*/}; " +
+        "o=\$(sed -n 's/^START=\\([0-9]*\\).*/\\1/p' \"\$f\" | head -n1); " +
+        "e=''; ls /etc/rc.d/S??\"\$n\" >/dev/null 2>&1 && e=enabled; " +
+        "p=''; grep -q 'procd_set_param respawn' \"\$f\" && p=procd; " +
+        "echo \"\$n|\$o|\$e|\$p\"; " +
+        "done"
+
+    /** Everything the services screen needs, in one round trip. */
+    val SERVICES: String = listOf(
+        "echo $SECTION scripts",
+        INIT_SCRIPTS,
+        "echo $SECTION running",
+        "ubus call service list 2>/dev/null || echo '{}'",
+    ).joinToString("; ")
+
+    /**
+     * What the detail sheet shows: the top of the init script — where OpenWrt puts START,
+     * STOP and the procd declaration — plus the processes actually carrying the name, and
+     * the rc.d symlinks that decide boot order.
+     */
+    fun serviceInfo(name: String): String = listOf(
+        "echo $SECTION head",
+        "head -n 20 '/etc/init.d/$name' 2>/dev/null",
+        "echo $SECTION procs",
+        "ps w 2>/dev/null | grep -F -- '$name' | grep -v grep | head -n 6",
+        "echo $SECTION boot",
+        "ls -1 /etc/rc.d/ 2>/dev/null | grep -F -- '$name' || true",
+    ).joinToString("; ")
+
+    /**
+     * One init-script verb. procd's start and stop return before the daemon has actually
+     * come up or gone away, so the settle is part of the command — the reload that follows
+     * reads a settled router rather than a racing one. The exit code stays the script's.
+     */
+    fun serviceAction(name: String, action: ServiceAction): String =
+        "'/etc/init.d/$name' ${action.verb}; rc=\$?; sleep 1; exit \$rc"
+
 }

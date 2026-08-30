@@ -36,8 +36,10 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.vivekkaushik.wrtpulse.data.Inventory
 import com.vivekkaushik.wrtpulse.data.LiveLogs
 import com.vivekkaushik.wrtpulse.data.LiveTicker
+import com.vivekkaushik.wrtpulse.data.PackageStore
 import com.vivekkaushik.wrtpulse.data.RouterOps
 import com.vivekkaushik.wrtpulse.data.RouterStatus
+import com.vivekkaushik.wrtpulse.data.ServiceStore
 import com.vivekkaushik.wrtpulse.data.Telemetry
 import com.vivekkaushik.wrtpulse.data.TerminalSessions
 import com.vivekkaushik.wrtpulse.data.WifiStore
@@ -54,7 +56,9 @@ import com.vivekkaushik.wrtpulse.ui.screens.OnboardingConnectScreen
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingFingerprintScreen
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingFlow
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingSshKeyScreen
+import com.vivekkaushik.wrtpulse.ui.screens.PackagesScreen
 import com.vivekkaushik.wrtpulse.ui.screens.RouterListScreen
+import com.vivekkaushik.wrtpulse.ui.screens.ServicesScreen
 import com.vivekkaushik.wrtpulse.ui.screens.SheetHost
 import com.vivekkaushik.wrtpulse.ui.screens.SwitcherSheetContent
 import com.vivekkaushik.wrtpulse.ui.screens.SystemScreen
@@ -124,6 +128,12 @@ private fun WrtPulseApp() {
     val termSessions = remember(session) { session?.let { TerminalSessions(it, scope) } }
     val routerOps = remember(session) { session?.let { RouterOps(it) } }
     val liveLogs = remember(session) { session?.let { LiveLogs(it) } }
+    // Read on entry rather than on a tick — the installed list only changes when
+    // somebody changes it, and reading it sweeps the whole package database.
+    val packageStore = remember(session) { session?.let { PackageStore(it) } }
+    // Same bargain for the init scripts: listing them walks /etc/init.d, so it waits
+    // until the Services screen is actually opened.
+    val serviceStore = remember(session) { session?.let { ServiceStore(it) } }
     var logsStarted by remember(session) { mutableStateOf(false) }
     // Polling pauses while the app is in the background; the terminal shell stays attached.
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -154,6 +164,8 @@ private fun WrtPulseApp() {
     var showDiff by remember { mutableStateOf(false) }
     var snippetsOpen by remember { mutableStateOf(false) }
     var logsOpen by remember { mutableStateOf(false) }
+    var packagesOpen by remember { mutableStateOf(false) }
+    var servicesOpen by remember { mutableStateOf(false) }
     var pendingChanges by remember { mutableIntStateOf(3) }
     val termLines = remember { mutableStateListOf<TermLine>().apply { addAll(initialTerminalLines()) } }
     var termPending by remember { mutableStateOf("") }
@@ -332,7 +344,20 @@ private fun WrtPulseApp() {
                                     },
                                 )
                             }
-                            MainTab.System -> if (logsOpen) {
+                            MainTab.System -> if (servicesOpen) {
+                                ServicesScreen(
+                                    store = serviceStore,
+                                    latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
+                                    onBack = { servicesOpen = false },
+                                )
+                            } else if (packagesOpen) {
+                                PackagesScreen(
+                                    store = packageStore,
+                                    live = telemetry,
+                                    latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
+                                    onBack = { packagesOpen = false },
+                                )
+                            } else if (logsOpen) {
                                 LaunchedEffect(Unit) { logsStarted = true }
                                 LogsScreen(
                                     ticker = ticker,
@@ -356,16 +381,22 @@ private fun WrtPulseApp() {
                                         biometricEnabled = on
                                         prefs.edit().putBoolean("biometric_gate", on).apply()
                                     },
+                                    packages = packageStore,
+                                    services = serviceStore,
                                     routerName = currentRouter,
                                     onRouterTap = { showSwitcher = true },
                                     onOpenLogs = { logsOpen = true },
+                                    onOpenPackages = { packagesOpen = true },
+                                    onOpenServices = { servicesOpen = true },
                                 )
                             }
                         }
                     }
                     if (!(tab == MainTab.Network && networkFullScreen)) {
                         WrtBottomNav(current = tab) { picked ->
-                            if (picked != MainTab.System) logsOpen = false
+                            if (picked != MainTab.System) {
+                                logsOpen = false; packagesOpen = false; servicesOpen = false
+                            }
                             tab = picked
                         }
                     }
@@ -442,6 +473,8 @@ private fun WrtPulseApp() {
             dest == Dest.Main && showDiff -> showDiff = false
             dest == Dest.Main && showSwitcher -> showSwitcher = false
             dest == Dest.Main && snippetsOpen -> snippetsOpen = false
+            dest == Dest.Main && tab == MainTab.System && servicesOpen -> servicesOpen = false
+            dest == Dest.Main && tab == MainTab.System && packagesOpen -> packagesOpen = false
             dest == Dest.Main && tab == MainTab.System && logsOpen -> logsOpen = false
             dest == Dest.Main && tab != MainTab.Dashboard -> tab = MainTab.Dashboard
             dest == Dest.Main -> dest = Dest.RouterList
