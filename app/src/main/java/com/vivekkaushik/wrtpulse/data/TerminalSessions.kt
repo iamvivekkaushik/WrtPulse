@@ -24,6 +24,11 @@ class TerminalSessions(
 
     private val jobs = mutableMapOf<TermEngine, Job>()
 
+    // The pty size the screen last measured, so a tab opened later starts the right shape
+    // instead of at the phone-portrait default.
+    private var cols = TermEngine.COLS
+    private var rows = TermEngine.ROWS
+
     val current: TermEngine? get() = tabs.getOrNull(selected)
 
     /** Opens the first shell the moment the terminal is first shown. */
@@ -32,10 +37,17 @@ class TerminalSessions(
     }
 
     fun open() {
-        val engine = TermEngine(session)
+        val engine = TermEngine(session, cols, rows)
         tabs.add(engine)
         selected = tabs.lastIndex
         jobs[engine] = scope.launch { engine.run() }
+    }
+
+    /** The output pane changed shape — every shell gets the new pty size. */
+    suspend fun resize(cols: Int, rows: Int) {
+        this.cols = cols
+        this.rows = rows
+        tabs.toList().forEach { it.resize(cols, rows) }
     }
 
     fun select(index: Int) {

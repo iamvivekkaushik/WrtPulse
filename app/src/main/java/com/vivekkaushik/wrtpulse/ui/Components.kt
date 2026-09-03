@@ -410,11 +410,14 @@ fun tabIcon(tab: MainTab): ImageVector = when (tab) {
     MainTab.System -> WrtIcons.System
 }
 
+/** Height of [WrtBottomNav] including its hairline, for screens that budget their own height. */
+val WrtBottomNavHeight = 63.dp
+
 @Composable
 fun WrtBottomNav(current: MainTab, onSelect: (MainTab) -> Unit) {
     Column(Modifier.background(Wrt.BgBar)) {
         HorizontalHairline()
-        Row(Modifier.fillMaxWidth().height(62.dp)) {
+        Row(Modifier.fillMaxWidth().height(WrtBottomNavHeight - 1.dp)) {
             MainTab.entries.forEach { tab ->
                 val active = tab == current
                 val c = if (active) Wrt.Accent else Wrt.TextDim

@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.AnnotatedString
 import com.vivekkaushik.wrtpulse.net.RouterSession
 import com.vivekkaushik.wrtpulse.net.SshException
 import com.vivekkaushik.wrtpulse.net.SshShell
@@ -16,24 +17,40 @@ import com.vivekkaushik.wrtpulse.net.SshShell
  * homes the cursor before erasing) or relatively (history recall steps back up over a
  * command that wrapped).
  *
- * Full-screen applications (top, vi) still garble: no alternate screen, scrolling regions
- * or character attributes.
+ * Colour and the other SGR attributes are carried per cell, so a run of `ls --color` or
+ * `grep --color` arrives styled rather than stripped.
+ *
+ * Full-screen applications (top, vi) still garble: no alternate screen and no scrolling
+ * regions.
  */
 class TermEngine(
     private val session: RouterSession,
-    private val cols: Int = COLS,
-    private val rows: Int = ROWS,
+    cols: Int = COLS,
+    rows: Int = ROWS,
 ) {
 
+    /**
+     * The pty's size. Both the shell's wrap arithmetic and ours are done against it, so it
+     * tracks the pane the output is actually drawn in — 48 columns on a tablet would leave
+     * half the width empty and wrap text that had room to spare.
+     */
+    var cols = cols.coerceAtLeast(MIN_COLS)
+        private set
+    var rows = rows.coerceAtLeast(MIN_ROWS)
+        private set
+
     /** Scrollback followed by the live grid — what the UI draws, top to bottom. */
-    val screen = mutableStateListOf("")
+    val screen = mutableStateListOf(AnnotatedString(""))
 
     /** Row the caret sits on, as an index into [screen]. */
     var cursorRow by mutableIntStateOf(0)
         private set
 
-    /** Rows above the cursor. */
-    val lines: List<String> get() = screen.take(cursorRow)
+    /** Rows above the cursor, as plain text. */
+    val lines: List<String> get() = screen.take(cursorRow).map { it.text }
+
+    /** The whole view as plain text — what the grid says, with the styling dropped. */
+    val text: List<String> get() = screen.map { it.text }
 
     /** The row being written — prompt plus echoed input. */
     var current by mutableStateOf("")
@@ -45,10 +62,13 @@ class TermEngine(
 
     private var shell: SshShell? = null
 
-    private val scrollback = mutableListOf<String>()
-    private val grid = MutableList(rows) { StringBuilder() }
+    private val scrollback = mutableListOf<AnnotatedString>()
+    private val grid = MutableList(rows) { Row() }
     private var r = 0
     private var c = 0
+
+    /** The appearance the shell has selected; every cell written now takes it. */
+    private var pen = Attr.Default
 
     /**
      * DEC deferred wrap: a character written in the last column leaves the cursor there
@@ -74,6 +94,8 @@ class TermEngine(
             error = null
             val sh = session.openShell(cols, rows)
             shell = sh
+            // A resize between the request and here would otherwise never reach the pty.
+            runCatching { sh.resize(cols, rows) }
             connected = true
             sh.output.collect { chunk -> feed(chunk) }
         } catch (e: SshException) {
@@ -83,6 +105,36 @@ class TermEngine(
             runCatching { shell?.close() }
             shell = null
         }
+    }
+
+    /**
+     * Re-sizes the pty and the grid under it. Rows pushed off the top go to scrollback the
+     * way they would have scrolled there; nothing is re-flowed, so text already on screen
+     * keeps the wrap it was drawn with and only new output uses the new width.
+     */
+    suspend fun resize(cols: Int, rows: Int) {
+        val newCols = cols.coerceAtLeast(MIN_COLS)
+        val newRows = rows.coerceAtLeast(MIN_ROWS)
+        if (newCols == this.cols && newRows == this.rows) return
+        this.cols = newCols
+        while (grid.size > newRows) {
+            // Keep the cursor's row: give up the rows above it first, then the ones below.
+            if (r > 0) {
+                scrollback.add(grid.removeAt(0).annotated())
+                r--
+            } else {
+                grid.removeAt(grid.size - 1)
+            }
+        }
+        while (grid.size < newRows) grid.add(Row())
+        this.rows = newRows
+        r = r.coerceIn(0, newRows - 1)
+        c = c.coerceIn(0, newCols - 1)
+        wrapPending = false
+        trimScrollback()
+        sync()
+        // A pty that has gone away is not worth surfacing — `connected` already says so.
+        runCatching { shell?.resize(newCols, newRows) }
     }
 
     suspend fun send(text: String) {
@@ -105,7 +157,8 @@ class TermEngine(
         val size = scrollback.size + lastUsed + 1
         while (screen.size > size) screen.removeAt(screen.size - 1)
         for (i in 0 until size) {
-            val text = if (i < scrollback.size) scrollback[i] else grid[i - scrollback.size].toString()
+            val text =
+                if (i < scrollback.size) scrollback[i] else grid[i - scrollback.size].annotated()
             if (i < screen.size) {
                 if (screen[i] != text) screen[i] = text
             } else {
@@ -184,6 +237,12 @@ class TermEngine(
     private fun csi(body: String) {
         if (body.firstOrNull() == '?') return // private modes: cursor visibility, bracketed paste
         val params = body.dropLast(1).split(';').map { it.toIntOrNull() ?: 0 }
+        // Selecting a colour moves nothing, so it must not disturb the deferred wrap or the
+        // cursor-home flag that tells `clear` apart from a redraw.
+        if (body.last() == 'm') {
+            pen = sgr(params, pen)
+            return
+        }
         fun p(i: Int, default: Int) = params.getOrNull(i)?.takeIf { it > 0 } ?: default
         wrapPending = false
         val wasJustHomed = justHomed
@@ -191,7 +250,7 @@ class TermEngine(
         when (body.last()) {
             'K' -> when (p(0, 0)) {                     // erase in line
                 1 -> eraseToStart()
-                2 -> grid[r].setLength(0)
+                2 -> grid[r].setLength(0)  // whole line
                 else -> eraseToEnd()
             }
             'J' -> when (p(0, 0)) {                     // erase in display
@@ -227,9 +286,9 @@ class TermEngine(
             }
             '@' -> {                                    // insert blanks
                 val line = grid[r]
-                if (c <= line.length) line.insert(c, " ".repeat(p(0, 1)))
+                if (c <= line.length) line.insert(c, p(0, 1), pen)
             }
-            else -> Unit                                // SGR colours, modes, reports: nothing to draw
+            else -> Unit                                // modes, reports: nothing to draw
         }
     }
 
@@ -240,8 +299,10 @@ class TermEngine(
             wrapPending = false
         }
         val line = grid[r]
-        while (line.length < c) line.append(' ') // cursor may sit past the text after a move
-        if (c < line.length) line.setCharAt(c, ch) else line.append(ch)
+        // The cursor may sit past the text after a move; pad in blanks, unstyled, so an
+        // erase-to-end later does not leave a coloured gap behind.
+        while (line.length < c) line.append(' ', Attr.Default)
+        if (c < line.length) line.setAt(c, ch, pen) else line.append(ch, pen)
         if (c >= cols - 1) wrapPending = true else c++
     }
 
@@ -251,8 +312,12 @@ class TermEngine(
             r++
             return
         }
-        scrollback.add(grid.removeAt(0).toString())
-        grid.add(StringBuilder())
+        scrollback.add(grid.removeAt(0).annotated())
+        grid.add(Row())
+        trimScrollback()
+    }
+
+    private fun trimScrollback() {
         if (scrollback.size > MAX_SCROLLBACK) {
             repeat(scrollback.size - MAX_SCROLLBACK) { scrollback.removeAt(0) }
         }
@@ -265,7 +330,7 @@ class TermEngine(
 
     private fun eraseToStart() {
         val line = grid[r]
-        for (i in 0 until minOf(c, line.length)) line.setCharAt(i, ' ')
+        for (i in 0 until minOf(c, line.length)) line.setAt(i, ' ', pen)
     }
 
     private fun clearGrid() {
@@ -277,13 +342,22 @@ class TermEngine(
         scrollback.clear()
         r = 0
         c = 0
+        pen = Attr.Default
         wrapPending = false
     }
 
     companion object {
-        /** Matches the pty requested for the shell, so the shell's wrap maths agrees with ours. */
+        /** Opening size, used until the screen has measured itself. */
         const val COLS = 48
         const val ROWS = 30
+
+        /**
+         * Floors, so a sliver of a window still leaves a grid the parser can address. Kept
+         * low deliberately: real panes are far larger, and tests want a tiny screen.
+         */
+        const val MIN_COLS = 8
+        const val MIN_ROWS = 2
+
         const val MAX_SCROLLBACK = 500
     }
 }

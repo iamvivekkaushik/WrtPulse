@@ -9,6 +9,7 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -51,6 +52,7 @@ import com.vivekkaushik.wrtpulse.net.SshKeys
 import com.vivekkaushik.wrtpulse.net.WrtRuntime
 import com.vivekkaushik.wrtpulse.ui.MainTab
 import com.vivekkaushik.wrtpulse.ui.WrtBottomNav
+import com.vivekkaushik.wrtpulse.ui.WrtBottomNavHeight
 import com.vivekkaushik.wrtpulse.ui.screens.BackupScreen
 import com.vivekkaushik.wrtpulse.ui.screens.ClientsScreen
 import com.vivekkaushik.wrtpulse.ui.screens.CountryScreen
@@ -71,6 +73,7 @@ import com.vivekkaushik.wrtpulse.ui.screens.SshKeysScreen
 import com.vivekkaushik.wrtpulse.ui.screens.SwitcherSheetContent
 import com.vivekkaushik.wrtpulse.ui.screens.SystemScreen
 import com.vivekkaushik.wrtpulse.ui.screens.TermLine
+import com.vivekkaushik.wrtpulse.ui.screens.TerminalRoomyHeight
 import com.vivekkaushik.wrtpulse.ui.screens.TerminalScreen
 import com.vivekkaushik.wrtpulse.ui.screens.WifiSection
 import com.vivekkaushik.wrtpulse.ui.screens.initialTerminalLines
@@ -332,144 +335,151 @@ private fun WrtPulseApp() {
                         onTrust = { currentRouter = hostKeyRouter; tab = MainTab.Dashboard; dest = Dest.Main },
                     )
                 }
-                Dest.Main -> Column(Modifier.fillMaxSize()) {
-                    Box(Modifier.weight(1f)) {
-                        when (tab) {
-                            MainTab.Dashboard -> DashboardScreen(
-                                ticker = ticker,
-                                live = telemetry,
-                                inventory = inventory,
-                                ops = routerOps,
-                                routerName = currentRouter,
-                                onRouterTap = { showSwitcher = true },
-                                onOpenTerminal = { tab = MainTab.Terminal },
-                            )
-                            MainTab.Network -> WifiSection(
-                                ticker = ticker,
-                                store = wifiStore,
-                                liveLatencyMs = telemetry?.latencyMs,
-                                routerName = currentRouter,
-                                pendingCount = wifiStore?.pendingCount ?: pendingChanges,
-                                onRouterTap = { showSwitcher = true },
-                                onReviewApply = { showDiff = true },
-                                onRevert = { wifiStore?.revert() ?: run { pendingChanges = 0 } },
-                                onFullScreen = { networkFullScreen = it },
-                            )
-                            MainTab.Clients -> ClientsScreen(
-                                ticker = ticker,
-                                live = inventory,
-                                liveLatencyMs = telemetry?.latencyMs,
-                                routerName = currentRouter,
-                                onRouterTap = { showSwitcher = true },
-                                onRename = { mac, name ->
-                                    scope.launch {
-                                        runCatching {
-                                            WrtRuntime.db.clientNames()
-                                                .upsert(com.vivekkaushik.wrtpulse.db.ClientName(mac, name))
-                                        }
-                                    }
-                                },
-                            )
-                            MainTab.Terminal -> {
-                                LaunchedEffect(termSessions) { termSessions?.openIfEmpty() }
-                                TerminalScreen(
-                                    sessions = termSessions,
-                                    routerName = currentRouter,
-                                    lines = termLines,
-                                    pendingCommand = termPending,
-                                    snippetsOpen = snippetsOpen,
-                                    onToggleSnippets = { snippetsOpen = it },
-                                    onInsertSnippet = { cmd ->
-                                        val shell = termSessions?.current
-                                        if (shell != null) scope.launch { shell.send(cmd) } else termPending = cmd
-                                        snippetsOpen = false
-                                    },
-                                )
-                            }
-                            MainTab.System -> if (sshKeysOpen) {
-                                SshKeysScreen(
-                                    store = sshKeyStore,
-                                    latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
-                                    onBack = { sshKeysOpen = false },
-                                )
-                            } else if (backupOpen) {
-                                BackupScreen(
-                                    store = backupStore,
-                                    latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
-                                    onBack = { backupOpen = false },
-                                )
-                            } else if (countryOpen) {
-                                CountryScreen(
-                                    store = wifiStore,
-                                    onBack = { countryOpen = false },
-                                )
-                            } else if (firmwareOpen) {
-                                FirmwareScreen(
-                                    store = firmwareStore,
-                                    latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
-                                    onBack = { firmwareOpen = false },
-                                )
-                            } else if (servicesOpen) {
-                                ServicesScreen(
-                                    store = serviceStore,
-                                    latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
-                                    onBack = { servicesOpen = false },
-                                )
-                            } else if (packagesOpen) {
-                                PackagesScreen(
-                                    store = packageStore,
-                                    live = telemetry,
-                                    latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
-                                    onBack = { packagesOpen = false },
-                                )
-                            } else if (logsOpen) {
-                                LaunchedEffect(Unit) { logsStarted = true }
-                                LogsScreen(
+                Dest.Main -> BoxWithConstraints(Modifier.fillMaxSize()) {
+                    // In landscape the Terminal's key rows plus the nav bar leave the output
+                    // pane nothing, so the nav gives up its row first. Measured before the nav
+                    // is dropped, so the two cannot flip each other back and forth.
+                    val terminalNeedsTheRow = tab == MainTab.Terminal &&
+                        maxHeight - WrtBottomNavHeight < TerminalRoomyHeight
+                    Column(Modifier.fillMaxSize()) {
+                        Box(Modifier.weight(1f)) {
+                            when (tab) {
+                                MainTab.Dashboard -> DashboardScreen(
                                     ticker = ticker,
-                                    live = liveLogs,
+                                    live = telemetry,
+                                    inventory = inventory,
+                                    ops = routerOps,
+                                    routerName = currentRouter,
+                                    onRouterTap = { showSwitcher = true },
+                                    onOpenTerminal = { tab = MainTab.Terminal },
+                                )
+                                MainTab.Network -> WifiSection(
+                                    ticker = ticker,
+                                    store = wifiStore,
+                                    liveLatencyMs = telemetry?.latencyMs,
+                                    routerName = currentRouter,
+                                    pendingCount = wifiStore?.pendingCount ?: pendingChanges,
+                                    onRouterTap = { showSwitcher = true },
+                                    onReviewApply = { showDiff = true },
+                                    onRevert = { wifiStore?.revert() ?: run { pendingChanges = 0 } },
+                                    onFullScreen = { networkFullScreen = it },
+                                )
+                                MainTab.Clients -> ClientsScreen(
+                                    ticker = ticker,
+                                    live = inventory,
                                     liveLatencyMs = telemetry?.latencyMs,
                                     routerName = currentRouter,
                                     onRouterTap = { showSwitcher = true },
-                                )
-                            } else {
-                                SystemScreen(
-                                    ticker = ticker,
-                                    live = telemetry,
-                                    board = flow.board,
-                                    country = wifiStore?.radios?.firstOrNull { it.country.isNotBlank() }?.country,
-                                    sshKeyInstalled = if (telemetry != null) {
-                                        savedRouters?.firstOrNull { it.host == WrtRuntime.session?.target?.host }
-                                            ?.privateKey != null
-                                    } else null,
-                                    biometricEnabled = if (telemetry != null) biometricEnabled else null,
-                                    onBiometricToggle = { on ->
-                                        biometricEnabled = on
-                                        prefs.edit().putBoolean("biometric_gate", on).apply()
+                                    onRename = { mac, name ->
+                                        scope.launch {
+                                            runCatching {
+                                                WrtRuntime.db.clientNames()
+                                                    .upsert(com.vivekkaushik.wrtpulse.db.ClientName(mac, name))
+                                            }
+                                        }
                                     },
-                                    packages = packageStore,
-                                    services = serviceStore,
-                                    backups = backupStore,
-                                    routerName = currentRouter,
-                                    onRouterTap = { showSwitcher = true },
-                                    onOpenLogs = { logsOpen = true },
-                                    onOpenPackages = { packagesOpen = true },
-                                    onOpenServices = { servicesOpen = true },
-                                    onOpenFirmware = { firmwareOpen = true },
-                                    onOpenCountry = { countryOpen = true },
-                                    onOpenSshKeys = { sshKeysOpen = true },
-                                    onOpenBackup = { backupOpen = true },
                                 )
+                                MainTab.Terminal -> {
+                                    LaunchedEffect(termSessions) { termSessions?.openIfEmpty() }
+                                    TerminalScreen(
+                                        sessions = termSessions,
+                                        routerName = currentRouter,
+                                        lines = termLines,
+                                        pendingCommand = termPending,
+                                        snippetsOpen = snippetsOpen,
+                                        onToggleSnippets = { snippetsOpen = it },
+                                        onInsertSnippet = { cmd ->
+                                            val shell = termSessions?.current
+                                            if (shell != null) scope.launch { shell.send(cmd) } else termPending = cmd
+                                            snippetsOpen = false
+                                        },
+                                    )
+                                }
+                                MainTab.System -> if (sshKeysOpen) {
+                                    SshKeysScreen(
+                                        store = sshKeyStore,
+                                        latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
+                                        onBack = { sshKeysOpen = false },
+                                    )
+                                } else if (backupOpen) {
+                                    BackupScreen(
+                                        store = backupStore,
+                                        latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
+                                        onBack = { backupOpen = false },
+                                    )
+                                } else if (countryOpen) {
+                                    CountryScreen(
+                                        store = wifiStore,
+                                        onBack = { countryOpen = false },
+                                    )
+                                } else if (firmwareOpen) {
+                                    FirmwareScreen(
+                                        store = firmwareStore,
+                                        latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
+                                        onBack = { firmwareOpen = false },
+                                    )
+                                } else if (servicesOpen) {
+                                    ServicesScreen(
+                                        store = serviceStore,
+                                        latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
+                                        onBack = { servicesOpen = false },
+                                    )
+                                } else if (packagesOpen) {
+                                    PackagesScreen(
+                                        store = packageStore,
+                                        live = telemetry,
+                                        latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
+                                        onBack = { packagesOpen = false },
+                                    )
+                                } else if (logsOpen) {
+                                    LaunchedEffect(Unit) { logsStarted = true }
+                                    LogsScreen(
+                                        ticker = ticker,
+                                        live = liveLogs,
+                                        liveLatencyMs = telemetry?.latencyMs,
+                                        routerName = currentRouter,
+                                        onRouterTap = { showSwitcher = true },
+                                    )
+                                } else {
+                                    SystemScreen(
+                                        ticker = ticker,
+                                        live = telemetry,
+                                        board = flow.board,
+                                        country = wifiStore?.radios?.firstOrNull { it.country.isNotBlank() }?.country,
+                                        sshKeyInstalled = if (telemetry != null) {
+                                            savedRouters?.firstOrNull { it.host == WrtRuntime.session?.target?.host }
+                                                ?.privateKey != null
+                                        } else null,
+                                        biometricEnabled = if (telemetry != null) biometricEnabled else null,
+                                        onBiometricToggle = { on ->
+                                            biometricEnabled = on
+                                            prefs.edit().putBoolean("biometric_gate", on).apply()
+                                        },
+                                        packages = packageStore,
+                                        services = serviceStore,
+                                        backups = backupStore,
+                                        routerName = currentRouter,
+                                        onRouterTap = { showSwitcher = true },
+                                        onOpenLogs = { logsOpen = true },
+                                        onOpenPackages = { packagesOpen = true },
+                                        onOpenServices = { servicesOpen = true },
+                                        onOpenFirmware = { firmwareOpen = true },
+                                        onOpenCountry = { countryOpen = true },
+                                        onOpenSshKeys = { sshKeysOpen = true },
+                                        onOpenBackup = { backupOpen = true },
+                                    )
+                                }
                             }
                         }
-                    }
-                    if (!(tab == MainTab.Network && networkFullScreen)) {
-                        WrtBottomNav(current = tab) { picked ->
-                            if (picked != MainTab.System) {
-                                logsOpen = false; packagesOpen = false
-                                servicesOpen = false; firmwareOpen = false
-                                countryOpen = false; sshKeysOpen = false; backupOpen = false
+                        if (!(tab == MainTab.Network && networkFullScreen) && !terminalNeedsTheRow) {
+                            WrtBottomNav(current = tab) { picked ->
+                                if (picked != MainTab.System) {
+                                    logsOpen = false; packagesOpen = false
+                                    servicesOpen = false; firmwareOpen = false
+                                    countryOpen = false; sshKeysOpen = false; backupOpen = false
+                                }
+                                tab = picked
                             }
-                            tab = picked
                         }
                     }
                 }

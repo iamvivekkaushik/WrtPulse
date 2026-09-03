@@ -6,6 +6,7 @@ import com.vivekkaushik.wrtpulse.net.SshClient
 import com.vivekkaushik.wrtpulse.net.SshConnection
 import com.vivekkaushik.wrtpulse.net.SshTarget
 import com.vivekkaushik.wrtpulse.ops.Parsers
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -102,16 +103,16 @@ class TermEngineTest {
         val e = engine()
         e.feed("one\r\ntwo\r\nroot@gw:~# clear")
         e.feed("\r\n${esc}[H${esc}[2J")   // what terminfo's clear capability sends
-        assertEquals(listOf(""), e.screen.toList())
+        assertEquals(listOf(""), e.text)
         assertEquals(0, e.cursorRow)
         assertEquals("", e.current)
         assertTrue(e.lines.isEmpty())
 
         // The other spelling, erase-from-home-to-end, must do the same.
         e.feed("a\r\nb\r\nc")
-        assertEquals(3, e.screen.size)
+        assertEquals(3, e.text.size)
         e.feed("${esc}[H${esc}[J")
-        assertEquals(listOf(""), e.screen.toList())
+        assertEquals(listOf(""), e.text)
         assertEquals(0, e.cursorRow)
     }
 
@@ -143,13 +144,13 @@ class TermEngineTest {
         // First recall: a long command that wraps onto a second row.
         e.feed("\r${esc}]0;root@OpenWrt: ~${bel}${prompt}/usr/")
         e.feed("sbin/networksetup -setdhcp \r\r\nWi-Fi${esc}[J")
-        assertEquals(2, e.screen.size)
-        assertEquals("Wi-Fi", e.screen.last())
+        assertEquals(2, e.text.size)
+        assertEquals("Wi-Fi", e.text.last())
         assertEquals(1, e.cursorRow)
 
         // Second recall: ash steps back up to the first row, redraws, erases downward.
         e.feed("${esc}[1A\r${esc}]0;root@OpenWrt: ~${bel}${prompt}uptime${esc}[J")
-        assertEquals(listOf("${prompt}uptime"), e.screen.toList())
+        assertEquals(listOf("${prompt}uptime"), e.text)
         assertEquals(0, e.cursorRow)
         assertEquals("${prompt}uptime", e.current)
         assertTrue(e.lines.isEmpty())
@@ -161,7 +162,7 @@ class TermEngineTest {
         e.feed("one\r\ntwo\r\nthree")
         e.feed("${esc}[2A")       // back up to "one"
         e.feed("\rXY${esc}[J")    // rewrite, then erase from the cursor to the end of the screen
-        assertEquals(listOf("XY"), e.screen.toList())
+        assertEquals(listOf("XY"), e.text)
         assertEquals(0, e.cursorRow)
     }
 
@@ -169,15 +170,15 @@ class TermEngineTest {
     fun `line feed keeps the column so wrapped output is not indented`() {
         val e = engine()
         e.feed("abc\r\ndef")
-        assertEquals(listOf("abc", "def"), e.screen.toList())
+        assertEquals(listOf("abc", "def"), e.text)
     }
 
     @Test
     fun `cursor down past the end creates rows`() {
         val e = engine()
         e.feed("top${esc}[2Bbottom")
-        assertEquals(3, e.screen.size)
-        assertEquals("bottom", e.screen.last().trim())
+        assertEquals(3, e.text.size)
+        assertEquals("bottom", e.text.last().trim())
         assertEquals(2, e.cursorRow)
     }
 
@@ -186,7 +187,7 @@ class TermEngineTest {
         val e = smallEngine(cols = 10, rows = 3)
         e.feed("l1\r\nl2\r\nl3\r\nl4\r\nl5")
         // Three rows on screen, the first two scrolled above them.
-        assertEquals(listOf("l1", "l2", "l3", "l4", "l5"), e.screen.toList())
+        assertEquals(listOf("l1", "l2", "l3", "l4", "l5"), e.text)
         assertEquals(4, e.cursorRow)
         assertEquals("l5", e.current)
     }
@@ -196,7 +197,7 @@ class TermEngineTest {
         val e = smallEngine(cols = 10, rows = 3)
         e.feed("l1\r\nl2\r\nl3\r\nl4\r\nl5")
         e.feed("${esc}[H${esc}[2J")
-        assertEquals(listOf(""), e.screen.toList())
+        assertEquals(listOf(""), e.text)
         assertEquals(0, e.cursorRow)
     }
 
@@ -205,9 +206,9 @@ class TermEngineTest {
     fun `busybox clear form empties the view as well`() {
         val e = smallEngine(cols = 10, rows = 3)
         e.feed("l1\r\nl2\r\nl3\r\nl4\r\nl5")
-        assertEquals(5, e.screen.size)
+        assertEquals(5, e.text.size)
         e.feed("${esc}[H${esc}[J")
-        assertEquals(listOf(""), e.screen.toList())
+        assertEquals(listOf(""), e.text)
         assertEquals(0, e.cursorRow)
     }
 
@@ -220,7 +221,7 @@ class TermEngineTest {
         val e = smallEngine(cols = 10, rows = 3)
         e.feed("l1\r\nl2\r\nold")
         e.feed("\rnew${esc}[J")
-        assertEquals(listOf("l1", "l2", "new"), e.screen.toList())
+        assertEquals(listOf("l1", "l2", "new"), e.text)
     }
 
     /** But an erase-to-end mid-line must still only trim from the cursor. */
@@ -229,17 +230,17 @@ class TermEngineTest {
         val e = smallEngine(cols = 10, rows = 3)
         e.feed("l1\r\nl2\r\nab")
         e.feed("${esc}[J")
-        assertEquals(listOf("l1", "l2", "ab"), e.screen.toList())
+        assertEquals(listOf("l1", "l2", "ab"), e.text)
     }
 
     @Test
     fun `text wraps at the pty width without an early break`() {
         val e = smallEngine(cols = 10, rows = 3)
         e.feed("0123456789")          // exactly fills row 0
-        assertEquals(listOf("0123456789"), e.screen.toList())
+        assertEquals(listOf("0123456789"), e.text)
         assertEquals(0, e.cursorRow)
         e.feed("X")                   // the next character starts row 1
-        assertEquals(listOf("0123456789", "X"), e.screen.toList())
+        assertEquals(listOf("0123456789", "X"), e.text)
         assertEquals(1, e.cursorRow)
     }
 
@@ -345,5 +346,63 @@ class TermEngineTest {
         assertEquals(com.vivekkaushik.wrtpulse.ui.theme.Wrt.Red, LiveLogs.colorFor("err", "dnsmasq"))
         assertEquals(com.vivekkaushik.wrtpulse.ui.theme.Wrt.Blue, LiveLogs.colorFor("info", "dnsmasq-dhcp"))
         assertEquals(com.vivekkaushik.wrtpulse.ui.theme.Wrt.Accent, LiveLogs.colorFor("info", "dropbear"))
+    }
+
+    // ---------- pty resize ----------
+    //
+    // The pty was fixed at 48 columns, which on a tablet or an unfolded phone left half the
+    // pane empty and wrapped lines that had room to spare.
+
+    @Test
+    fun `a wider pty wraps later`() = runTest {
+        val e = smallEngine(cols = 10, rows = 3)
+        e.resize(20, 3)
+        e.feed("0123456789ABCDEFGHIJ")   // exactly fills the wider row
+        assertEquals(listOf("0123456789ABCDEFGHIJ"), e.text)
+        assertEquals(0, e.cursorRow)
+        e.feed("X")
+        assertEquals(1, e.cursorRow)
+    }
+
+    @Test
+    fun `growing the grid keeps what is already on screen`() = runTest {
+        val e = smallEngine(cols = 10, rows = 3)
+        e.feed("one\r\ntwo\r\n")
+        e.resize(10, 8)
+        assertEquals(8, e.rows)
+        assertEquals(listOf("one", "two", ""), e.text)
+        assertEquals(2, e.cursorRow)
+    }
+
+    @Test
+    fun `shrinking the grid scrolls rows off the top rather than losing them`() = runTest {
+        val e = smallEngine(cols = 10, rows = 4)
+        e.feed("one\r\ntwo\r\nthree\r\n")
+        assertEquals(3, e.cursorRow)
+        e.resize(10, 2)
+        assertEquals(2, e.rows)
+        // Every row survives; the cursor is still on the row it was writing.
+        assertEquals(listOf("one", "two", "three", ""), e.text)
+        assertEquals(3, e.cursorRow)
+    }
+
+    @Test
+    fun `the shell keeps writing correctly after a resize`() = runTest {
+        val e = smallEngine(cols = 10, rows = 3)
+        e.feed("gw:~# ")            // still inside the narrow row
+        e.resize(40, 6)
+        e.feed("ls -al /etc\r\n")   // would have wrapped twice at ten columns
+        assertEquals(listOf("gw:~# ls -al /etc", ""), e.text)
+        assertEquals(1, e.cursorRow)
+    }
+
+    @Test
+    fun `a degenerate size is floored instead of emptying the grid`() = runTest {
+        val e = smallEngine(cols = 10, rows = 3)
+        e.resize(0, 0)
+        assertEquals(TermEngine.MIN_COLS, e.cols)
+        assertEquals(TermEngine.MIN_ROWS, e.rows)
+        e.feed("hi")
+        assertEquals("hi", e.current)
     }
 }
