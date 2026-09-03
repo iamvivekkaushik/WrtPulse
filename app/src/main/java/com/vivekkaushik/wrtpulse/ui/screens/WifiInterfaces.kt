@@ -1383,9 +1383,6 @@ fun NetworkHomeScreen(
             routerName = routerName,
             latencyMs = liveLatencyMs ?: ticker.latencyMs,
             onRouterTap = onRouterTap,
-            trailing = {
-                Icon(WrtIcons.MoreVert, "menu", Modifier.size(18.dp), tint = Wrt.TextTertiary)
-            },
         )
         Column(
             Modifier.weight(1f).padding(horizontal = 14.dp, vertical = 12.dp),

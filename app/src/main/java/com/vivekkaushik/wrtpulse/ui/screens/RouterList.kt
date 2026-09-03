@@ -1,5 +1,6 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -15,19 +16,27 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.vivekkaushik.wrtpulse.data.Demo
 import com.vivekkaushik.wrtpulse.data.Router
@@ -73,6 +82,27 @@ fun RouterEntity.asRouter(connectedHost: String?, connectingHost: String?): Rout
     )
 }
 
+/**
+ * Whether a saved router answers to [query]. Every whitespace-separated word has to appear
+ * somewhere — display name, host, host:port, model or the OpenWrt summary — so "openwrt 2.1"
+ * narrows the way a person expects. Case does not matter; a blank query matches everything.
+ */
+fun routerMatches(e: RouterEntity, query: String): Boolean {
+    val words = query.trim().lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+    if (words.isEmpty()) return true
+    val haystack = listOf(e.name, e.host, "${e.host}:${e.port}", e.username, e.model, e.summary)
+        .joinToString("\n").lowercase()
+    return words.all { it in haystack }
+}
+
+/** The same for the design-time list, which has no entity behind it. */
+fun demoRouterMatches(r: Router, query: String): Boolean {
+    val words = query.trim().lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+    if (words.isEmpty()) return true
+    val haystack = listOf(r.name, r.model, r.tag, r.wanIp.orEmpty(), r.switcherDetail).joinToString("\n").lowercase()
+    return words.all { it in haystack }
+}
+
 @Composable
 fun RouterListScreen(
     saved: List<RouterEntity>?,
@@ -85,20 +115,41 @@ fun RouterListScreen(
 ) {
     var filter by remember { mutableIntStateOf(0) }
     val filters = listOf("All", "Home", "Office", "Parents")
-    val count = saved?.size ?: Demo.routers.size
+    var searching by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    val shownSaved = saved?.filter { routerMatches(it, query) }
+    val shownDemo = when (filter) {
+        1 -> Demo.routers.filter { it.tag == "HOME" }
+        2 -> Demo.routers.filter { it.tag == "OFFICE" }
+        3 -> Demo.routers.filter { it.tag == "PARENTS" }
+        else -> Demo.routers
+    }.filter { demoRouterMatches(it, query) }
+    val count = shownSaved?.size ?: shownDemo.size
+    // Back closes the search before it does anything else on this screen.
+    BackHandler(enabled = searching) { searching = false; query = "" }
     Box(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         Column(Modifier.fillMaxSize()) {
-            Row(
-                Modifier.fillMaxWidth().height(54.dp).padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(9.dp),
-            ) {
-                Text("Routers", style = sans(17f, 650))
-                Text("$count", style = mono(11.5f, 500, Wrt.TextDim))
-                FlexSpacer()
-                Icon(WrtIcons.Search, "search", Modifier.size(19.dp), tint = Wrt.TextTertiary)
-                Spacer(Modifier.size(6.dp))
-                Icon(WrtIcons.MoreVert, "more", Modifier.size(19.dp), tint = Wrt.TextTertiary)
+            if (searching) {
+                SearchBar(
+                    query = query,
+                    onQuery = { query = it },
+                    onClose = { searching = false; query = "" },
+                )
+            } else {
+                Row(
+                    Modifier.fillMaxWidth().height(54.dp).padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(9.dp),
+                ) {
+                    Text("Routers", style = sans(17f, 650))
+                    Text("$count", style = mono(11.5f, 500, Wrt.TextDim))
+                    FlexSpacer()
+                    Icon(
+                        WrtIcons.Search, "search",
+                        Modifier.size(19.dp).clickable { searching = true },
+                        tint = Wrt.TextTertiary,
+                    )
+                }
             }
             if (saved == null) {
                 Row(
@@ -132,8 +183,8 @@ fun RouterListScreen(
                     .padding(horizontal = 14.dp),
                 verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
-                if (saved != null) {
-                    saved.forEach { e ->
+                if (saved != null && shownSaved != null) {
+                    shownSaved.forEach { e ->
                         RouterCard(
                             e.asRouter(connectedHost, connectingHost),
                             onClick = { onOpenSaved(e) },
@@ -145,15 +196,22 @@ fun RouterListScreen(
                             style = mono(11f, 500, Wrt.TextDim),
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 16.dp),
                         )
+                    } else if (shownSaved.isEmpty()) {
+                        Text(
+                            "Nothing matches \u201c${query.trim()}\u201d — try a name, address or model.",
+                            style = mono(11f, 500, Wrt.TextDim),
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 16.dp),
+                        )
                     }
                 } else {
-                    val visible = when (filter) {
-                        1 -> Demo.routers.filter { it.tag == "HOME" }
-                        2 -> Demo.routers.filter { it.tag == "OFFICE" }
-                        3 -> Demo.routers.filter { it.tag == "PARENTS" }
-                        else -> Demo.routers
+                    shownDemo.forEach { r -> RouterCard(r, onClick = { onOpenRouter(r) }) }
+                    if (shownDemo.isEmpty() && query.isNotBlank()) {
+                        Text(
+                            "Nothing matches \u201c${query.trim()}\u201d",
+                            style = mono(11f, 500, Wrt.TextDim),
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 16.dp),
+                        )
                     }
-                    visible.forEach { r -> RouterCard(r, onClick = { onOpenRouter(r) }) }
                 }
                 Spacer(Modifier.height(90.dp))
             }
@@ -171,6 +229,39 @@ fun RouterListScreen(
         ) {
             Icon(WrtIcons.Plus, "add router", Modifier.size(24.dp), tint = Wrt.OnAccent)
         }
+    }
+}
+
+/** Replaces the title row while a search is open. Focused on open, so typing starts at once. */
+@Composable
+private fun SearchBar(query: String, onQuery: (String) -> Unit, onClose: () -> Unit) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    Row(
+        Modifier.fillMaxWidth().height(54.dp).padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(WrtIcons.Search, null, Modifier.size(17.dp), tint = Wrt.Accent)
+        Box(Modifier.weight(1f)) {
+            if (query.isEmpty()) {
+                Text("Name, address or model", style = sans(14f, 500, Wrt.TextFaint))
+            }
+            BasicTextField(
+                value = query,
+                onValueChange = onQuery,
+                textStyle = sans(14f, 500),
+                singleLine = true,
+                cursorBrush = SolidColor(Wrt.Accent),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search, autoCorrectEnabled = false),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus),
+            )
+        }
+        Icon(
+            WrtIcons.Close, "close search",
+            Modifier.size(18.dp).clickable(onClick = onClose),
+            tint = Wrt.TextTertiary,
+        )
     }
 }
 

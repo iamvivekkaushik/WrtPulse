@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -51,6 +52,8 @@ import com.vivekkaushik.wrtpulse.ui.theme.Wrt
 private fun OnboardingScaffold(
     step: Int,
     showLogo: Boolean = false,
+    /** Non-null when there is somewhere to go back to — the router list, for a returning user. */
+    onBack: (() -> Unit)? = null,
     content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
     Column(
@@ -62,6 +65,15 @@ private fun OnboardingScaffold(
     ) {
         if (showLogo) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                if (onBack != null) {
+                    Icon(
+                        WrtIcons.ChevronLeft,
+                        "back",
+                        Modifier.size(18.dp).clickable(onClick = onBack),
+                        tint = Wrt.TextPrimary,
+                    )
+                    Spacer(Modifier.width(3.dp))
+                }
                 Box(
                     Modifier
                         .size(28.dp)
@@ -97,8 +109,9 @@ fun OnboardingConnectScreen(
     onFirstContact: () -> Unit,
     onConnected: () -> Unit,
     onKeyChanged: () -> Unit,
+    onBack: (() -> Unit)? = null,
 ) {
-    OnboardingScaffold(step = 1, showLogo = true) {
+    OnboardingScaffold(step = 1, showLogo = true, onBack = onBack) {
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             Spacer(Modifier.height(28.dp))
             Text("Connect to your router", style = sans(24f, 650, letterSpacing = (-0.01).em))

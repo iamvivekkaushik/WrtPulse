@@ -75,7 +75,6 @@ fun SystemScreen(
             routerName = routerName,
             latencyMs = live?.latencyMs ?: ticker.latencyMs,
             onRouterTap = onRouterTap,
-            trailing = { Icon(WrtIcons.MoreVert, "menu", Modifier.size(18.dp), tint = Wrt.TextTertiary) },
         )
         Column(
             Modifier

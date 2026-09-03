@@ -94,7 +94,6 @@ fun ClientsScreen(
             routerName = routerName,
             latencyMs = liveLatencyMs ?: ticker.latencyMs,
             onRouterTap = onRouterTap,
-            trailing = { Icon(WrtIcons.MoreVert, "menu", Modifier.size(18.dp), tint = Wrt.TextTertiary) },
         )
         Row(
             Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),

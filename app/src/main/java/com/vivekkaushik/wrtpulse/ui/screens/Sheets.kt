@@ -105,6 +105,8 @@ fun SwitcherSheetContent(
     onPickSaved: (com.vivekkaushik.wrtpulse.db.RouterEntity) -> Unit = {},
     onPick: (Router) -> Unit,
     onManage: () -> Unit,
+    /** The dashed "Add router" row. Distinct from [onManage]: it opens the add page, not the list. */
+    onAdd: () -> Unit = onManage,
 ) {
     Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 24.dp)) {
         Row(Modifier.padding(top = 14.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -171,7 +173,7 @@ fun SwitcherSheetContent(
                 Modifier
                     .fillMaxWidth()
                     .dashedBorder(Wrt.BorderInput, 12.dp)
-                    .clickable(onClick = onManage)
+                    .clickable(onClick = onAdd)
                     .padding(13.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

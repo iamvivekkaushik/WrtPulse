@@ -122,6 +122,12 @@ private fun WrtPulseApp() {
             dest = if (savedRouters!!.isEmpty()) Dest.Onboarding1 else Dest.RouterList
         }
     }
+    // Whether onboarding has a router list behind it to go back to.
+    val hasSavedRouters = !savedRouters.isNullOrEmpty()
+    // Set when the list or the add page is opened from a live dashboard (the switcher sheet),
+    // so back returns there instead of stranding the user on the list.
+    var returnToMain by remember { mutableStateOf(false) }
+    val canReturnToMain = returnToMain && WrtRuntime.session?.isConnected == true
 
     // The Keystore blob is only opened after the user passes the screen-lock gate, once per launch.
     var unlocked by remember { mutableStateOf(false) }
@@ -255,6 +261,13 @@ private fun WrtPulseApp() {
                     onFirstContact = { dest = Dest.Onboarding2 },
                     onConnected = { dest = Dest.Onboarding3 },
                     onKeyChanged = { hostKeyRouter = flow.target.host; dest = Dest.HostKey },
+                    // A first-run user has nowhere to go back to; one adding another router does —
+                    // the dashboard they came from, or the list.
+                    onBack = when {
+                        canReturnToMain -> { { dest = Dest.Main } }
+                        hasSavedRouters -> { { dest = Dest.RouterList } }
+                        else -> null
+                    },
                 )
                 Dest.Onboarding2 -> OnboardingFingerprintScreen(
                     flow = flow,
@@ -488,7 +501,14 @@ private fun WrtPulseApp() {
                             dest = Dest.HostKey
                         }
                     },
-                    onManage = { showSwitcher = false; dest = Dest.RouterList },
+                    onManage = { showSwitcher = false; returnToMain = true; dest = Dest.RouterList },
+                    onAdd = {
+                        showSwitcher = false
+                        flow.keyPem = null
+                        flow.password = ""
+                        returnToMain = true
+                        dest = Dest.Onboarding1
+                    },
                 )
             }
             SheetHost(visible = showDiff, onDismiss = { showDiff = false }) {
@@ -522,8 +542,16 @@ private fun WrtPulseApp() {
         }
     }
 
-    BackHandler(enabled = dest != Dest.Onboarding1 && dest != Dest.RouterList && dest != Dest.Boot) {
+    // Back leaves the app only from the router list, or from onboarding when there is no list
+    // to return to. Everywhere else it steps one level up.
+    BackHandler(
+        enabled = dest != Dest.Boot &&
+            !(dest == Dest.RouterList && !canReturnToMain) &&
+            !(dest == Dest.Onboarding1 && !hasSavedRouters && !canReturnToMain),
+    ) {
         when {
+            dest == Dest.RouterList -> dest = Dest.Main
+            dest == Dest.Onboarding1 -> dest = if (canReturnToMain) Dest.Main else Dest.RouterList
             dest == Dest.Onboarding2 -> dest = Dest.Onboarding1
             dest == Dest.Onboarding3 -> dest = Dest.Onboarding2
             dest == Dest.HostKey -> dest = if (flow.keyChange != null) {
@@ -540,7 +568,7 @@ private fun WrtPulseApp() {
             dest == Dest.Main && tab == MainTab.System && packagesOpen -> packagesOpen = false
             dest == Dest.Main && tab == MainTab.System && logsOpen -> logsOpen = false
             dest == Dest.Main && tab != MainTab.Dashboard -> tab = MainTab.Dashboard
-            dest == Dest.Main -> dest = Dest.RouterList
+            dest == Dest.Main -> { returnToMain = false; dest = Dest.RouterList }
         }
     }
 }
