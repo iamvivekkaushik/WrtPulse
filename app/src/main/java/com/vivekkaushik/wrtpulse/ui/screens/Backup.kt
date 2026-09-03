@@ -1,0 +1,498 @@
+package com.vivekkaushik.wrtpulse.ui.screens
+
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
+import com.vivekkaushik.wrtpulse.data.BackupStore
+import com.vivekkaushik.wrtpulse.data.LocalBackup
+import com.vivekkaushik.wrtpulse.ops.Commands
+import com.vivekkaushik.wrtpulse.ui.FlexSpacer
+import com.vivekkaushik.wrtpulse.ui.GhostButton
+import com.vivekkaushik.wrtpulse.ui.MonoTag
+import com.vivekkaushik.wrtpulse.ui.PrimaryButton
+import com.vivekkaushik.wrtpulse.ui.SectionLabel
+import com.vivekkaushik.wrtpulse.ui.WrtIcons
+import com.vivekkaushik.wrtpulse.ui.mono
+import com.vivekkaushik.wrtpulse.ui.sans
+import com.vivekkaushik.wrtpulse.ui.theme.Wrt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+
+/**
+ * Backup & restore. The top half is reads: what a backup carries, take one, the archives
+ * already on this phone. The bottom half is the restore, gated the same way the flash is —
+ * see [BackupStore.restoreBlock], which is also what the screen prints when a gate is unmet.
+ */
+@Composable
+fun BackupScreen(
+    store: BackupStore?,
+    latencyMs: Int,
+    onBack: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    // Keyed by section: a result belongs next to the button that caused it.
+    var result by remember { mutableStateOf<Pair<Int, String>?>(null) }
+    var showFiles by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf<LocalBackup?>(null) }
+
+    // Re-read on every entry: the firmware gate writes into the same directory.
+    LaunchedEffect(store) { store?.load() }
+
+    // The picker hands back a content: URI. The bytes are read off the main thread and judged
+    // by the store before the router hears about any of it.
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null && store != null) {
+            scope.launch {
+                val picked = withContext(Dispatchers.IO) {
+                    readDocument(context, uri, BackupStore.MAX_RESTORE_BYTES + 1)
+                }
+                result = 3 to (picked?.let { (name, bytes) -> store.stage(name, bytes) }
+                    ?: "Failed: couldn't read that file.")
+            }
+        }
+    }
+    val saver = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/gzip")) { uri ->
+        val backup = saving
+        saving = null
+        if (uri != null && backup != null) {
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.openOutputStream(uri)?.use { it.write(backup.file.readBytes()) } != null
+                    }.getOrDefault(false)
+                }
+                result = 2 to if (ok) "Saved a copy of ${backup.name}" else "Failed: couldn't write the copy."
+            }
+        }
+    }
+
+    Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
+        FormTopBar("Backup & restore", onBack) {
+            Text(
+                "$latencyMs ms",
+                style = mono(10.5f, 500, Wrt.TextTertiary),
+                modifier = Modifier
+                    .border(1.dp, Wrt.BorderCard, RoundedCornerShape(6.dp))
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+            )
+        }
+        if (store == null) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Connect to a router to manage backups.", style = sans(12f, 500, Wrt.TextDim))
+            }
+            return@Column
+        }
+        if (store.restoring) {
+            RestoringPanel(store)
+            return@Column
+        }
+
+        Column(
+            Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            RouterCard(store, showFiles) { showFiles = !showFiles }
+
+            SectionLabel("BACK UP", tracking = 0.14)
+            Card {
+                Text(
+                    "sysupgrade writes the archive to the router's RAM; the app reads it back and " +
+                        "keeps it here, in its private storage. It holds the router's passwords and " +
+                        "SSH host keys, so it only leaves this phone when you share it.",
+                    style = sans(11f, 500, Wrt.TextSecondary),
+                )
+                Spacer(Modifier.height(8.dp))
+                CodeLine("sysupgrade -b ${Commands.BACKUP_FILE}")
+                Spacer(Modifier.height(10.dp))
+                PrimaryButton(if (store.busy) "Working…" else "Back up now") {
+                    if (!store.busy) scope.launch { result = 1 to store.backUp() }
+                }
+                ResultLine(result?.takeIf { it.first == 1 }?.second)
+            }
+
+            SectionLabel("ON THIS PHONE", tracking = 0.14)
+            if (store.local.isEmpty()) {
+                Card {
+                    Text(
+                        "No backups yet. The first one appears here as soon as it is taken.",
+                        style = sans(11f, 500, Wrt.TextDim),
+                    )
+                }
+            }
+            store.local.forEach { backup ->
+                BackupRow(
+                    backup = backup,
+                    otherRouter = backup.host != store.safeHost,
+                    confirmDelete = confirmDelete == backup.name,
+                    onShare = { shareBackup(context, backup.file) },
+                    onSave = { saving = backup; saver.launch(backup.name) },
+                    onRestore = { result = 3 to store.stageLocal(backup) },
+                    onDelete = {
+                        if (confirmDelete == backup.name) {
+                            result = 2 to store.delete(backup)
+                            confirmDelete = null
+                        } else {
+                            confirmDelete = backup.name
+                        }
+                    },
+                )
+            }
+            ResultLine(result?.takeIf { it.first == 2 }?.second)
+
+            SectionLabel("RESTORE", color = Wrt.Red, tracking = 0.14)
+            RestoreCard(
+                store = store,
+                message = result?.takeIf { it.first == 3 }?.second,
+                onPick = { picker.launch(arrayOf("*/*")) },
+                onResult = { result = 3 to it },
+            )
+
+            store.progress?.let {
+                Text(it, style = mono(10.5f, 500, Wrt.Accent), modifier = Modifier.padding(top = 2.dp))
+            }
+            store.error?.let {
+                Text(it, style = sans(11f, 500, Wrt.Red))
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+/** What this router is and what `sysupgrade -l` says would go into its backup. */
+@Composable
+private fun RouterCard(store: BackupStore, showFiles: Boolean, onToggleFiles: () -> Unit) {
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("THIS ROUTER", size = 9.5f, tracking = 0.14)
+            FlexSpacer()
+            MonoTag(
+                if (store.files.isEmpty()) "—" else "${store.files.size} FILES",
+                color = Wrt.TextTertiary,
+            )
+        }
+        Text(
+            listOfNotNull(store.board?.hostname?.ifBlank { null } ?: store.host, store.board?.summary?.ifBlank { null })
+                .joinToString(" · "),
+            style = sans(12.5f, 600),
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        Text(
+            if (store.files.isEmpty() && !store.loaded) "reading…"
+            else "${store.files.size} files go into a backup: /etc/config and everything sysupgrade.conf names",
+            style = mono(10f, 500, Wrt.TextDim),
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        if (store.files.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.clickable(onClick = onToggleFiles),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    if (showFiles) WrtIcons.ChevronUp else WrtIcons.ChevronDown,
+                    null, Modifier.size(12.dp), tint = Wrt.TextTertiary,
+                )
+                Text(if (showFiles) "Hide the list" else "Show the list", style = sans(11f, 600, Wrt.TextTertiary))
+                FlexSpacer()
+                Text(Commands.BACKUP_LIST.substringBefore(" 2>"), style = mono(9.5f, 500, Wrt.TextDim))
+            }
+            if (showFiles) {
+                Spacer(Modifier.height(8.dp))
+                OutputBox(store.files.joinToString("\n"), problem = false)
+            }
+        }
+    }
+}
+
+/** One archive on the phone and the four things that can be done with it. */
+@Composable
+private fun BackupRow(
+    backup: LocalBackup,
+    otherRouter: Boolean,
+    confirmDelete: Boolean,
+    onShare: () -> Unit,
+    onSave: () -> Unit,
+    onRestore: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Icon(WrtIcons.Backup, null, Modifier.size(18.dp), tint = Wrt.TextTertiary)
+            Column(Modifier.weight(1f)) {
+                Text(stamp(backup.createdEpoch), style = sans(12.5f, 600))
+                Text(
+                    "${backup.name} · ${preciseBytes(backup.bytes)}",
+                    style = mono(9.5f, 500, Wrt.TextDim),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            if (otherRouter) MonoTag(backup.host, color = Wrt.Amber, border = Wrt.Amber.copy(alpha = 0.5f))
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ActionChip("Share", onClick = onShare)
+            ActionChip("Save copy", onClick = onSave)
+            ActionChip("Restore", color = Wrt.Accent, onClick = onRestore)
+            FlexSpacer()
+            ActionChip(if (confirmDelete) "Tap again to delete" else "Delete", color = Wrt.Red, onClick = onDelete)
+        }
+    }
+}
+
+@Composable
+private fun ActionChip(text: String, color: Color = Wrt.TextSecondary, onClick: () -> Unit) {
+    Text(
+        text,
+        style = sans(11f, 600, color),
+        modifier = Modifier
+            .border(1.dp, color.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    )
+}
+
+/** The last card. Everything here is about making the consequences legible before the hold. */
+@Composable
+private fun RestoreCard(store: BackupStore, message: String?, onPick: () -> Unit, onResult: (String) -> Unit) {
+    val scope = rememberCoroutineScope()
+    val candidate = store.candidate
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(1.dp, Wrt.Red.copy(alpha = 0.4f), RoundedCornerShape(13.dp))
+            .background(Wrt.Red.copy(alpha = 0.04f), RoundedCornerShape(13.dp))
+            .padding(horizontal = 14.dp, vertical = 13.dp)
+    ) {
+        if (candidate == null) {
+            Text(
+                "Restoring unpacks a backup over the router's current settings and reboots it. " +
+                    "Pick one from the list above, or a .tar.gz from anywhere on this phone.",
+                style = sans(11f, 500, Wrt.DangerBody),
+            )
+            Spacer(Modifier.height(10.dp))
+            GhostButton(
+                "Choose a file on this phone…",
+                border = Wrt.Red.copy(alpha = 0.4f),
+                textColor = Wrt.DangerOutlineText,
+                onClick = onPick,
+            )
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text(candidate.source, style = sans(12.5f, 600), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        "${candidate.fileCount} files · ${preciseBytes(candidate.bytes.size.toLong())} · " +
+                            "sha256 ${candidate.sha256.take(12)}…",
+                        style = mono(9.5f, 500, Wrt.DangerMono),
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+                MonoTag(
+                    if (candidate.onRouter) "ON ROUTER" else "ON PHONE",
+                    color = if (candidate.onRouter) Wrt.Amber else Wrt.TextTertiary,
+                    border = if (candidate.onRouter) Wrt.Amber.copy(alpha = 0.5f) else Wrt.BorderInput,
+                )
+            }
+            val inside = listOfNotNull(
+                candidate.hostname?.let { "hostname $it" },
+                candidate.lanAddress?.let { "lan $it" },
+            )
+            if (inside.isNotEmpty()) {
+                Text(
+                    "inside the archive: ${inside.joinToString(" · ")}",
+                    style = mono(9.5f, 500, Wrt.DangerMono),
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+            BackupStore.restoreWarnings(candidate, store.board, store.host).forEach {
+                Text(it, style = sans(10.5f, 500, Wrt.AmberText), modifier = Modifier.padding(top = 9.dp))
+            }
+
+            Spacer(Modifier.height(12.dp))
+            if (!candidate.onRouter) {
+                CodeLine(Commands.RESTORE_RECEIVE)
+                Spacer(Modifier.height(8.dp))
+                GhostButton(
+                    if (store.busy) "Working…" else "Send to the router",
+                    border = Wrt.Red.copy(alpha = 0.4f),
+                    textColor = Wrt.DangerOutlineText,
+                ) {
+                    if (!store.busy) scope.launch { onResult(store.upload()) }
+                }
+            } else {
+                CodeLine(Commands.RESTORE_LIST)
+                candidate.routerListing?.let {
+                    Spacer(Modifier.height(8.dp))
+                    OutputBox(it.joinToString("\n"), problem = false)
+                }
+                candidate.routerRefusal?.let {
+                    Spacer(Modifier.height(8.dp))
+                    OutputBox(it, problem = true)
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            val block = BackupStore.restoreBlock(candidate)
+            if (block != null) {
+                Text(block, style = sans(11.5f, 500, Wrt.DangerSub))
+            } else {
+                CodeLine("${Commands.RESTORE_APPLY.substringBefore(" 2>")} && reboot")
+                Spacer(Modifier.height(10.dp))
+                HoldToConfirm("Hold to restore and reboot") {
+                    scope.launch { onResult(store.restore()) }
+                }
+                Text(
+                    "Hold 3 s to confirm",
+                    style = sans(10f, 500, Wrt.DangerSub),
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+            store.restoreOutput?.let {
+                Spacer(Modifier.height(8.dp))
+                OutputBox(it, problem = true)
+            }
+            Spacer(Modifier.height(10.dp))
+            GhostButton("Discard", textColor = Wrt.TextSecondary) {
+                scope.launch { onResult(store.discard()) }
+            }
+        }
+        message?.let {
+            Text(
+                it,
+                style = mono(10f, 500, if (it.startsWith("Failed")) Wrt.Red else Wrt.Amber),
+                modifier = Modifier.padding(top = 10.dp),
+            )
+        }
+    }
+}
+
+/** After the reboot command is away there is nothing to do but say so plainly. */
+@Composable
+private fun RestoringPanel(store: BackupStore) {
+    val candidate = store.candidate
+    Column(
+        Modifier.fillMaxSize().padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(WrtIcons.Reboot, null, Modifier.size(40.dp), tint = Wrt.Amber)
+        Text(
+            "Restored — rebooting",
+            style = sans(16f, 700, Wrt.Amber),
+            modifier = Modifier.padding(top = 16.dp),
+        )
+        Text(
+            "The archive is unpacked and the router is restarting with it. The connection has " +
+                "already dropped — that is expected. It usually takes a minute.",
+            style = sans(12f, 500, Wrt.TextSecondary),
+            modifier = Modifier.padding(top = 10.dp),
+        )
+        candidate?.lanAddress?.takeIf { it != store.host }?.let {
+            Text(
+                "The restored config puts the LAN on $it. If that differs from ${store.host}, add the " +
+                    "router again at the new address from the router list.",
+                style = sans(11f, 500, Wrt.Amber),
+                modifier = Modifier.padding(top = 14.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ResultLine(text: String?) {
+    text?.let {
+        Text(
+            it,
+            style = mono(10f, 500, if (it.startsWith("Failed")) Wrt.Red else Wrt.Accent),
+            modifier = Modifier.padding(top = 10.dp),
+        )
+    }
+}
+
+private val STAMP: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM yyyy · HH:mm")
+
+private fun stamp(epochSeconds: Long): String =
+    Instant.ofEpochSecond(epochSeconds).atZone(ZoneId.systemDefault()).format(STAMP)
+
+/**
+ * Name and bytes of a picked document, or null. Reads at most [limit] bytes, so a wrong pick
+ * cannot fill memory — the store then refuses anything over its own cap.
+ */
+private fun readDocument(context: Context, uri: Uri, limit: Long): Pair<String, ByteArray>? = runCatching {
+    val resolver = context.contentResolver
+    val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+        if (c.moveToFirst()) c.getString(0) else null
+    } ?: uri.lastPathSegment ?: "backup.tar.gz"
+    val bytes = resolver.openInputStream(uri)?.use { input ->
+        val out = ByteArrayOutputStream()
+        val buffer = ByteArray(16 * 1024)
+        while (out.size() <= limit) {
+            val n = input.read(buffer)
+            if (n < 0) break
+            out.write(buffer, 0, n)
+        }
+        out.toByteArray()
+    } ?: return null
+    name to bytes
+}.getOrNull()
+
+/** Hands the archive to whatever the user wants to keep it in. */
+internal fun shareBackup(context: Context, file: File?) {
+    if (file == null || !file.exists()) return
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "application/gzip"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(send, "Save the router backup"))
+}

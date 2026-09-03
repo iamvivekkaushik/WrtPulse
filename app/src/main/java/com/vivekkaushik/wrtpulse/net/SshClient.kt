@@ -31,6 +31,13 @@ interface SshConnection : Closeable {
     /** Runs a command to completion and collects both streams. */
     suspend fun exec(command: String, timeoutMs: Long = 15_000): ExecResult
 
+    /**
+     * Runs a command with [input] on its stdin. This is how bytes get ONTO the router: the
+     * exec channel carries stdin raw, so an archive goes up without an encoder — whereas
+     * stdout comes back as text and needs one (see `Commands.BACKUP_READ`).
+     */
+    suspend fun execWithInput(command: String, input: ByteArray, timeoutMs: Long = 60_000): ExecResult
+
     /** Round-trip time of a no-op command — the latency chip in the top bar. */
     suspend fun ping(): Long
 

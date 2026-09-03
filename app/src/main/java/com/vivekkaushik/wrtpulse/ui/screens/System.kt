@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import com.vivekkaushik.wrtpulse.data.BackupStore
 import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.PackageStore
 import com.vivekkaushik.wrtpulse.data.ServiceStore
@@ -56,6 +57,7 @@ fun SystemScreen(
     onBiometricToggle: (Boolean) -> Unit = {},
     packages: PackageStore? = null,
     services: ServiceStore? = null,
+    backups: BackupStore? = null,
     routerName: String,
     onRouterTap: () -> Unit,
     onOpenLogs: () -> Unit,
@@ -64,6 +66,7 @@ fun SystemScreen(
     onOpenFirmware: () -> Unit = {},
     onOpenCountry: () -> Unit = {},
     onOpenSshKeys: () -> Unit = {},
+    onOpenBackup: () -> Unit = {},
 ) {
     var biometricDemo by remember { mutableStateOf(true) }
     val isLive = live != null
@@ -83,9 +86,17 @@ fun SystemScreen(
         ) {
             SectionLabel("MAINTENANCE", tracking = 0.14)
             SystemCard {
+                // The row reads a directory listing, not the router: "last backup" means the
+                // newest archive from this router that is on THIS phone.
+                val lastBackup = backups?.lastBackup
                 SystemRow(
                     WrtIcons.Backup, "Backup & restore",
-                    if (isLive) "Coming soon" else "Last backup 6 d ago",
+                    when {
+                        !isLive -> "Last backup 6 d ago"
+                        lastBackup != null -> "Last backup ${BackupStore.ageLabel(lastBackup.createdEpoch)}"
+                        else -> "No backup on this phone yet"
+                    },
+                    onClick = if (isLive) onOpenBackup else null,
                 )
                 if (isLive) {
                     SystemRow(

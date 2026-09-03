@@ -12,7 +12,6 @@ import com.vivekkaushik.wrtpulse.ops.ImageCheck
 import com.vivekkaushik.wrtpulse.ops.Parsers
 import com.vivekkaushik.wrtpulse.ops.UpgradeCheck
 import java.io.File
-import java.util.Base64
 
 /**
  * The firmware upgrade path, as a set of gates rather than a wizard.
@@ -109,45 +108,21 @@ class FirmwareStore(private val session: RouterSession) {
     }
 
     /**
-     * Pulls the config archive off the router and onto the phone. It goes out base64 over the
-     * exec channel rather than over SFTP — a config backup is tens of kilobytes, and a
-     * backup that only exists on the device about to be reflashed is not a backup at all.
+     * Pulls the config archive off the router and onto the phone — see [ConfigArchive] for
+     * how. Here it is a gate: the flash is not offered until this has happened or been
+     * waived out loud.
      */
     suspend fun backUp(directory: File): String {
         busy = true
-        progress = "Writing the config archive…"
         return try {
-            val made = session.exec(Commands.BACKUP_CREATE, timeoutMs = 120_000)
-            val size = Parsers.byteCount(made.stdout)
-            when {
-                !made.ok || size == null || size <= 0 ->
-                    "Failed: sysupgrade -b produced nothing."
-                size > MAX_BACKUP_BYTES ->
-                    "Failed: the archive is ${size / 1024} kB — too large to read over the " +
-                        "command channel. Copy it off with scp instead."
-                else -> {
-                    progress = "Reading it back…"
-                    val encoded = session.exec(Commands.BACKUP_READ, timeoutMs = 180_000)
-                    val bytes = decodeArchive(encoded.stdout)
-                    if (encoded.stdout.trim() == "none" || encoded.stdout.isBlank()) {
-                        "Failed: this router has no base64, hexdump or od, so the archive " +
-                            "cannot be encoded for transfer. Copy it off with scp instead."
-                    } else if (bytes == null || bytes.size.toLong() != size) {
-                        "Failed: the archive did not arrive intact — the router made " +
-                            "$size bytes and ${bytes?.size ?: 0} came back."
-                    } else {
-                        directory.mkdirs()
-                        val file = File(directory, backupName())
-                        file.writeBytes(bytes)
-                        backupFile = file
-                        backupWaived = false
-                        runCatching { session.exec(Commands.BACKUP_CLEANUP, timeoutMs = 15_000) }
-                        "Backed up ${bytes.size / 1024} kB to ${file.name}"
-                    }
+            when (val pulled = ConfigArchive.pull(session, directory) { progress = it }) {
+                is ConfigArchive.Pull.Done -> {
+                    backupFile = pulled.file
+                    backupWaived = false
+                    "Backed up ${pulled.file.length() / 1024} kB to ${pulled.file.name}"
                 }
+                is ConfigArchive.Pull.Failed -> "Failed: ${pulled.why}"
             }
-        } catch (e: SshException) {
-            "Failed: ${e.message}"
         } finally {
             busy = false
             progress = null
@@ -314,47 +289,12 @@ class FirmwareStore(private val session: RouterSession) {
         } else null
     }
 
-    private fun backupName(): String {
-        val host = session.target.host.replace(Regex("[^A-Za-z0-9.-]"), "_")
-        return "wrtpulse-$host-${System.currentTimeMillis() / 1000}.tar.gz"
-    }
-
-    /**
-     * The archive as [Commands.BACKUP_READ] sent it. Its first line names the encoding,
-     * because which one the router could offer is not knowable in advance.
-     */
-    private fun decodeArchive(text: String): ByteArray? {
-        val body = text.trim()
-        val marker = body.lineSequence().firstOrNull()?.trim()
-        val payload = body.substringAfter('\n', "")
-        return when (marker) {
-            // base64 arrives wrapped at 76 columns, so the MIME decoder — the strict one
-            // rejects the newlines outright.
-            "b64" -> runCatching { Base64.getMimeDecoder().decode(payload.trim()) }.getOrNull()
-            "hex" -> decodeHex(payload)
-            else -> null
-        }
-    }
-
     companion object {
 
-        /**
-         * `od -An -tx1` output, once the spaces and newlines are gone. Rejects anything that
-         * is not a whole number of hex bytes rather than returning a half-decoded archive —
-         * a corrupt backup that looks like a backup is worse than none.
-         */
-        fun decodeHex(text: String): ByteArray? {
-            val clean = text.filterNot { it.isWhitespace() }
-            if (clean.isEmpty() || clean.length % 2 != 0) return null
-            if (!clean.all { it.isDigit() || it in "abcdefABCDEF" }) return null
-            return ByteArray(clean.length / 2) { i ->
-                ((Character.digit(clean[i * 2], 16) shl 4) or
-                    Character.digit(clean[i * 2 + 1], 16)).toByte()
-            }
-        }
+        /** The transfer lives in [ConfigArchive]; these stay so the gate reads as one thing. */
+        fun decodeHex(text: String): ByteArray? = ConfigArchive.decodeHex(text)
 
-        /** The exec channel buffers the whole reply, so an unreasonable archive is refused. */
-        const val MAX_BACKUP_BYTES = 2L * 1024 * 1024
+        const val MAX_BACKUP_BYTES = ConfigArchive.MAX_BACKUP_BYTES
 
         const val FLASHING_MESSAGE =
             "Flashing. Do not power the router off — it will reboot on its own."

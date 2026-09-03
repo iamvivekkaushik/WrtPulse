@@ -560,6 +560,45 @@ object Commands {
     /** /tmp is RAM. The copy on the router goes as soon as the phone has it. */
     const val BACKUP_CLEANUP = "rm -f $BACKUP_FILE"
 
+    // ── Backup & restore ──────────────────────────────────────────────────────
+    // A backup is read-only on the router and ends up on the phone. A restore is the mirror:
+    // the archive is judged on the phone, sent up, judged AGAIN by the router's own tar, and
+    // only then unpacked over /. The unpack is the one write, and the reboot follows it.
+
+    /** What goes into a backup — sysupgrade's own list, one absolute path per line. */
+    const val BACKUP_LIST = "sysupgrade -l 2>/dev/null"
+
+    /** Everything the backup screen reads on entry, in one round trip. */
+    val BACKUP_INFO: String = listOf(
+        "echo $SECTION board",
+        BOARD,
+        "echo $SECTION files",
+        BACKUP_LIST,
+        // The archive being restored has to fit in RAM alongside everything else there.
+        "echo $SECTION tmp",
+        "df -k /tmp | tail -n1",
+    ).joinToString("; ")
+
+    /** Where an archive being restored lands. /tmp, so the reboot that follows removes it. */
+    const val RESTORE_FILE = "/tmp/wrtpulse-restore.tar.gz"
+
+    /** Receives the archive on stdin and answers with the byte count actually written. */
+    const val RESTORE_RECEIVE = "rm -f $RESTORE_FILE; cat > $RESTORE_FILE && wc -c < $RESTORE_FILE"
+
+    /** The router's hash of what arrived, compared with the phone's before anything else. */
+    val RESTORE_SHA256: String = imageSha256(RESTORE_FILE)
+
+    /** The router's own tar reading the archive. If this fails, so would the restore. */
+    const val RESTORE_LIST = "tar -tzf $RESTORE_FILE 2>&1"
+
+    /**
+     * The unpack. `sysupgrade -r` is `tar -C / -xzf` with sysupgrade's file checks in front
+     * of it; it does not reboot on its own, so the app sends [REBOOT] once it has returned 0.
+     */
+    const val RESTORE_APPLY = "sysupgrade -r $RESTORE_FILE 2>&1"
+
+    const val RESTORE_CLEANUP = "rm -f $RESTORE_FILE"
+
     /** Where a manually supplied image is put, so it lands under [safeImagePath] too. */
     const val MANUAL_IMAGE = "/tmp/wrtpulse-sysupgrade.bin"
 

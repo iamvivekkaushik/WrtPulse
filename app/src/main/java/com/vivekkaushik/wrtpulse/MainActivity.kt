@@ -33,6 +33,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import com.vivekkaushik.wrtpulse.data.BackupStore
 import com.vivekkaushik.wrtpulse.data.FirmwareStore
 import com.vivekkaushik.wrtpulse.data.Inventory
 import com.vivekkaushik.wrtpulse.data.LiveLogs
@@ -50,6 +51,7 @@ import com.vivekkaushik.wrtpulse.net.SshKeys
 import com.vivekkaushik.wrtpulse.net.WrtRuntime
 import com.vivekkaushik.wrtpulse.ui.MainTab
 import com.vivekkaushik.wrtpulse.ui.WrtBottomNav
+import com.vivekkaushik.wrtpulse.ui.screens.BackupScreen
 import com.vivekkaushik.wrtpulse.ui.screens.ClientsScreen
 import com.vivekkaushik.wrtpulse.ui.screens.CountryScreen
 import com.vivekkaushik.wrtpulse.ui.screens.DashboardScreen
@@ -75,6 +77,7 @@ import com.vivekkaushik.wrtpulse.ui.screens.initialTerminalLines
 import com.vivekkaushik.wrtpulse.ui.theme.Wrt
 import com.vivekkaushik.wrtpulse.ui.theme.WrtPulseTheme
 import kotlinx.coroutines.launch
+import java.io.File
 import android.graphics.Color as AndroidColor
 
 private enum class Dest { Boot, Onboarding1, Onboarding2, Onboarding3, RouterList, Main, HostKey }
@@ -141,6 +144,10 @@ private fun WrtPulseApp() {
     // until the Services screen is actually opened.
     val serviceStore = remember(session) { session?.let { ServiceStore(it) } }
     val firmwareStore = remember(session) { session?.let { FirmwareStore(it) } }
+    // Backups live in app-private storage. The store lists them on creation so the System
+    // row can say when the last one was taken without the screen being opened.
+    val backupStore = remember(session) { session?.let { BackupStore(it, File(context.filesDir, "backups")) } }
+    LaunchedEffect(backupStore) { backupStore?.refreshLocal() }
     // The app's own public key, so the keys screen can recognise the entry it is signed in
     // with and refuse to delete it. Derived from the sealed private key, keyed on the saved
     // row so a routine lastSeen touch does not re-open the Keystore.
@@ -187,6 +194,7 @@ private fun WrtPulseApp() {
     var firmwareOpen by remember { mutableStateOf(false) }
     var countryOpen by remember { mutableStateOf(false) }
     var sshKeysOpen by remember { mutableStateOf(false) }
+    var backupOpen by remember { mutableStateOf(false) }
     var pendingChanges by remember { mutableIntStateOf(3) }
     val termLines = remember { mutableStateListOf<TermLine>().apply { addAll(initialTerminalLines()) } }
     var termPending by remember { mutableStateOf("") }
@@ -371,6 +379,12 @@ private fun WrtPulseApp() {
                                     latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
                                     onBack = { sshKeysOpen = false },
                                 )
+                            } else if (backupOpen) {
+                                BackupScreen(
+                                    store = backupStore,
+                                    latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
+                                    onBack = { backupOpen = false },
+                                )
                             } else if (countryOpen) {
                                 CountryScreen(
                                     store = wifiStore,
@@ -421,6 +435,7 @@ private fun WrtPulseApp() {
                                     },
                                     packages = packageStore,
                                     services = serviceStore,
+                                    backups = backupStore,
                                     routerName = currentRouter,
                                     onRouterTap = { showSwitcher = true },
                                     onOpenLogs = { logsOpen = true },
@@ -429,6 +444,7 @@ private fun WrtPulseApp() {
                                     onOpenFirmware = { firmwareOpen = true },
                                     onOpenCountry = { countryOpen = true },
                                     onOpenSshKeys = { sshKeysOpen = true },
+                                    onOpenBackup = { backupOpen = true },
                                 )
                             }
                         }
@@ -438,7 +454,7 @@ private fun WrtPulseApp() {
                             if (picked != MainTab.System) {
                                 logsOpen = false; packagesOpen = false
                                 servicesOpen = false; firmwareOpen = false
-                                countryOpen = false; sshKeysOpen = false
+                                countryOpen = false; sshKeysOpen = false; backupOpen = false
                             }
                             tab = picked
                         }
@@ -517,6 +533,7 @@ private fun WrtPulseApp() {
             dest == Dest.Main && showSwitcher -> showSwitcher = false
             dest == Dest.Main && snippetsOpen -> snippetsOpen = false
             dest == Dest.Main && tab == MainTab.System && sshKeysOpen -> sshKeysOpen = false
+            dest == Dest.Main && tab == MainTab.System && backupOpen -> backupOpen = false
             dest == Dest.Main && tab == MainTab.System && countryOpen -> countryOpen = false
             dest == Dest.Main && tab == MainTab.System && firmwareOpen -> firmwareOpen = false
             dest == Dest.Main && tab == MainTab.System && servicesOpen -> servicesOpen = false

@@ -92,6 +92,17 @@ class RouterSession(
         }
     }
 
+    /** [exec] with bytes on the command's stdin — how a file gets onto the router. */
+    suspend fun execWithInput(command: String, input: ByteArray, timeoutMs: Long = 60_000): ExecResult {
+        val existing = connection?.takeIf { it.isConnected } ?: ensureConnected()
+        return try {
+            existing.execWithInput(command, input, timeoutMs)
+        } catch (e: SshException.Disconnected) {
+            connection = null
+            ensureConnected().execWithInput(command, input, timeoutMs)
+        }
+    }
+
     /** Interactive PTY on the shared connection — the terminal screen. */
     suspend fun openShell(cols: Int = 48, rows: Int = 30): SshShell =
         (connection?.takeIf { it.isConnected } ?: ensureConnected()).openShell(cols, rows)

@@ -1240,6 +1240,64 @@ object Parsers {
     /** The same, anywhere in the line — iwinfo prints the BSSID after a label. */
     private val MAC_ANY = Regex("([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
 
+    // ── Backup & restore ──────────────────────────────────────────────────────
+
+    /** `sysupgrade -l`: the absolute paths a backup would carry, one per line, sorted. */
+    fun backupFileList(text: String): List<String> = text.lineSequence()
+        .map { it.trim() }
+        .filter { it.startsWith("/") }
+        .distinct()
+        .sorted()
+        .toList()
+
+    /**
+     * `tar -tzf` as the router printed it. Member names come back in archive order; a line
+     * from tar or gzip itself ("tar: short read") is a complaint, not a member, and makes the
+     * whole listing a failure — an archive the router cannot list is not one it should unpack.
+     */
+    fun tarListing(text: String): Result<List<String>> {
+        val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val complaint = lines.firstOrNull { it.startsWith("tar:") || it.startsWith("gzip:") }
+        return if (complaint != null) Result.failure(IllegalStateException(complaint))
+        else Result.success(lines)
+    }
+
+    /**
+     * One option out of a uci config FILE — `config <type> ['name']` blocks holding
+     * `option <key> '<value>'` lines — as opposed to the `a.b.c='d'` form of `uci show` that
+     * [uciShow] reads. Files are what a backup archive contains.
+     */
+    fun uciFileOption(text: String, sectionType: String, sectionName: String?, option: String): String? {
+        var inSection = false
+        for (raw in text.lineSequence()) {
+            val words = shellWords(raw.trim())
+            when (words.firstOrNull()) {
+                "config" -> inSection = words.getOrNull(1) == sectionType &&
+                    (sectionName == null || words.getOrNull(2) == sectionName)
+                "option" -> if (inSection && words.getOrNull(1) == option) return words.getOrNull(2)
+            }
+        }
+        return null
+    }
+
+    /** Splits on whitespace, honouring single and double quotes and dropping them. */
+    fun shellWords(line: String): List<String> {
+        val out = ArrayList<String>()
+        val word = StringBuilder()
+        var quote: Char? = null
+        var inWord = false
+        for (c in line) {
+            when {
+                quote != null -> if (c == quote) quote = null else word.append(c)
+                c == '\'' || c == '"' -> { quote = c; inWord = true }
+                c.isWhitespace() -> if (inWord) { out += word.toString(); word.setLength(0); inWord = false }
+                else -> { word.append(c); inWord = true }
+            }
+        }
+        if (inWord) out += word.toString()
+        return out
+    }
+
     /**
      * `uci show wireless` → flat key/value map, quotes stripped.
      * e.g. wireless.@wifi-iface[0].ssid='Casa'

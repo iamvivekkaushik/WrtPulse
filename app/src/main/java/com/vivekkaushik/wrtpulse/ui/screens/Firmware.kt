@@ -1,6 +1,5 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
-import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -34,7 +33,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.content.FileProvider
 import com.vivekkaushik.wrtpulse.data.FirmwareStore
 import com.vivekkaushik.wrtpulse.ops.Commands
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
@@ -490,7 +488,7 @@ private fun FlashingPanel(store: FirmwareStore) {
 }
 
 @Composable
-private fun Card(border: Color = Wrt.BorderCard, content: @Composable () -> Unit) {
+internal fun Card(border: Color = Wrt.BorderCard, content: @Composable () -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -502,7 +500,7 @@ private fun Card(border: Color = Wrt.BorderCard, content: @Composable () -> Unit
 
 /** The app's standing promise: the command is visible before it runs. */
 @Composable
-private fun CodeLine(command: String) {
+internal fun CodeLine(command: String) {
     Box(
         Modifier
             .fillMaxWidth()
@@ -515,7 +513,7 @@ private fun CodeLine(command: String) {
 }
 
 @Composable
-private fun OutputBox(text: String, problem: Boolean) {
+internal fun OutputBox(text: String, problem: Boolean) {
     Box(
         Modifier
             .fillMaxWidth()
@@ -527,16 +525,4 @@ private fun OutputBox(text: String, problem: Boolean) {
     ) {
         Text(text, style = mono(9.5f, 500, if (problem) Wrt.DangerMono else Wrt.TextSecondary))
     }
-}
-
-/** Hands the archive to whatever the user wants to keep it in. */
-private fun shareBackup(context: android.content.Context, file: File?) {
-    if (file == null || !file.exists()) return
-    val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-    val send = Intent(Intent.ACTION_SEND).apply {
-        type = "application/gzip"
-        putExtra(Intent.EXTRA_STREAM, uri)
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    }
-    context.startActivity(Intent.createChooser(send, "Save the router backup"))
 }

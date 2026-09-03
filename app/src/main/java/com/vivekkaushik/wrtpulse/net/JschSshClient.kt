@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
@@ -188,13 +189,21 @@ private class JschConnection(
 
     override val isConnected: Boolean get() = session.isConnected
 
-    override suspend fun exec(command: String, timeoutMs: Long): ExecResult = withContext(io) {
+    override suspend fun exec(command: String, timeoutMs: Long): ExecResult = run(command, null, timeoutMs)
+
+    override suspend fun execWithInput(command: String, input: ByteArray, timeoutMs: Long): ExecResult =
+        run(command, input, timeoutMs)
+
+    private suspend fun run(command: String, input: ByteArray?, timeoutMs: Long): ExecResult = withContext(io) {
         if (!session.isConnected) throw SshException.Disconnected()
         val channel = session.openChannel("exec") as ChannelExec
         val stderr = ByteArrayOutputStream()
         try {
             channel.setCommand(command)
             channel.setErrStream(stderr)
+            // JSch pumps the stream to the remote stdin on its own thread and sends EOF when
+            // it runs dry — which is what lets a `cat > file` on the far end finish.
+            if (input != null) channel.setInputStream(ByteArrayInputStream(input))
             val stdout = channel.inputStream
             channel.connect(timeoutMs.toInt())
             val out = stdout.readBytes().toString(Charsets.UTF_8)

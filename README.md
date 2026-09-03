@@ -16,7 +16,7 @@ cannot, the app does not pretend otherwise.
 | **Clients** | Every device on the router, wireless and wired, with signal, lease, and per-client usage when `nlbwmon` is installed. Rename, block, wake-on-LAN, and DHCP reservations. |
 | **Network** | Radios and wireless interfaces. Add or edit APs and station (client) links, change channel, width, encryption and SSID. Every change is staged, shown as a diff, and applied in one `uci batch`. Neighbour scans suggest the least busy channel. |
 | **Terminal** | A real SSH shell with a VT screen model — cursor addressing, scrollback, selection and paste — and multiple tabs on one connection. |
-| **System** | Live logs (`logread -f`), packages, services, firmware, regulatory domain, and SSH keys. |
+| **System** | Live logs (`logread -f`), packages, services, firmware, backup & restore, regulatory domain, and SSH keys. |
 
 ### System, in more detail
 
@@ -30,6 +30,12 @@ cannot, the app does not pretend otherwise.
 - **Firmware** — attended sysupgrade through `owut`, gated: back up the config to the phone,
   ask the upgrade server, build and download the image, let `sysupgrade -T` check it, and only
   then offer the flash behind a three-second hold.
+- **Backup & restore** — `sysupgrade -b` pulled onto the phone, kept in app-private storage,
+  shared or saved from there. Restore goes the other way through three gates: the phone reads
+  the archive (a real tar reader — it refuses anything that is not an OpenWrt config or that
+  climbs out of `/`), the router hashes what arrived, and the router's own `tar -t` lists it.
+  Only then is `sysupgrade -r` offered, behind a three-second hold, with the reboot after it.
+  Archives from another router are flagged by hostname and LAN address before the hold.
 - **Country** — the Wi-Fi regulatory domain, set across every radio at once.
 - **SSH keys** — the router's `authorized_keys` with SHA256 fingerprints, marking the entry the
   app itself is signed in with.
@@ -108,8 +114,9 @@ SSH is JSch with BouncyCastle, which Android needs for ed25519.
 
 ## Not done yet
 
-Backup & restore and scheduled tasks are placeholders on the System screen. Factory reset is
-drawn but inert. The firmware flash itself has been built and gated but not yet run end to end
+Scheduled tasks is a placeholder on the System screen. Factory reset is drawn but inert. The
+restore has been built and gated but not yet run end to end on a live router — everything up
+to and including the router's `tar -tzf` listing has. The firmware flash itself has been built and gated but not yet run end to end
 on a live router — everything up to and including `sysupgrade -T` has.
 
 There is no license file yet, so default copyright applies.
