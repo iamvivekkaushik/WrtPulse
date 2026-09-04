@@ -728,6 +728,77 @@ object Commands {
             "else rm -f $f.tmp; echo \"grep failed: \$rc\"; exit 1; fi"
     }
 
+
+    // -----------------------------------------------------------------------
+    // LAN & local network — design screens 20-25
+    // -----------------------------------------------------------------------
+
+    /**
+     * One line per netdev: name, operstate, carrier, link speed, MAC, and whether real
+     * hardware sits behind it.
+     *
+     * Read out of sysfs rather than from `ubus call network.device status` because sysfs is
+     * on every target and needs no JSON: the switch-port row has to work on an ath79 box
+     * with three files in /bin as much as on filogic. `speed` is unreadable while a port is
+     * down, hence the fallbacks.
+     */
+    const val NETDEVS =
+        "for d in /sys/class/net/*; do n=\"\${d##*/}\"; " +
+        "echo \"\$n \$(cat \$d/operstate 2>/dev/null || echo unknown) " +
+        "\$(cat \$d/carrier 2>/dev/null || echo -) " +
+        "\$(cat \$d/speed 2>/dev/null || echo -) " +
+        "\$(cat \$d/address 2>/dev/null || echo -) " +
+        "\$([ -e \$d/device ] && echo phy || echo virt) " +
+        // Every wireless netdev has a phy80211 link. Naming is no test: OpenWrt 24.10 calls
+        // them phy0-ap0 and phy0-sta0, and older releases called them wlan0.
+        "\$([ -e \$d/phy80211 ] && echo wifi || echo wired)\"; done"
+
+    /**
+     * Everything the LAN screen reads, in one round trip: both config files, what netifd
+     * says is actually live, the lease file, and the ports.
+     */
+    fun lanState(section: String = "lan"): String = listOf(
+        "echo $SECTION net" to NETWORK_CONFIG,
+        "echo $SECTION dhcp" to "uci show dhcp 2>/dev/null",
+        "echo $SECTION live" to "ubus call network.interface.$section status 2>/dev/null || echo '{}'",
+        "echo $SECTION leases" to "cat /tmp/dhcp.leases 2>/dev/null",
+        "echo $SECTION neigh" to "ip neigh show",
+        "echo $SECTION links" to NETDEVS,
+        // Whether the DHCP server is actually serving, as opposed to configured to.
+        "echo $SECTION dnsmasq" to "pgrep dnsmasq >/dev/null 2>&1 && echo running || echo stopped",
+    ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    /**
+     * A uci list is replaced wholesale: `set` on a list option collapses it to one value, so
+     * the old list is deleted and the new one built back up with `add_list`. An empty list
+     * is the delete on its own.
+     */
+    fun listOps(path: String, values: List<String>): List<String> =
+        listOf("delete " + path) + values.map { "add_list " + path + "='" + escapeValue(it) + "'" }
+
+    /** uci values travel single-quoted inside the batch heredoc; a quote must not break out. */
+    fun escapeValue(value: String): String = value.replace("'", "'\\''")
+
+    /**
+     * Reload after LAN changes. dnsmasq only needs a restart; anything in `network` needs
+     * netifd, and moving the router's own address takes the session with it — which is why
+     * the reload is detached and the caller treats a dropped link as success.
+     */
+    fun lanReload(network: Boolean, dhcp: Boolean, movesAddress: Boolean): String = when {
+        movesAddress ->
+            // The reply cannot come back over a link this command is about to take down.
+            "(sleep 1; /etc/init.d/network reload" +
+                (if (dhcp) "; /etc/init.d/dnsmasq restart" else "") +
+                ") >/dev/null 2>&1 & echo scheduled"
+        network && dhcp -> "/etc/init.d/network reload >/dev/null 2>&1; /etc/init.d/dnsmasq restart >/dev/null 2>&1; echo done"
+        network -> "/etc/init.d/network reload >/dev/null 2>&1; echo done"
+        dhcp -> "/etc/init.d/dnsmasq restart >/dev/null 2>&1; echo done"
+        else -> "echo done"
+    }
+
+    /** The raw uci lines behind one LAN section — what "view command" reveals. */
+    fun showUci(path: String) = "uci show $path 2>/dev/null"
+
     /** dropbear's own view of whether a password will still get you in. */
     const val PASSWORD_AUTH_HELP =
         "uci set dropbear.@dropbear[0].PasswordAuth='off'; " +

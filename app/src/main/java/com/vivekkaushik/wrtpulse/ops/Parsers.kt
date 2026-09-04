@@ -76,6 +76,93 @@ data class Upstream(
 /** Cumulative byte counters for one interface. */
 data class NetCounters(val iface: String, val rxBytes: Long, val txBytes: Long)
 
+/** A netdev as sysfs reports it — one line of [Commands.NETDEVS]. */
+data class NetDev(
+    val name: String,
+    val operstate: String,
+    val carrier: Boolean,
+    /** Null while the link is down: the kernel refuses to answer for a dead port. */
+    val speedMbps: Int?,
+    val mac: String,
+    /** True when real hardware sits behind it — a switch port rather than a bridge or VLAN. */
+    val physical: Boolean,
+    /** A radio's netdev. Hardware, but not a socket anyone can plug a cable into. */
+    val wireless: Boolean = false,
+)
+
+/** The LAN interface as uci holds it. */
+data class LanNet(
+    val section: String,
+    val proto: String,
+    val device: String,
+    /** The address alone, with any `/prefix` the option carried taken off. */
+    val ipaddr: String,
+    val netmask: String,
+    /**
+     * The prefix that came from `ipaddr '192.168.1.1/24'`, which netifd accepts instead of a
+     * separate `netmask` — and which several stock configs use, so a config with no netmask
+     * option is not a config with no netmask.
+     */
+    val cidrPrefix: Int?,
+    val gateway: String,
+    val dns: List<String>,
+)
+
+/** What netifd says about that interface right now, which is not always what uci says. */
+data class LanLive(
+    val up: Boolean,
+    val device: String,
+    val address: String,
+    val prefix: Int,
+    val uptimeS: Long,
+)
+
+/** dnsmasq's address pool for one interface — uci `dhcp.<section>`. */
+data class DhcpPool(
+    val section: String,
+    val interfaceName: String,
+    /** `option ignore '1'` — configured, and deliberately serving nothing. */
+    val ignore: Boolean,
+    val start: Int,
+    val limit: Int,
+    val leasetime: String,
+    /** Raw `dhcp_option` entries, e.g. "6,9.9.9.9,1.1.1.1". */
+    val options: List<String>,
+)
+
+/** A static lease — uci `dhcp.@host[i]`, or a named host section. */
+data class Reservation(val section: String, val name: String, val mac: String, val ip: String)
+
+/**
+ * One port's membership in a DSA bridge VLAN. uci writes it as a single token: `lan1:u*` is
+ * untagged and the port's PVID, `lan2:t` is tagged, `lan3:u` is untagged without PVID.
+ */
+data class VlanPort(val name: String, val tagged: Boolean, val pvid: Boolean) {
+    fun token(): String = name + when {
+        tagged -> ":t"
+        pvid -> ":u*"
+        else -> ":u"
+    }
+}
+
+/** A DSA bridge VLAN — uci `network.@bridge-vlan[i]`. */
+data class BridgeVlan(
+    val section: String,
+    val device: String,
+    val vlan: Int,
+    val ports: List<VlanPort>,
+) {
+    /** The netdev this VLAN appears as, and what an interface would name as its device. */
+    val netdev: String get() = "$device.$vlan"
+}
+
+/**
+ * A swconfig VLAN — the pre-DSA switch model, where ports are numbers on a switch chip and
+ * the mapping lives in `config switch_vlan`. Read-only in the app: the port numbering is
+ * board-specific and getting it wrong takes the router off the network with no way back in.
+ */
+data class SwitchVlan(val section: String, val device: String, val vlan: Int, val ports: String)
+
 /** A DHCP lease from /tmp/dhcp.leases. */
 data class Lease(val expiry: Long, val mac: String, val ip: String, val hostname: String?)
 
@@ -705,9 +792,11 @@ object Parsers {
             if (value != "zone" || key.count { it == '.' } != 1) return@forEach
             val section = key.substringAfter('.')
             val name = uci["firewall.$section.name"].orEmpty()
-            // uci show renders a list as one space-separated value.
-            val networks = uci["firewall.$section.network"].orEmpty()
-                .split(' ', '\n').map { it.trim() }.filter { it.isNotEmpty() }
+            // `uci show` renders a list as `network='wan' 'wan6'`, so the quotes sit
+            // inside the value and splitting on spaces alone leaves them attached — which
+            // is why a zone holding two networks used to match neither.
+            val networks = uciList(uci["firewall.$section.network"].orEmpty())
+                .flatMap { it.split(' ', '\n') }.map { it.trim() }.filter { it.isNotEmpty() }
             zones += FirewallZone(section, name, networks)
         }
         return zones
@@ -1296,6 +1385,193 @@ object Parsers {
         }
         if (inWord) out += word.toString()
         return out
+    }
+
+    /**
+     * One uci option's value split into list items.
+     *
+     * `uci show` prints a list as `key='a' 'b'` and [uciShow] has already taken the outer
+     * pair of quotes off, so what arrives here is `a' 'b`. A value that is genuinely one
+     * string containing spaces — swconfig's `ports='0 1 2 5t'` — comes back whole, which is
+     * the difference between this and splitting on whitespace.
+     */
+    fun uciList(value: String): List<String> =
+        if (value.isEmpty()) emptyList()
+        else value.split("' '").map { it.trim().trim('\'') }.filter { it.isNotEmpty() }
+
+    // -----------------------------------------------------------------------
+    // LAN & local network
+    // -----------------------------------------------------------------------
+
+    /**
+     * [Commands.NETDEVS] → one [NetDev] per line: name, operstate, carrier, speed, MAC, and
+     * whether hardware sits behind it. Ports come back in whatever order the kernel lists
+     * them; [switchPorts] is what puts them in the order printed on the case.
+     */
+    fun netdevs(text: String): List<NetDev> = text.lineSequence().mapNotNull { line ->
+        val f = line.trim().split(' ').filter { it.isNotEmpty() }
+        if (f.size < 6) return@mapNotNull null
+        NetDev(
+            name = f[0],
+            operstate = f[1],
+            carrier = f[2] == "1",
+            // A down port answers "-", and some drivers answer -1 rather than failing.
+            speedMbps = f[3].toIntOrNull()?.takeIf { it > 0 },
+            mac = f[4].lowercase().takeIf { it.count { c -> c == ':' } == 5 }.orEmpty(),
+            physical = f[5] == "phy",
+            wireless = f.getOrNull(6) == "wifi",
+        )
+    }.toList()
+
+    /**
+     * The switch ports in the order the case labels them: the uplink first, then lan1..lanN,
+     * then anything else physical. Bridges, VLAN netdevs, wireless and tunnels are dropped —
+     * they are not sockets anyone can plug a cable into.
+     */
+    fun switchPorts(devs: List<NetDev>): List<NetDev> {
+        val physical = devs.filter {
+            it.physical && !it.wireless && !it.name.startsWith("wlan") && !it.name.contains('.')
+        }
+        // On a DSA board the sockets are named `wan` and `lan1`..`lanN`, and `eth0` beside
+        // them is the conduit to the switch — always up, never something you can plug into,
+        // and counting it would make "3 up · 2 down" wrong. On a board with no DSA names,
+        // `eth0` and `eth1` really are the ports.
+        val named = physical.filter { Regex("^(wan|lan)\\d*$").matches(it.name) }
+        return (if (named.isNotEmpty()) named else physical)
+        .sortedWith(
+            compareBy(
+                { if (it.name.startsWith("wan")) 0 else if (it.name.startsWith("lan")) 1 else 2 },
+                { it.name.filter { c -> c.isDigit() }.toIntOrNull() ?: 0 },
+                { it.name },
+            )
+        )
+    }
+
+    /** `uci show network` → one interface section, or null when the router has no such thing. */
+    fun lanNet(uci: Map<String, String>, section: String = "lan"): LanNet? {
+        if (uci["network.$section"] != "interface") return null
+        val address = uci["network.$section.ipaddr"].orEmpty()
+        return LanNet(
+            section = section,
+            proto = uci["network.$section.proto"].orEmpty(),
+            // `option device` is the modern spelling; `ifname` is what older configs carry.
+            device = (uci["network.$section.device"] ?: uci["network.$section.ifname"]).orEmpty(),
+            ipaddr = address.substringBefore('/'),
+            netmask = uci["network.$section.netmask"].orEmpty(),
+            cidrPrefix = address.substringAfter('/', "").toIntOrNull()?.takeIf { it in 1..32 },
+            gateway = uci["network.$section.gateway"].orEmpty(),
+            dns = uciList(uci["network.$section.dns"].orEmpty()).flatMap { it.split(' ') }
+                .filter { it.isNotBlank() },
+        )
+    }
+
+    /** `ubus call network.interface.lan status` → the address the interface actually holds. */
+    fun interfaceStatus(json: String): LanLive? {
+        val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
+        if (!o.has("up") && !o.has("device")) return null
+        val v4 = o.optJSONArray("ipv4-address")?.optJSONObject(0)
+        return LanLive(
+            up = o.optBoolean("up"),
+            device = o.optString("l3_device").ifBlank { o.optString("device") },
+            address = v4?.optString("address").orEmpty(),
+            prefix = v4?.optInt("mask", 0) ?: 0,
+            uptimeS = o.optLong("uptime", 0),
+        )
+    }
+
+    /** `uci show dhcp` → every pool, in section order. */
+    fun dhcpPools(uci: Map<String, String>): List<DhcpPool> = uci.entries
+        .filter { it.value == "dhcp" && it.key.count { c -> c == '.' } == 1 }
+        .map { (key, _) ->
+            val section = key.substringAfter('.')
+            DhcpPool(
+                section = section,
+                interfaceName = uci["dhcp.$section.interface"].orEmpty().ifBlank { section },
+                ignore = uci["dhcp.$section.ignore"] == "1",
+                start = uci["dhcp.$section.start"]?.toIntOrNull() ?: 100,
+                limit = uci["dhcp.$section.limit"]?.toIntOrNull() ?: 150,
+                leasetime = uci["dhcp.$section.leasetime"].orEmpty().ifBlank { "12h" },
+                options = uciList(uci["dhcp.$section.dhcp_option"].orEmpty()),
+            )
+        }
+
+    /**
+     * `uci show dhcp` → the static leases. A host section can carry several MACs for one
+     * address; the first is the one the row shows, and the rest are left alone rather than
+     * silently rewritten.
+     */
+    fun reservations(uci: Map<String, String>): List<Reservation> = uci.entries
+        .filter { it.value == "host" && it.key.count { c -> c == '.' } == 1 }
+        .map { (key, _) ->
+            val section = key.substringAfter('.')
+            Reservation(
+                section = section,
+                name = uci["dhcp.$section.name"].orEmpty(),
+                mac = uciList(uci["dhcp.$section.mac"].orEmpty())
+                    .flatMap { it.split(' ') }.firstOrNull()?.lowercase().orEmpty(),
+                ip = uci["dhcp.$section.ip"].orEmpty(),
+            )
+        }
+        .filter { it.mac.isNotEmpty() || it.ip.isNotEmpty() }
+
+    /** `lan1:u*` → the port, whether it is tagged, and whether it carries the port's PVID. */
+    fun vlanPort(token: String): VlanPort {
+        val name = token.substringBefore(':')
+        val flags = token.substringAfter(':', "")
+        return VlanPort(
+            name = name,
+            tagged = flags.startsWith("t"),
+            pvid = flags.contains('*'),
+        )
+    }
+
+    /** `uci show network` → the DSA bridge VLANs, lowest id first. */
+    fun bridgeVlans(uci: Map<String, String>): List<BridgeVlan> = uci.entries
+        .filter { it.value == "bridge-vlan" && it.key.count { c -> c == '.' } == 1 }
+        .map { (key, _) ->
+            val section = key.substringAfter('.')
+            BridgeVlan(
+                section = section,
+                device = uci["network.$section.device"].orEmpty(),
+                vlan = uci["network.$section.vlan"]?.toIntOrNull() ?: 0,
+                ports = uciList(uci["network.$section.ports"].orEmpty()).map { vlanPort(it) },
+            )
+        }
+        .sortedBy { it.vlan }
+
+    /** `uci show network` → swconfig VLANs, which the app reads and never writes. */
+    fun switchVlans(uci: Map<String, String>): List<SwitchVlan> = uci.entries
+        .filter { it.value == "switch_vlan" && it.key.count { c -> c == '.' } == 1 }
+        .map { (key, _) ->
+            val section = key.substringAfter('.')
+            SwitchVlan(
+                section = section,
+                device = uci["network.$section.device"].orEmpty(),
+                vlan = (uci["network.$section.vlan"] ?: uci["network.$section.vid"])
+                    ?.toIntOrNull() ?: 0,
+                ports = uci["network.$section.ports"].orEmpty(),
+            )
+        }
+        .sortedBy { it.vlan }
+
+    /**
+     * `12h` / `1d` / `infinite` → seconds, for the lease-time chips. Null when dnsmasq would
+     * read it as something the app does not model.
+     */
+    fun leaseSeconds(value: String): Long? {
+        val text = value.trim().lowercase()
+        if (text == "infinite") return Long.MAX_VALUE
+        val unit = text.lastOrNull() ?: return null
+        val number = text.dropLast(if (unit.isDigit()) 0 else 1).toLongOrNull() ?: return null
+        return when {
+            unit.isDigit() -> number
+            unit == 's' -> number
+            unit == 'm' -> number * 60
+            unit == 'h' -> number * 3600
+            unit == 'd' -> number * 86400
+            unit == 'w' -> number * 604800
+            else -> null
+        }
     }
 
     /**

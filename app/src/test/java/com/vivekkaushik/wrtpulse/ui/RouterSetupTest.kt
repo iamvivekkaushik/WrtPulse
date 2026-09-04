@@ -3,6 +3,9 @@ package com.vivekkaushik.wrtpulse.ui
 import com.vivekkaushik.wrtpulse.db.RouterEntity
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingFlow
 import com.vivekkaushik.wrtpulse.ui.screens.forgetRouterNotes
+import com.vivekkaushik.wrtpulse.ui.screens.routerAddress
+import com.vivekkaushik.wrtpulse.ui.screens.routerAddressNotes
+import com.vivekkaushik.wrtpulse.ui.screens.routerEditBlock
 import com.vivekkaushik.wrtpulse.ui.screens.routerName
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -166,5 +169,109 @@ class RouterEntityEqualityTest {
     @Test
     fun `a list carrying a rename compares unequal`() {
         assertNotEquals(listOf(entity(name = "Deco")), listOf(entity(name = "DecoHall")))
+    }
+}
+
+/**
+ * Editing a saved entry's address — the router list's own version of "change the router's
+ * IP", which moves where the app knocks and never touches the router.
+ */
+class RouterAddressTest {
+
+    private fun entity(
+        id: Long = 1,
+        name: String = "home.gw",
+        host: String = "192.168.1.1",
+        port: Int = 22,
+        username: String = "root",
+    ) = RouterEntity(
+        id = id, name = name, host = host, port = port, username = username,
+        model = "", summary = "", credential = null, lastSeenEpoch = 0,
+    )
+
+    @Test
+    fun `a bare address is taken as it is`() {
+        assertEquals("192.168.1.1" to null, routerAddress("192.168.1.1"))
+        assertEquals("router.lan" to null, routerAddress("  router.lan  "))
+    }
+
+    /** People paste what is in the browser bar, scheme and trailing slash included. */
+    @Test
+    fun `a pasted url is reduced to its host`() {
+        assertEquals("192.168.1.1" to null, routerAddress("http://192.168.1.1/"))
+        assertEquals("192.168.1.1" to null, routerAddress("ssh://192.168.1.1"))
+    }
+
+    @Test
+    fun `host colon port is split`() {
+        assertEquals("192.168.1.1" to 2222, routerAddress("192.168.1.1:2222"))
+        assertEquals("router.lan" to 22, routerAddress("router.lan:22"))
+    }
+
+    /** A port outside the range is a typo, not a port. */
+    @Test
+    fun `an impossible port is refused outright`() {
+        assertNull(routerAddress("192.168.1.1:70000"))
+        assertNull(routerAddress("192.168.1.1:0"))
+    }
+
+    /** An IPv6 address is full of colons, and none of them is a port separator. */
+    @Test
+    fun `ipv6 keeps its colons`() {
+        assertEquals("fd8e:1f4f:3c9d::1" to null, routerAddress("fd8e:1f4f:3c9d::1"))
+    }
+
+    @Test
+    fun `nothing usable is null`() {
+        assertNull(routerAddress(""))
+        assertNull(routerAddress("   "))
+        assertNull(routerAddress("192.168.1.1 backup"))
+    }
+
+    @Test
+    fun `a name and an address are both required`() {
+        val e = entity()
+        assertNotNull(routerEditBlock("", "192.168.1.1", e, listOf(e)))
+        assertNotNull(routerEditBlock("home.gw", "", e, listOf(e)))
+        assertNull(routerEditBlock("home.gw", "192.168.2.1", e, listOf(e)))
+    }
+
+    /**
+     * Two rows on the same address, port and user are the same router twice, and which
+     * credential gets used then depends on list order.
+     */
+    @Test
+    fun `an address another entry already holds is refused`() {
+        val a = entity(id = 1, name = "home.gw", host = "192.168.1.1")
+        val b = entity(id = 2, name = "lab", host = "192.168.2.1")
+        val block = routerEditBlock("lab", "192.168.1.1", b, listOf(a, b))
+        assertNotNull(block)
+        assertTrue(block!!.contains("home.gw"))
+        // The same address on a different port is a different endpoint.
+        assertNull(routerEditBlock("lab", "192.168.1.1:2222", b, listOf(a, b)))
+        // And an entry never clashes with itself.
+        assertNull(routerEditBlock("home.gw", "192.168.1.1", a, listOf(a, b)))
+    }
+
+    /** The confusion worth heading off: this is not the screen that moves the router. */
+    @Test
+    fun `changing the address says what it does not do`() {
+        val e = entity()
+        val notes = routerAddressNotes(e, "192.168.2.1", connectedHost = null)
+        assertTrue(notes.any { it.contains("not the router's own address") })
+        assertTrue(notes.any { it.contains("first contact") })
+    }
+
+    @Test
+    fun `an unchanged address needs no warning`() {
+        val e = entity()
+        assertEquals(emptyList<String>(), routerAddressNotes(e, "192.168.1.1", connectedHost = null))
+    }
+
+    @Test
+    fun `a live session is called out as staying where it is`() {
+        val e = entity()
+        val notes = routerAddressNotes(e, "192.168.2.1", connectedHost = "192.168.1.1")
+        assertTrue(notes.any { it.contains("stays on 192.168.1.1") })
     }
 }

@@ -37,6 +37,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.vivekkaushik.wrtpulse.data.BackupStore
 import com.vivekkaushik.wrtpulse.data.FirmwareStore
 import com.vivekkaushik.wrtpulse.data.Inventory
+import com.vivekkaushik.wrtpulse.data.LanStore
 import com.vivekkaushik.wrtpulse.data.LiveLogs
 import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.PackageStore
@@ -143,6 +144,7 @@ private fun WrtPulseApp() {
     val telemetry = remember(session) { session?.let { Telemetry(it) } }
     val inventory = remember(session) { session?.let { Inventory(it) } }
     val wifiStore = remember(session) { session?.let { WifiStore(it) } }
+    val lanStore = remember(session) { session?.let { LanStore(it) } }
     val termSessions = remember(session) { session?.let { TerminalSessions(it, scope) } }
     val routerOps = remember(session) { session?.let { RouterOps(it) } }
     val liveLogs = remember(session) { session?.let { LiveLogs(it) } }
@@ -312,8 +314,17 @@ private fun WrtPulseApp() {
                         }
                     },
                     onAdd = { flow.keyPem = null; flow.password = ""; dest = Dest.Onboarding1 },
-                    onRename = { e, name ->
-                        scope.launch { runCatching { WrtRuntime.db.routers().rename(e.id, name) } }
+                    onEdit = { e, name, host, port ->
+                        scope.launch {
+                            runCatching {
+                                val dao = WrtRuntime.db.routers()
+                                if (name != e.name) dao.rename(e.id, name)
+                                // Local only: this moves where the app knocks. The router's
+                                // own address is changed from Network · LAN, which is a
+                                // different thing and says so in the dialog.
+                                if (host != e.host || port != e.port) dao.rehost(e.id, host, port)
+                            }
+                        }
                         // The top bar shows the name of the router in hand, and it is not
                         // rebuilt from the saved row, so it has to be told.
                         if (currentRouter == e.name) currentRouter = name
@@ -367,12 +378,34 @@ private fun WrtPulseApp() {
                                 MainTab.Network -> WifiSection(
                                     ticker = ticker,
                                     store = wifiStore,
+                                    lan = lanStore,
                                     liveLatencyMs = telemetry?.latencyMs,
                                     routerName = currentRouter,
                                     pendingCount = wifiStore?.pendingCount ?: pendingChanges,
                                     onRouterTap = { showSwitcher = true },
                                     onReviewApply = { showDiff = true },
                                     onRevert = { wifiStore?.revert() ?: run { pendingChanges = 0 } },
+                                    // A subnet change took the session with it. The saved
+                                    // entry follows the router to its new address, and the
+                                    // user goes back to the list to reconnect there — the
+                                    // app cannot reach the old address any more, and the new
+                                    // one is a first contact for host keys.
+                                    onLanMoved = { host ->
+                                        val entity = savedRouters?.firstOrNull {
+                                            it.host == WrtRuntime.session?.target?.host
+                                        }
+                                        scope.launch {
+                                            entity?.let {
+                                                runCatching { WrtRuntime.db.routers().rehost(it.id, host, it.port) }
+                                            }
+                                            runCatching { WrtRuntime.session?.disconnect() }
+                                            WrtRuntime.session = null
+                                            networkFullScreen = false
+                                            returnToMain = false
+                                            tab = MainTab.Dashboard
+                                            dest = Dest.RouterList
+                                        }
+                                    },
                                     onFullScreen = { networkFullScreen = it },
                                 )
                                 MainTab.Clients -> ClientsScreen(

@@ -14,9 +14,31 @@ cannot, the app does not pretend otherwise.
 |---|---|
 | **Dashboard** | CPU, RAM, flash, load, uptime and live throughput, one batched command per second. The upstream card follows whichever interface actually holds the default route, so it is right whether the WAN is a cable or a Wi-Fi client. Reboot and a speed test live here. |
 | **Clients** | Every device on the router, wireless and wired, with signal, lease, and per-client usage when `nlbwmon` is installed. Rename, block, wake-on-LAN, and DHCP reservations. |
-| **Network** | Radios and wireless interfaces. Add or edit APs and station (client) links, change channel, width, encryption and SSID. Every change is staged, shown as a diff, and applied in one `uci batch`. Neighbour scans suggest the least busy channel. |
+| **Network** | **LAN & local network** — the subnet, the DHCP server on it, static leases, and the switch VLANs behind it. Radios and wireless interfaces. Add or edit APs and station (client) links, change channel, width, encryption and SSID. Every change is staged, shown as a diff, and applied in one `uci batch`. Neighbour scans suggest the least busy channel. |
 | **Terminal** | A real SSH shell with a VT screen model — cursor addressing, scrollback, selection and paste — and multiple tabs on one connection. |
 | **System** | Live logs (`logread -f`), packages, services, firmware, backup & restore, regulatory domain, and SSH keys. |
+
+### LAN & local network, in more detail
+
+- **Subnet** — the router's own address and netmask, with the live address, broadcast and
+  bridge MAC beside them. Configs that spell the address as `ipaddr '192.168.1.1/24'` are read
+  and written back the same way, because those carry no `netmask` option to write to.
+- **DHCP server** — on or off, the pool drawn across the subnet as a band, start offset, max
+  leases, lease time, and the raw `dhcp_option` list.
+- **Leases** — every device the router can see, whether it took a lease or only turned up in
+  the neighbour table, and the static leases as their own list. Reserve the address a device
+  already holds from its row, or add one by hand; edit and delete by swipe.
+- **VLANs** — the switch ports with their link state, and the DSA `bridge-vlan` port matrix,
+  where tapping a port cycles it untagged → tagged → off. On a swconfig board the VLANs are
+  shown and never written: the port numbering is board-specific and a wrong map takes the
+  router off the network with nothing left to fix it from.
+
+Everything is staged and applied in one pass across both `network` and `dhcp`, because a
+subnet that moves without its DHCP pool leaves every client asking the wrong router for an
+address. The one change that ends the session issuing it — moving the router's own address —
+is allowed, and says so before the fact: the connection dies with the reload, the phone keeps
+a lease on the old subnet until it renews, the saved router entry follows the router to its
+new address, and that address is a first contact for host keys.
 
 ### System, in more detail
 
@@ -105,7 +127,7 @@ Run the unit tests:
 ./gradlew testDebugUnitTest
 ```
 
-324 JVM tests, mostly over `ops/` — real command output captured from a router, parsed and
+549 JVM tests, mostly over `ops/` — real command output captured from a router, parsed and
 pinned. Where an outside authority exists it is used: key fingerprints are checked against
 `ssh-keygen -lf` rather than against the app's own maths.
 
@@ -114,7 +136,10 @@ SSH is JSch with BouncyCastle, which Android needs for ed25519.
 
 ## Not done yet
 
-Scheduled tasks is a placeholder on the System screen. Factory reset is drawn but inert. The
+Scheduled tasks is a placeholder on the System screen. Factory reset is drawn but inert. On
+the LAN screen every read is verified against real routers and every write is staged, shown as
+a diff and reverted — the apply itself has not been run on live hardware, so the subnet move
+and the VLAN port matrix are built and gated but unproven end to end. The
 restore has been built and gated but not yet run end to end on a live router — everything up
 to and including the router's `tar -tzf` listing has. The firmware flash itself has been built and gated but not yet run end to end
 on a live router — everything up to and including `sysupgrade -T` has.

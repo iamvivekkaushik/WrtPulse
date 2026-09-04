@@ -1418,11 +1418,16 @@ private fun String.masked(): String {
 fun NetworkHomeScreen(
     ticker: com.vivekkaushik.wrtpulse.data.LiveTicker,
     store: WifiStore?,
+    lan: com.vivekkaushik.wrtpulse.data.LanStore?,
     liveLatencyMs: Int?,
     routerName: String,
     onRouterTap: () -> Unit,
+    onOpenLan: () -> Unit,
     onOpenWireless: () -> Unit,
 ) {
+    // The LAN card's chips are read state, so the tab's landing page is what pays for the
+    // round trip — by the time the LAN screen opens, its data is already there.
+    androidx.compose.runtime.LaunchedEffect(lan) { if (lan != null && !lan.loaded) lan.load() }
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         com.vivekkaushik.wrtpulse.ui.ConnectionTopBar(
             routerName = routerName,
@@ -1433,6 +1438,71 @@ fun NetworkHomeScreen(
             Modifier.weight(1f).padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, Wrt.Accent.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
+                    .background(Wrt.BgCard, RoundedCornerShape(14.dp))
+                    .clickable(onClick = onOpenLan)
+                    .padding(14.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Box(
+                        Modifier
+                            .size(38.dp)
+                            .border(1.dp, Wrt.BorderIcon, RoundedCornerShape(10.dp))
+                            .background(Wrt.BgDeep, RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(WrtIcons.Lan, null, Modifier.size(20.dp), tint = Wrt.Accent)
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text("LAN & local network", style = sans(14.5f, 650))
+                        Text(
+                            "Subnet · DHCP · leases · VLANs",
+                            style = sans(11f, 400, Wrt.TextDim),
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
+                    if (lan != null && lan.pendingCount > 0) StatusDot(Wrt.Accent, 6.dp)
+                    Icon(WrtIcons.ChevronRight, null, Modifier.size(14.dp), tint = Wrt.TextDim)
+                }
+                Row(
+                    Modifier.padding(top = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    val subnet = lan?.let { store ->
+                        store.net?.ipaddr?.takeIf { it.isNotEmpty() }?.let { "$it/${store.prefix}" }
+                    }
+                    MonoTag(subnet ?: "reading…", size = 10f)
+                    if (lan != null && lan.loaded) {
+                        Row(
+                            Modifier
+                                .border(
+                                    1.dp,
+                                    if (lan.dhcpOn && lan.dnsmasqRunning) Wrt.Green.copy(alpha = 0.4f)
+                                    else Wrt.Amber.copy(alpha = 0.4f),
+                                    RoundedCornerShape(5.dp),
+                                )
+                                .padding(horizontal = 7.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            StatusDot(if (lan.dhcpOn && lan.dnsmasqRunning) Wrt.Green else Wrt.Amber, 5.dp)
+                            Text(
+                                if (!lan.dhcpOn) "DHCP off"
+                                else if (!lan.dnsmasqRunning) "dnsmasq stopped"
+                                else "DHCP active",
+                                style = mono(10f, 500, if (lan.dhcpOn && lan.dnsmasqRunning) Wrt.Green else Wrt.Amber),
+                            )
+                        }
+                        MonoTag("${lan.leases.size} leases", size = 10f)
+                    }
+                }
+            }
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -1520,6 +1590,7 @@ private fun RadioRow(store: WifiStore, radio: WifiRadio, onClick: () -> Unit) {
 private sealed interface WifiRoute {
     /** The Network tab itself — a list of what the tab covers, nothing wireless inline. */
     data object Home : WifiRoute
+    data object Lan : WifiRoute
     data object Interfaces : WifiRoute
     data class Radio(val section: String) : WifiRoute
     data class ClientScan(val radio: String) : WifiRoute
@@ -1531,12 +1602,15 @@ private sealed interface WifiRoute {
 fun WifiSection(
     ticker: com.vivekkaushik.wrtpulse.data.LiveTicker,
     store: WifiStore?,
+    lan: com.vivekkaushik.wrtpulse.data.LanStore?,
     liveLatencyMs: Int?,
     routerName: String,
     pendingCount: Int,
     onRouterTap: () -> Unit,
     onReviewApply: () -> Unit,
     onRevert: () -> Unit,
+    /** The router changed its own address — the saved entry has to follow it. */
+    onLanMoved: (String) -> Unit,
     /** Full-screen steps hide the tab bar, the way the design draws them. */
     onFullScreen: (Boolean) -> Unit,
 ) {
@@ -1553,8 +1627,10 @@ fun WifiSection(
 
     fun radioOf(section: String) = radios.firstOrNull { it.section == section } ?: radios.first()
 
-    // The Wireless page is still a tab-level screen; only the steps past it take over.
-    val fullScreen = route !is WifiRoute.Home && route !is WifiRoute.Interfaces
+    // The Wireless and LAN pages are still tab-level screens; only the steps past them
+    // take over the whole display.
+    val fullScreen = route !is WifiRoute.Home && route !is WifiRoute.Interfaces &&
+        route !is WifiRoute.Lan
     androidx.compose.runtime.LaunchedEffect(fullScreen) { onFullScreen(fullScreen) }
 
     // A router swap resets the flow — the sections it referred to are gone.
@@ -1595,10 +1671,18 @@ fun WifiSection(
         is WifiRoute.Home -> NetworkHomeScreen(
             ticker = ticker,
             store = store,
+            lan = lan,
             liveLatencyMs = liveLatencyMs,
             routerName = routerName,
             onRouterTap = onRouterTap,
+            onOpenLan = { push(WifiRoute.Lan) },
             onOpenWireless = { push(WifiRoute.Interfaces) },
+        )
+        is WifiRoute.Lan -> LanScreen(
+            store = lan,
+            latencyMs = liveLatencyMs ?: ticker.latencyMs,
+            onBack = { pop() },
+            onMoved = onLanMoved,
         )
         is WifiRoute.Radio -> if (store != null) {
             val radio = store.radios.firstOrNull { it.section == r.section }

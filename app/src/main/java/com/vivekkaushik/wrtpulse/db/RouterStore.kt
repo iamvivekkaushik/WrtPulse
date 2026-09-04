@@ -109,6 +109,13 @@ interface RouterDao {
     @Query("UPDATE routers SET name = :name WHERE id = :id")
     suspend fun rename(id: Long, name: String)
 
+    /**
+     * The router answers somewhere else now — after a LAN subnet change, the saved entry has
+     * to follow it or the list points at an address nothing is on.
+     */
+    @Query("UPDATE routers SET host = :host, port = :port WHERE id = :id")
+    suspend fun rehost(id: Long, host: String, port: Int)
+
     @Query("DELETE FROM routers WHERE id = :id")
     suspend fun delete(id: Long)
 }

@@ -37,7 +37,10 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.vivekkaushik.wrtpulse.data.Demo
 import com.vivekkaushik.wrtpulse.data.Router
 import com.vivekkaushik.wrtpulse.data.RouterStatus
@@ -56,6 +59,7 @@ import com.vivekkaushik.wrtpulse.ui.SwipeToReveal
 import com.vivekkaushik.wrtpulse.ui.PrimaryButton
 import com.vivekkaushik.wrtpulse.ui.GhostButton
 import com.vivekkaushik.wrtpulse.ui.RevealAction
+import com.vivekkaushik.wrtpulse.ui.SectionLabel
 
 /** "just now", "4 min ago", "3 h ago", "2 d ago" */
 fun agoLabel(epoch: Long, nowEpoch: Long = System.currentTimeMillis() / 1000): String {
@@ -118,7 +122,8 @@ fun RouterListScreen(
     onOpenSaved: (RouterEntity) -> Unit,
     onAdd: () -> Unit,
     onDelete: (RouterEntity) -> Unit = {},
-    onRename: (RouterEntity, String) -> Unit = { _, _ -> },
+    /** Name and address together: both live on the same card and both are local-only edits. */
+    onEdit: (RouterEntity, String, String, Int) -> Unit = { _, _, _, _ -> },
 ) {
     var confirmDelete by remember { mutableStateOf<RouterEntity?>(null) }
     var renaming by remember { mutableStateOf<RouterEntity?>(null) }
@@ -196,7 +201,7 @@ fun RouterListScreen(
                     shownSaved.forEach { e ->
                         SwipeToReveal(
                             actions = listOf(
-                                RevealAction("Rename", WrtIcons.Pencil, Wrt.Accent) { renaming = e },
+                                RevealAction("Edit", WrtIcons.Pencil, Wrt.Accent) { renaming = e },
                                 RevealAction("Delete", WrtIcons.Trash, Wrt.Red) { confirmDelete = e },
                             ),
                             resetKey = e.id,
@@ -236,16 +241,14 @@ fun RouterListScreen(
             }
         }
         renaming?.let { entity ->
-            WrtInputDialog(
-                title = "Rename router",
-                label = "NAME",
-                initial = entity.name,
-                confirmLabel = "Save name",
+            EditRouterDialog(
+                entity = entity,
+                others = saved.orEmpty(),
+                connectedHost = connectedHost,
                 onDismiss = { renaming = null },
-                onConfirm = { value ->
+                onConfirm = { name, host, port ->
                     renaming = null
-                    // A blank name would leave a card with nothing to identify it by.
-                    routerName(value)?.let { onRename(entity, it) }
+                    onEdit(entity, name, host, port)
                 },
             )
         }
@@ -314,6 +317,85 @@ private fun SearchBar(query: String, onQuery: (String) -> Unit, onClose: () -> U
  */
 internal fun routerName(input: String): String? =
     input.trim().take(48).ifBlank { null }
+
+/**
+ * A typed address, normalised, or null when there is nothing usable in it.
+ *
+ * Accepts what people actually paste: a bare address, one with a scheme or trailing slash
+ * from a browser bar, or `host:port`. IPv6 keeps its colons — only a single trailing
+ * `:digits` is read as a port, which is the one case that is unambiguous.
+ */
+internal fun routerAddress(input: String): Pair<String, Int?>? {
+    val text = input.trim()
+        .removePrefix("ssh://")
+        .removePrefix("http://")
+        .removePrefix("https://")
+        .trimEnd('/')
+        .trim()
+    if (text.isEmpty() || text.any { it.isWhitespace() }) return null
+    val colons = text.count { it == ':' }
+    if (colons == 1) {
+        val host = text.substringBefore(':')
+        val port = text.substringAfter(':').toIntOrNull()
+        if (host.isNotEmpty() && port != null) {
+            return if (port in 1..65535) host to port else null
+        }
+    }
+    return text.take(255) to null
+}
+
+/**
+ * Why an edited entry cannot be saved, or null when it can.
+ *
+ * The duplicate check is the one that matters: two rows pointing at the same address, port
+ * and user are the same router twice, and the second one's credential is the one that gets
+ * used or not depending on list order.
+ */
+internal fun routerEditBlock(
+    name: String,
+    address: String,
+    entity: RouterEntity,
+    others: List<RouterEntity>,
+): String? {
+    if (routerName(name) == null) return "A router needs a name to show on its card."
+    val parsed = routerAddress(address) ?: return "Enter an address — an IP or a hostname."
+    val (host, port) = parsed
+    val clash = others.firstOrNull {
+        it.id != entity.id && it.host == host &&
+            it.port == (port ?: entity.port) && it.username == entity.username
+    }
+    if (clash != null) {
+        return "\u201c${clash.name}\u201d already points at $host as ${entity.username}."
+    }
+    return null
+}
+
+/**
+ * What changing a saved entry's address does and does not do.
+ *
+ * The first line is the one worth having: this moves where the app looks, not where the
+ * router answers. Someone reading "change router IP" can reasonably expect the opposite,
+ * and the screen that does the opposite is one tab away.
+ */
+internal fun routerAddressNotes(
+    entity: RouterEntity,
+    address: String,
+    connectedHost: String?,
+): List<String> = buildList {
+    val host = routerAddress(address)?.first ?: return@buildList
+    if (host == entity.host) return@buildList
+    add(
+        "This changes where the app looks for the router, not the router's own address. " +
+            "To move the router itself, use Network · LAN & local network while connected to it."
+    )
+    add(
+        "Host keys are pinned per address, so $host counts as a first contact: its " +
+            "fingerprint is shown for you to accept the next time you connect."
+    )
+    if (connectedHost != null && connectedHost == entity.host) {
+        add("The session open on ${entity.host} right now stays on ${entity.host} until you reconnect.")
+    }
+}
 
 /**
  * What forgetting a saved router costs, beyond the row itself.
@@ -396,6 +478,132 @@ private fun RouterCard(r: Router, onClick: () -> Unit, modifier: Modifier = Modi
 private data class Quad(val c: Color, val s: String, val p: Boolean, val ms: Int)
 
 /** Forgetting a router is local and reversible only by adding it again, so it is confirmed. */
+/**
+ * Name and address for a saved router — design screen 04's swipe action, widened.
+ *
+ * Both are local: the name is what the card says, and the address is where the app knocks.
+ * Neither reaches the router, which the dialog says outright, because "change the router's
+ * IP" is a sentence that can mean either this or the LAN screen's version of it.
+ */
+@Composable
+private fun EditRouterDialog(
+    entity: RouterEntity,
+    others: List<RouterEntity>,
+    connectedHost: String?,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String, Int) -> Unit,
+) {
+    var name by remember(entity.id) { mutableStateOf(entity.name) }
+    var address by remember(entity.id) {
+        mutableStateOf(if (entity.port == 22) entity.host else "${entity.host}:${entity.port}")
+    }
+    val block = routerEditBlock(name, address, entity, others)
+    val notes = routerAddressNotes(entity, address, connectedHost)
+    val parsed = routerAddress(address)
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .border(1.dp, Wrt.BorderCard, RoundedCornerShape(16.dp))
+                .background(Wrt.BgBar, RoundedCornerShape(16.dp))
+                .padding(18.dp)
+        ) {
+            Text("Edit router", style = sans(15f, 650))
+            Text(
+                entity.model.ifBlank { entity.summary }.ifBlank { "saved router" },
+                style = mono(10.5f, 500, Wrt.TextDim),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+            Spacer(Modifier.height(14.dp))
+            SectionLabel("NAME")
+            DialogField(name) { name = it }
+            Spacer(Modifier.height(12.dp))
+            SectionLabel("ADDRESS")
+            DialogField(address) { address = it }
+            Text(
+                parsed?.let { (host, port) ->
+                    "ssh ${entity.username}@$host" + (port ?: entity.port).let { p ->
+                        if (p == 22) "" else " -p $p"
+                    }
+                } ?: "An IP or hostname, optionally host:port.",
+                style = mono(10f, 500, if (parsed == null) Wrt.Red else Wrt.TextDim),
+                modifier = Modifier.padding(top = 6.dp),
+            )
+            notes.forEach { note ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp)
+                        .border(1.dp, Wrt.Amber.copy(alpha = 0.4f), RoundedCornerShape(11.dp))
+                        .background(Wrt.Amber.copy(alpha = 0.06f), RoundedCornerShape(11.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(9.dp),
+                ) {
+                    Icon(WrtIcons.Warning, null, Modifier.padding(top = 1.dp).size(14.dp), tint = Wrt.Amber)
+                    Text(note, style = sans(11.5f, 400, Wrt.AmberText, lineHeight = 17.sp))
+                }
+            }
+            if (block != null) {
+                Text(
+                    block,
+                    style = sans(11.5f, 500, Wrt.Red, lineHeight = 17.sp),
+                    modifier = Modifier.padding(top = 10.dp),
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            if (block == null) {
+                PrimaryButton("Save") {
+                    val (host, port) = routerAddress(address)!!
+                    onConfirm(routerName(name)!!, host, port ?: entity.port)
+                }
+            } else {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .background(Wrt.BgDeep, RoundedCornerShape(12.dp))
+                        .border(1.dp, Wrt.BorderInput, RoundedCornerShape(12.dp)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("Save", style = sans(13.5f, 600, Wrt.TextDim))
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            GhostButton("Cancel", onClick = onDismiss)
+        }
+    }
+}
+
+/** The dialog's one-line input, in the shape [WrtInputDialog] uses. */
+@Composable
+private fun DialogField(value: String, onChange: (String) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp)
+            .height(44.dp)
+            .border(1.dp, Wrt.BorderInput, RoundedCornerShape(10.dp))
+            .background(Wrt.BgDeep, RoundedCornerShape(10.dp))
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BasicTextField(
+            value = value,
+            onValueChange = onChange,
+            textStyle = mono(13f, 500),
+            singleLine = true,
+            cursorBrush = SolidColor(Wrt.Accent),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Ascii,
+                autoCorrectEnabled = false,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
 @Composable
 private fun ForgetRouterDialog(
     entity: RouterEntity,

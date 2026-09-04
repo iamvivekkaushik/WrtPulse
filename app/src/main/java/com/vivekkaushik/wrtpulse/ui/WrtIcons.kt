@@ -126,6 +126,33 @@ object WrtIcons {
         // contacts, hanging up from the mating face
         "M7.2 16.4v-2.6", "M12 16.4v-2.6", "M16.8 16.4v-2.6",
     )
+    /**
+     * The LAN card's glyph, traced from design screen 20: one box above, two below, joined
+     * by a bus — the shape of a subnet rather than of a router.
+     */
+    val Lan = stroked(
+        "lan", 1.6f,
+        "M9 3h6a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z",
+        "M3.5 16h5a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1Z",
+        "M15.5 16h5a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1Z",
+        "M12 8v4", "M6 16v-2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v2",
+    )
+
+    /** The RESERVED badge on a static lease: a closed padlock. */
+    val Lock = stroked(
+        "lock", 2f,
+        "M6 11h12a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1Z",
+        "M8 11V7a4 4 0 0 1 8 0v4",
+    )
+
+    /** "Reserve IP" — a pin pushed into an address so it stops moving. */
+    val Pin = stroked(
+        "pin", 1.9f,
+        "M12 16.5v5",
+        "M9 3h6l1 7H8l1-7z",
+        "M8 10c-2 1-3 2.5-3 4h14c0-1.5-1-3-3-4",
+    )
+
     val Warning = stroked("warning", 1.7f, "M12 3L1.8 20.2h20.4L12 3z", "M12 10v4.5", "M12 17.5v.5")
     val Shield = stroked(
         "shield", 1.4f,
