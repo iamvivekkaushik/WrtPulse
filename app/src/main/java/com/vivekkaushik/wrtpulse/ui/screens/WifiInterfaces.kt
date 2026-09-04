@@ -58,6 +58,7 @@ import com.vivekkaushik.wrtpulse.ops.ScanCell
 import com.vivekkaushik.wrtpulse.ops.WifiNetwork
 import com.vivekkaushik.wrtpulse.ops.WifiRadio
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
+import com.vivekkaushik.wrtpulse.ui.InfoChip
 import com.vivekkaushik.wrtpulse.ui.MonoTag
 import com.vivekkaushik.wrtpulse.ui.SectionLabel
 import com.vivekkaushik.wrtpulse.ui.SignalBars
@@ -199,10 +200,15 @@ private fun InterfaceRowBody(
         row.enabled -> Wrt.BorderCard
         else -> Wrt.BorderHair
     }
+    // This row sits on top of the swipe actions, so it has to be opaque. The uplink's 4%
+    // accent tint and the 72% alpha for an off-air row both let the red Delete panel behind
+    // it show straight through — the uplink row rendered as if it were already swiped.
+    val dim = if (row.onAir) 1f else 0.72f
     Row(
         modifier
             .fillMaxWidth()
             .border(1.dp, border, RoundedCornerShape(13.dp))
+            .background(Wrt.BgScreen, RoundedCornerShape(13.dp))
             .background(
                 if (row.isUplink && row.radioOn) Wrt.Accent.copy(alpha = 0.04f)
                 else if (row.onAir) Wrt.BgCard else Wrt.BgCardDim,
@@ -212,12 +218,12 @@ private fun InterfaceRowBody(
                 onClick = { onEdit(row) },
                 onLongClick = { row.section?.let(onShowUci) },
             )
-            .padding(horizontal = 14.dp, vertical = 12.dp)
-            .alpha(if (row.onAir) 1f else 0.72f),
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(11.dp),
     ) {
-        Column(Modifier.weight(1f)) {
+        // Dimming the CONTENT rather than the row keeps the background opaque.
+        Column(Modifier.weight(1f).alpha(dim)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
                     row.ssid.ifBlank { "(no name)" },
@@ -247,16 +253,18 @@ private fun InterfaceRowBody(
                 modifier = Modifier.padding(top = 4.dp),
             )
         }
-        if (row.section != null) {
-            val net = store.networks.first { it.section == row.section }
-            val savedDisabled = if (net.disabled) "1" else "0"
-            WToggle(row.enabled) {
-                store.stage(net.section, "disabled", savedDisabled, if (row.enabled) "1" else "0")
+        Box(Modifier.alpha(dim)) {
+            if (row.section != null) {
+                val net = store.networks.first { it.section == row.section }
+                val savedDisabled = if (net.disabled) "1" else "0"
+                WToggle(row.enabled) {
+                    store.stage(net.section, "disabled", savedDisabled, if (row.enabled) "1" else "0")
+                }
+            } else {
+                WToggle(true)
             }
-        } else {
-            WToggle(true)
         }
-        Icon(WrtIcons.ChevronRight, "edit", Modifier.size(13.dp), tint = Wrt.TextDim)
+        Icon(WrtIcons.ChevronRight, "edit", Modifier.size(13.dp).alpha(dim), tint = Wrt.TextDim)
     }
 }
 
@@ -1419,15 +1427,19 @@ fun NetworkHomeScreen(
     ticker: com.vivekkaushik.wrtpulse.data.LiveTicker,
     store: WifiStore?,
     lan: com.vivekkaushik.wrtpulse.data.LanStore?,
+    wan: com.vivekkaushik.wrtpulse.data.WanStore?,
+    live: com.vivekkaushik.wrtpulse.data.Telemetry?,
     liveLatencyMs: Int?,
     routerName: String,
     onRouterTap: () -> Unit,
     onOpenLan: () -> Unit,
+    onOpenWan: () -> Unit,
     onOpenWireless: () -> Unit,
 ) {
     // The LAN card's chips are read state, so the tab's landing page is what pays for the
     // round trip — by the time the LAN screen opens, its data is already there.
     androidx.compose.runtime.LaunchedEffect(lan) { if (lan != null && !lan.loaded) lan.load() }
+    androidx.compose.runtime.LaunchedEffect(wan) { if (wan != null && !wan.loaded) wan.load() }
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         com.vivekkaushik.wrtpulse.ui.ConnectionTopBar(
             routerName = routerName,
@@ -1477,29 +1489,94 @@ fun NetworkHomeScreen(
                     val subnet = lan?.let { store ->
                         store.net?.ipaddr?.takeIf { it.isNotEmpty() }?.let { "$it/${store.prefix}" }
                     }
-                    MonoTag(subnet ?: "reading…", size = 10f)
+                    InfoChip(subnet ?: "reading…")
                     if (lan != null && lan.loaded) {
-                        Row(
-                            Modifier
-                                .border(
-                                    1.dp,
-                                    if (lan.dhcpOn && lan.dnsmasqRunning) Wrt.Green.copy(alpha = 0.4f)
-                                    else Wrt.Amber.copy(alpha = 0.4f),
-                                    RoundedCornerShape(5.dp),
-                                )
-                                .padding(horizontal = 7.dp, vertical = 3.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        ) {
-                            StatusDot(if (lan.dhcpOn && lan.dnsmasqRunning) Wrt.Green else Wrt.Amber, 5.dp)
-                            Text(
-                                if (!lan.dhcpOn) "DHCP off"
-                                else if (!lan.dnsmasqRunning) "dnsmasq stopped"
-                                else "DHCP active",
-                                style = mono(10f, 500, if (lan.dhcpOn && lan.dnsmasqRunning) Wrt.Green else Wrt.Amber),
-                            )
+                        val healthy = lan.dhcpOn && lan.dnsmasqRunning
+                        val tone = if (healthy) Wrt.Green else Wrt.Amber
+                        InfoChip(
+                            text = when {
+                                !lan.dhcpOn -> "DHCP off"
+                                !lan.dnsmasqRunning -> "dnsmasq stopped"
+                                else -> "DHCP active"
+                            },
+                            color = tone,
+                            border = tone.copy(alpha = 0.4f),
+                            dot = tone,
+                        )
+                        InfoChip("${lan.leases.size} leases")
+                    }
+                }
+            }
+            val wanRows = wan?.wanRows().orEmpty()
+            val upstream = wanRows.firstOrNull { it.up } ?: wanRows.firstOrNull()
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, Wrt.Accent.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
+                    .background(Wrt.BgCard, RoundedCornerShape(14.dp))
+                    .clickable(onClick = onOpenWan)
+                    .padding(14.dp),
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Box(
+                        Modifier
+                            .size(38.dp)
+                            .border(1.dp, Wrt.BorderIcon, RoundedCornerShape(10.dp))
+                            .background(Wrt.BgDeep, RoundedCornerShape(10.dp)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(WrtIcons.Network, null, Modifier.size(20.dp), tint = Wrt.Accent)
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Text("Internet & WAN gateways", style = sans(14.5f, 650))
+                        Text(
+                            wanSummary(wan, wanRows.size),
+                            style = sans(11f, 400, Wrt.TextDim),
+                            modifier = Modifier.padding(top = 2.dp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (wan != null && wan.pendingCount > 0) StatusDot(Wrt.Accent, 6.dp)
+                    Icon(WrtIcons.ChevronRight, null, Modifier.size(14.dp), tint = Wrt.TextDim)
+                }
+                if (upstream != null) {
+                    Row(
+                        Modifier.padding(top = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        val tone = if (upstream.up) Wrt.Green else Wrt.Amber
+                        InfoChip(
+                            text = if (upstream.up) "Connected" else "Down",
+                            color = tone,
+                            border = tone.copy(alpha = 0.4f),
+                            dot = tone,
+                        )
+                        upstream.address.takeIf { it.isNotEmpty() }?.let { InfoChip(it) }
+                        upstream.v6Prefix.takeIf { it.isNotEmpty() }?.let {
+                            InfoChip("PD ${it.substringAfter("::")}".ifBlank { "PD" })
                         }
-                        MonoTag("${lan.leases.size} leases", size = 10f)
+                    }
+                    live?.rates?.get(upstream.device)?.let { (down, up) ->
+                        Row(
+                            Modifier.fillMaxWidth().padding(top = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            com.vivekkaushik.wrtpulse.ui.Sparkline(
+                                live.down.toList(),
+                                Wrt.Accent,
+                                Modifier.weight(1f).height(20.dp),
+                                // Mbps against the fixed 18 default clipped the moment the
+                                // line went faster than that; the shape is what this card is
+                                // for, so it scales to its own peak.
+                                maxY = 0f,
+                            )
+                            Text("↓ ${"%.1f".format(down)} Mbps", style = mono(11f, 600, Wrt.Accent))
+                        }
                     }
                 }
             }
@@ -1526,6 +1603,18 @@ fun NetworkHomeScreen(
                 Icon(WrtIcons.ChevronRight, null, Modifier.size(14.dp), tint = Wrt.TextDim)
             }
         }
+    }
+}
+
+/** "wan pppoe · wan6 dhcpv6" — which uplinks exist, without opening the screen. */
+private fun wanSummary(wan: com.vivekkaushik.wrtpulse.data.WanStore?, count: Int): String {
+    if (wan == null) return "not connected"
+    if (!wan.loaded) return wan.error ?: "reading…"
+    val rows = wan.wanRows()
+    if (rows.isEmpty()) return "no uplink of its own"
+    return rows.joinToString(" · ") { row ->
+        row.section + " " + com.vivekkaushik.wrtpulse.data.WanStore.protoLabel(row.proto).lowercase() +
+            if (row.primary && count > 1) " (primary)" else ""
     }
 }
 
@@ -1591,6 +1680,7 @@ private sealed interface WifiRoute {
     /** The Network tab itself — a list of what the tab covers, nothing wireless inline. */
     data object Home : WifiRoute
     data object Lan : WifiRoute
+    data object Wan : WifiRoute
     data object Interfaces : WifiRoute
     data class Radio(val section: String) : WifiRoute
     data class ClientScan(val radio: String) : WifiRoute
@@ -1603,6 +1693,8 @@ fun WifiSection(
     ticker: com.vivekkaushik.wrtpulse.data.LiveTicker,
     store: WifiStore?,
     lan: com.vivekkaushik.wrtpulse.data.LanStore?,
+    wan: com.vivekkaushik.wrtpulse.data.WanStore?,
+    live: com.vivekkaushik.wrtpulse.data.Telemetry?,
     liveLatencyMs: Int?,
     routerName: String,
     pendingCount: Int,
@@ -1630,7 +1722,7 @@ fun WifiSection(
     // The Wireless and LAN pages are still tab-level screens; only the steps past them
     // take over the whole display.
     val fullScreen = route !is WifiRoute.Home && route !is WifiRoute.Interfaces &&
-        route !is WifiRoute.Lan
+        route !is WifiRoute.Lan && route !is WifiRoute.Wan
     androidx.compose.runtime.LaunchedEffect(fullScreen) { onFullScreen(fullScreen) }
 
     // A router swap resets the flow — the sections it referred to are gone.
@@ -1672,11 +1764,22 @@ fun WifiSection(
             ticker = ticker,
             store = store,
             lan = lan,
+            wan = wan,
+            live = live,
             liveLatencyMs = liveLatencyMs,
             routerName = routerName,
             onRouterTap = onRouterTap,
             onOpenLan = { push(WifiRoute.Lan) },
+            onOpenWan = { push(WifiRoute.Wan) },
             onOpenWireless = { push(WifiRoute.Interfaces) },
+        )
+        is WifiRoute.Wan -> WanSection(
+            store = wan,
+            live = live,
+            latencyMs = liveLatencyMs ?: ticker.latencyMs,
+            onBack = { pop() },
+            // The WAN editor pages take the whole screen; the hub does not.
+            onFullScreen = onFullScreen,
         )
         is WifiRoute.Lan -> LanScreen(
             store = lan,

@@ -38,6 +38,7 @@ import com.vivekkaushik.wrtpulse.data.LanClient
 import com.vivekkaushik.wrtpulse.data.LanStore
 import com.vivekkaushik.wrtpulse.data.PortState
 import com.vivekkaushik.wrtpulse.data.ResvRow
+import com.vivekkaushik.wrtpulse.data.SwVlanRow
 import com.vivekkaushik.wrtpulse.data.VlanRow
 import com.vivekkaushik.wrtpulse.ops.IpMath
 import com.vivekkaushik.wrtpulse.ops.NetDev
@@ -188,7 +189,12 @@ fun LanScreen(
             CreateVlanSheet(
                 store = store,
                 onCancel = { creatingVlan = false },
-                onCreate = { id -> store.addVlan(id); creatingVlan = false },
+                onCreate = { id ->
+                    // A swconfig board gets a switch_vlan; a DSA board gets a bridge-vlan.
+                    if (store.switchDev != null || store.swVlans.isNotEmpty()) store.addSwVlan(id)
+                    else store.addVlan(id)
+                    creatingVlan = false
+                },
             )
         }
     }
@@ -911,13 +917,19 @@ private fun VlansTab(store: LanStore, onCreate: () -> Unit) {
     val ports = Parsers.switchPorts(store.devs)
     val rows = store.vlanRows()
 
+    val swconfig = store.switchDev != null || store.swVlans.isNotEmpty()
+
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState())
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        PortsCard(ports, swconfig = store.swVlans.isNotEmpty())
-        if (rows.isNotEmpty()) {
+        if (swconfig) {
+            SwitchPortsCard(store)
+        } else {
+            PortsCard(ports, swconfig = false)
+        }
+        if (rows.isNotEmpty() || swconfig) {
             Row(
                 Modifier.padding(horizontal = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -937,36 +949,22 @@ private fun VlansTab(store: LanStore, onCreate: () -> Unit) {
             }
         }
         rows.forEach { row -> VlanCard(store, row, ports) }
-        if (store.swVlans.isNotEmpty()) {
+        if (swconfig) {
             NoteCard(
-                "This router uses swconfig, where VLANs are port numbers on a switch chip. " +
-                    "WrtPulse reads them and does not write them: the numbering is board-specific " +
-                    "and a wrong map takes the router off the network with nothing left to fix it from."
+                "These are port numbers on a switch chip, not sockets on the case. The CPU " +
+                    "port is the router's own wire into the chip — a VLAN without it tagged is " +
+                    "one the router cannot see at all."
             )
-            store.swVlans.forEach { vlan ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, Wrt.BorderCard, RoundedCornerShape(11.dp))
-                        .background(Wrt.BgCardDim, RoundedCornerShape(11.dp))
-                        .padding(horizontal = 13.dp, vertical = 11.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("VLAN ${vlan.vlan}", style = sans(13f, 650))
-                    FlexSpacer()
-                    Text("${vlan.device} · ports ${vlan.ports}", style = mono(9.5f, 500, Wrt.TextDim))
-                }
-            }
+            store.swVlanRows().forEach { row -> SwVlanCard(store, row) }
         }
-        if (rows.isEmpty() && store.swVlans.isEmpty() && store.loaded) {
+        if (rows.isEmpty() && !swconfig && store.loaded) {
             NoteCard(
                 "This router has no VLAN configuration — every port is in one flat bridge. " +
                     "Creating a VLAN here adds a `bridge-vlan` section on ${store.lanBridge.ifEmpty { "the LAN bridge" }}; " +
                     "it carries no addresses until an interface names it as its device."
             )
         }
-        // Nothing here writes swconfig, so nothing here offers to create one of its VLANs.
-        if (store.lanBridge.isNotEmpty() && store.swVlans.isEmpty()) {
+        if (swconfig || store.lanBridge.isNotEmpty()) {
             GhostButton("Create VLAN", onClick = onCreate)
         }
         store.problems().forEach { ProblemCard(it) }
@@ -1049,6 +1047,223 @@ private fun PortsCard(ports: List<NetDev>, swconfig: Boolean) {
                 modifier = Modifier.padding(top = 9.dp),
             )
         }
+    }
+}
+
+/**
+ * The chip's sockets with the link state it reports.
+ *
+ * On a swconfig board the sockets are not netdevs, so this is the only place their state
+ * exists — and the only way to tell which number is which hole on the case: plug a cable in
+ * and watch which one lights up.
+ */
+@Composable
+private fun SwitchPortsCard(store: LanStore) {
+    val dev = store.switchDev
+    val sockets = store.switchSockets()
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(1.dp, Wrt.BorderCard, RoundedCornerShape(13.dp))
+            .background(Wrt.BgCard, RoundedCornerShape(13.dp))
+            .padding(horizontal = 14.dp, vertical = 13.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("SWITCH PORTS — ${dev?.name?.uppercase() ?: "SWCONFIG"}", size = 9.5f, tracking = 0.12)
+            FlexSpacer()
+            Text(
+                "${sockets.count { store.socketUp(it) }} up · ${sockets.count { !store.socketUp(it) }} down",
+                style = mono(10f, 500, Wrt.TextTertiary),
+            )
+        }
+        if (sockets.isEmpty()) {
+            Text(
+                "The switch reported no ports.",
+                style = sans(11f, 400, Wrt.TextDim),
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            return@Column
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(top = 11.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            sockets.forEach { port ->
+                val up = store.socketUp(port)
+                Column(
+                    if (sockets.size >= 3) Modifier.weight(1f) else Modifier.width(84.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(38.dp)
+                            .border(
+                                1.dp,
+                                if (up) Wrt.Green.copy(alpha = 0.45f) else Wrt.BorderCard,
+                                RoundedCornerShape(8.dp),
+                            )
+                            .background(Wrt.BgDeep, RoundedCornerShape(8.dp)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        StatusDot(if (up) Wrt.Green else Wrt.DotOff, 6.dp, pulse = up)
+                    }
+                    Text(
+                        "P$port",
+                        style = mono(9f, 600, if (up) Wrt.TextPrimary else Wrt.TextDim),
+                        maxLines = 1,
+                    )
+                    Text(
+                        store.socketSpeed(port)?.let { if (it >= 1000) "${it / 1000}G" else "${it}M" } ?: "—",
+                        style = mono(8.5f, 500, if (up) Wrt.TextDim else Wrt.DotOff),
+                    )
+                }
+            }
+        }
+        dev?.cpuPort?.let { cpu ->
+            Text(
+                "Port $cpu is the CPU port — the wire to the router itself, not a socket. " +
+                    (dev.model.takeIf { it.isNotEmpty() }?.let { "$it. " } ?: "") +
+                    "Plug a cable in and re-read to learn which number is which hole.",
+                style = sans(10.5f, 400, Wrt.TextDim, lineHeight = 16.sp),
+                modifier = Modifier.padding(top = 9.dp),
+            )
+        }
+    }
+}
+
+/** One swconfig VLAN, with a chip per socket and the CPU port shown apart from them. */
+@Composable
+private fun SwVlanCard(store: LanStore, row: SwVlanRow) {
+    val block = store.swVlanDeleteBlock(row)
+    val cpu = store.switchDev?.cpuPort
+    val cpuState = cpu?.let { store.swStateOf(row, it) }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(
+                1.dp,
+                if (row.changed || row.isNew) Wrt.Accent.copy(alpha = 0.4f) else Wrt.BorderCard,
+                RoundedCornerShape(13.dp),
+            )
+            .background(if (row.deleting) Wrt.Red.copy(alpha = 0.05f) else Wrt.BgCard, RoundedCornerShape(13.dp))
+            .padding(horizontal = 14.dp, vertical = 13.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("VLAN ${row.vlan}", style = sans(13.5f, 650))
+            if (row.vlan == store.lanSwVlan) Text("LAN", style = sans(11f, 500, Wrt.TextSecondary))
+            if (row.isNew) MonoTag("NEW", Wrt.Accent, Wrt.Accent.copy(alpha = 0.5f), 8.5f)
+            if (row.deleting) MonoTag("DELETING", Wrt.Red, Wrt.Red.copy(alpha = 0.5f), 8.5f)
+            FlexSpacer()
+            Text(row.device, style = mono(9.5f, 500, Wrt.TextDim))
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(top = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+        ) {
+            store.switchSockets().forEach { port ->
+                val state = store.swStateOf(row, port)
+                PortChip(
+                    label = "P$port " + when (state) {
+                        PortState.Off -> "—"
+                        PortState.Untagged -> "U"
+                        PortState.Tagged -> "T"
+                    },
+                    state = state,
+                    enabled = !row.deleting,
+                    modifier = Modifier.weight(1f),
+                ) { store.cycleSwPort(row, port) }
+            }
+        }
+        if (cpu != null && cpuState != null) {
+            Row(
+                Modifier.fillMaxWidth().padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("CPU", style = mono(9f, 600, Wrt.TextDim))
+                PortChip(
+                    label = "P$cpu " + when (cpuState) {
+                        PortState.Off -> "—"
+                        PortState.Untagged -> "U"
+                        PortState.Tagged -> "T"
+                    },
+                    state = cpuState,
+                    enabled = !row.deleting,
+                    modifier = Modifier.width(96.dp),
+                ) { store.cycleSwPort(row, cpu) }
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(top = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            if (block != null) {
+                Text(block, style = sans(10.5f, 400, Wrt.TextDim), modifier = Modifier.weight(1f))
+            } else {
+                Text(
+                    "ports '${com.vivekkaushik.wrtpulse.ops.Parsers.swPortsValue(row.ports)}'",
+                    style = mono(9.5f, 500, Wrt.TextDim),
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    when {
+                        row.deleting -> "Undo delete"
+                        row.draftId != null -> "Discard"
+                        else -> "Delete VLAN"
+                    },
+                    style = sans(11.5f, 600, if (row.deleting) Wrt.Accent else Wrt.Red),
+                    modifier = Modifier
+                        .clickable {
+                            when {
+                                row.deleting -> row.section?.let { store.undoDelete("network.$it") }
+                                row.draftId != null -> store.removeSwVlanDraft(row.draftId)
+                                row.section != null -> store.stageDelete("network.${row.section}")
+                            }
+                        }
+                        .padding(horizontal = 4.dp, vertical = 4.dp),
+                )
+            }
+        }
+    }
+}
+
+/** The matrix cell: untagged filled, tagged outlined, off hairlined. */
+@Composable
+private fun PortChip(
+    label: String,
+    state: PortState,
+    enabled: Boolean,
+    modifier: Modifier,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier
+            .height(34.dp)
+            .let {
+                when (state) {
+                    PortState.Untagged -> it.background(Wrt.Accent, RoundedCornerShape(8.dp))
+                    PortState.Tagged -> it.border(1.dp, Wrt.Accent.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+                    PortState.Off -> it.border(1.dp, Wrt.BorderFaint, RoundedCornerShape(8.dp))
+                }
+            }
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            style = mono(
+                10f, 600,
+                when (state) {
+                    PortState.Untagged -> Wrt.OnAccent
+                    PortState.Tagged -> Wrt.Accent
+                    PortState.Off -> Wrt.TextDim
+                },
+            ),
+            maxLines = 1,
+        )
     }
 }
 
@@ -1336,11 +1551,11 @@ private fun MovedPanel(address: String, onDone: () -> Unit) {
 }
 
 // ---------------------------------------------------------------------------
-// Small shared pieces
+// Small shared pieces — also used by the WAN screens, which are the same shapes
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun FactsCard(facts: List<Pair<String, String>>) {
+internal fun FactsCard(facts: List<Pair<String, String>>) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -1370,7 +1585,7 @@ private fun FactsCard(facts: List<Pair<String, String>>) {
 }
 
 @Composable
-private fun MaskChip(text: String, selected: Boolean, onClick: () -> Unit) {
+internal fun MaskChip(text: String, selected: Boolean, onClick: () -> Unit) {
     Box(
         Modifier
             .let {
@@ -1385,7 +1600,7 @@ private fun MaskChip(text: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun RemovableChip(text: String, onRemove: () -> Unit) {
+internal fun RemovableChip(text: String, onRemove: () -> Unit) {
     Row(
         Modifier
             .border(1.dp, Wrt.BorderInput, RoundedCornerShape(9.dp))
@@ -1400,7 +1615,7 @@ private fun RemovableChip(text: String, onRemove: () -> Unit) {
 }
 
 @Composable
-private fun DashedChip(text: String, onClick: () -> Unit) {
+internal fun DashedChip(text: String, onClick: () -> Unit) {
     Row(
         Modifier
             .border(1.dp, Wrt.BorderInput, RoundedCornerShape(9.dp))
@@ -1415,7 +1630,7 @@ private fun DashedChip(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun SegmentTab(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+internal fun SegmentTab(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
         modifier
             .height(30.dp)
@@ -1432,7 +1647,7 @@ private fun SegmentTab(text: String, selected: Boolean, modifier: Modifier = Mod
 }
 
 @Composable
-private fun NoteCard(text: String) {
+internal fun NoteCard(text: String) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -1447,7 +1662,7 @@ private fun NoteCard(text: String) {
 }
 
 @Composable
-private fun ProblemCard(text: String, top: androidx.compose.ui.unit.Dp = 0.dp) {
+internal fun ProblemCard(text: String, top: androidx.compose.ui.unit.Dp = 0.dp) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -1474,7 +1689,7 @@ private fun EmptyLine(text: String) {
 
 /** One field, validated as it is typed — what the design's chip rows add through. */
 @Composable
-private fun TextEntryDialog(
+internal fun TextEntryDialog(
     title: String,
     hint: String,
     validate: (String) -> Boolean,

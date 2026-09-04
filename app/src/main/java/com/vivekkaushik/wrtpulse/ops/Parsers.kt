@@ -76,6 +76,85 @@ data class Upstream(
 /** Cumulative byte counters for one interface. */
 data class NetCounters(val iface: String, val rxBytes: Long, val txBytes: Long)
 
+/**
+ * One WAN interface as netifd currently has it — the live half of the WAN screens.
+ *
+ * `ubus call network.interface dump` is the only honest source here: uci says what the
+ * router was told to do, and this says what actually came up, which on a PPPoE line are
+ * routinely different things.
+ */
+data class WanLink(
+    val name: String,
+    val up: Boolean,
+    val available: Boolean,
+    val proto: String,
+    val device: String,
+    val uptimeS: Long,
+    val address: String,
+    val prefix: Int,
+    /** Next hop of this interface's default route, when it has one. */
+    val gateway: String,
+    val dns: List<String>,
+    /** The delegated prefix the ISP handed over, e.g. `2a02:8071:b3c::/56`. */
+    val v6Prefix: String,
+    val v6Address: String,
+    val metric: Int,
+    val hasDefaultRoute: Boolean,
+) {
+    /** The v4 address with its prefix, the way the card shows it. */
+    val cidr: String get() = if (address.isEmpty()) "" else "$address/$prefix"
+}
+
+/** The uci side of one WAN interface: what the router was told, not what happened. */
+data class WanConfig(
+    val section: String,
+    val proto: String,
+    /** May be a port (`eth1`), a VLAN netdev (`eth1.201`) or a bridge. */
+    val device: String,
+    val metric: String,
+    val mtu: String,
+    val macaddr: String,
+    val username: String,
+    val password: String,
+    val serviceName: String,
+    val keepalive: String,
+    val ipaddr: String,
+    val netmask: String,
+    val gateway: String,
+    val dns: List<String>,
+    val peerdns: String,
+    /** dhcpv6/pppoe: the prefix length asked of the ISP. */
+    val reqprefix: String,
+    val disabled: Boolean,
+)
+
+/**
+ * A `config device` section — where 802.1q VLAN tags, cloned MACs and MTUs live in modern
+ * OpenWrt. The WAN interface then names this device rather than the raw port.
+ */
+data class NetDevice(
+    val section: String,
+    val name: String,
+    val type: String,
+    val ifname: String,
+    val vid: String,
+    val macaddr: String,
+    val mtu: String,
+    /** netifd's `egress_qos_mapping`, which is how a PCP value is actually written. */
+    val egressQos: String,
+)
+
+/** One target of the connection test. */
+data class PingResult(
+    val label: String,
+    val target: String,
+    val lossPct: Int,
+    val rttMs: Double?,
+    val error: String? = null,
+) {
+    val ok: Boolean get() = error == null && lossPct < 100 && rttMs != null
+}
+
 /** A netdev as sysfs reports it — one line of [Commands.NETDEVS]. */
 data class NetDev(
     val name: String,
@@ -154,6 +233,32 @@ data class BridgeVlan(
 ) {
     /** The netdev this VLAN appears as, and what an interface would name as its device. */
     val netdev: String get() = "$device.$vlan"
+}
+
+/**
+ * One switch chip as `swconfig` describes it.
+ *
+ * The CPU port matters more than anything else here: it is the wire from the chip to the
+ * SoC, it is not a socket anyone can plug into, and a VLAN that does not include it tagged
+ * is a VLAN the router itself cannot see.
+ */
+data class SwitchDev(
+    val name: String,
+    val ports: Int,
+    val cpuPort: Int?,
+    val model: String,
+    /** Port number → what the chip says about its link right now. */
+    val links: Map<Int, SwitchLink>,
+    /** VLAN id → the membership the chip is actually running, as opposed to configured. */
+    val liveVlans: Map<Int, String>,
+)
+
+/** One switch port's link, straight off `swconfig dev X show`. */
+data class SwitchLink(val port: Int, val up: Boolean, val speedMbps: Int?, val duplex: Boolean)
+
+/** A port's membership in a swconfig VLAN: a bare number is untagged, `5t` is tagged. */
+data class SwPort(val port: Int, val tagged: Boolean) {
+    fun token(): String = if (tagged) "${port}t" else port.toString()
 }
 
 /**
@@ -1387,6 +1492,142 @@ object Parsers {
         return out
     }
 
+    // -----------------------------------------------------------------------
+    // Internet & WAN gateways
+    // -----------------------------------------------------------------------
+
+    /**
+     * `ubus call network.interface dump` → every interface, with the facts the WAN screens
+     * need. Loopback and anything with no proto is dropped; the caller decides which of the
+     * rest count as uplinks.
+     */
+    fun wanLinks(dumpJson: String): List<WanLink> {
+        val root = runCatching { JSONObject(dumpJson) }.getOrNull() ?: return emptyList()
+        val list = root.optJSONArray("interface") ?: return emptyList()
+        val out = mutableListOf<WanLink>()
+        for (i in 0 until list.length()) {
+            val o = list.optJSONObject(i) ?: continue
+            val name = o.optString("interface")
+            if (name.isEmpty() || name == "loopback") continue
+            val v4 = o.optJSONArray("ipv4-address")?.optJSONObject(0)
+            val routes = o.optJSONArray("route")
+            var gateway = ""
+            var defaultRoute = false
+            if (routes != null) {
+                for (r in 0 until routes.length()) {
+                    val route = routes.optJSONObject(r) ?: continue
+                    if (route.optInt("mask", -1) != 0) continue
+                    defaultRoute = true
+                    if (route.optString("target") == "0.0.0.0") {
+                        gateway = route.optString("nexthop")
+                    }
+                }
+            }
+            // The delegated prefix is what an ISP hands over for the LAN to split up, and it
+            // is a different field from the interface's own address.
+            val pd = o.optJSONArray("ipv6-prefix")?.optJSONObject(0)
+            val v6 = o.optJSONArray("ipv6-address")?.optJSONObject(0)
+            out += WanLink(
+                name = name,
+                up = o.optBoolean("up"),
+                available = o.optBoolean("available", true),
+                proto = o.optString("proto"),
+                device = o.optString("l3_device").ifBlank { o.optString("device") },
+                uptimeS = o.optLong("uptime", 0),
+                address = v4?.optString("address").orEmpty(),
+                prefix = v4?.optInt("mask", 0) ?: 0,
+                gateway = gateway,
+                dns = (0 until (o.optJSONArray("dns-server")?.length() ?: 0))
+                    .mapNotNull { o.optJSONArray("dns-server")?.optString(it) }
+                    .filter { it.isNotEmpty() },
+                v6Prefix = pd?.let { "${it.optString("address")}/${it.optInt("mask")}" }
+                    ?.takeIf { !it.startsWith("/") }.orEmpty(),
+                v6Address = v6?.let { "${it.optString("address")}/${it.optInt("mask")}" }
+                    ?.takeIf { !it.startsWith("/") }.orEmpty(),
+                metric = o.optInt("metric", 0),
+                hasDefaultRoute = defaultRoute,
+            )
+        }
+        return out
+    }
+
+    /** `uci show network` → one interface section as configured. */
+    fun wanConfig(uci: Map<String, String>, section: String): WanConfig? {
+        if (uci["network.$section"] != "interface") return null
+        fun opt(name: String) = uci["network.$section.$name"].orEmpty()
+        return WanConfig(
+            section = section,
+            proto = opt("proto"),
+            device = (uci["network.$section.device"] ?: uci["network.$section.ifname"]).orEmpty(),
+            metric = opt("metric"),
+            mtu = opt("mtu"),
+            macaddr = opt("macaddr"),
+            username = opt("username"),
+            password = opt("password"),
+            serviceName = opt("service"),
+            keepalive = opt("keepalive"),
+            ipaddr = opt("ipaddr").substringBefore('/'),
+            netmask = opt("netmask"),
+            gateway = opt("gateway"),
+            dns = uciList(opt("dns")).flatMap { it.split(' ') }.filter { it.isNotBlank() },
+            peerdns = opt("peerdns"),
+            reqprefix = opt("reqprefix"),
+            disabled = opt("disabled") == "1",
+        )
+    }
+
+    /** `uci show network` → every `config device` section, named or anonymous. */
+    fun netDevices(uci: Map<String, String>): List<NetDevice> = uci.entries
+        .filter { it.value == "device" && it.key.count { c -> c == '.' } == 1 }
+        .map { (key, _) ->
+            val section = key.substringAfter('.')
+            NetDevice(
+                section = section,
+                name = uci["network.$section.name"].orEmpty(),
+                type = uci["network.$section.type"].orEmpty(),
+                ifname = uciList(uci["network.$section.ifname"].orEmpty())
+                    .flatMap { it.split(' ') }.firstOrNull().orEmpty(),
+                vid = uci["network.$section.vid"].orEmpty(),
+                macaddr = uci["network.$section.macaddr"].orEmpty(),
+                mtu = uci["network.$section.mtu"].orEmpty(),
+                egressQos = uci["network.$section.egress_qos_mapping"].orEmpty(),
+            )
+        }
+
+    /**
+     * `ls /lib/netifd/proto` → the protocols this router can actually bring up.
+     *
+     * The honest test for whether MAP-E or DS-Lite is on offer: netifd can only run a
+     * protocol whose handler script is installed, and the package that ships it is what a
+     * greyed-out row is really waiting for.
+     */
+    fun protoHandlers(text: String): Set<String> = text.lineSequence()
+        .map { it.trim().removeSuffix(".sh") }
+        .filter { it.isNotEmpty() && !it.contains('/') }
+        .toSet() + setOf("static", "dhcp", "none")
+
+    /**
+     * busybox `ping -c N` output → loss and average RTT.
+     *
+     * Sample:
+     *   3 packets transmitted, 3 packets received, 0% packet loss
+     *   round-trip min/avg/max = 12.1/14.7/18.2 ms
+     */
+    fun pingResult(text: String, label: String, target: String): PingResult {
+        if (text.isBlank()) return PingResult(label, target, 100, null, "no output")
+        val loss = Regex("(\\d+)% packet loss").find(text)?.groupValues?.get(1)?.toIntOrNull()
+        val avg = Regex("min/avg/max = [0-9.]+/([0-9.]+)/").find(text)?.groupValues?.get(1)?.toDoubleOrNull()
+        val error = when {
+            text.contains("bad address", true) || text.contains("unknown host", true) ->
+                "cannot resolve"
+            text.contains("Network unreachable", true) || text.contains("Network is unreachable", true) ->
+                "no route"
+            loss == null -> text.trim().lines().lastOrNull()?.take(60) ?: "no reply"
+            else -> null
+        }
+        return PingResult(label, target, loss ?: 100, avg, error)
+    }
+
     /**
      * One uci option's value split into list items.
      *
@@ -1553,6 +1794,87 @@ object Parsers {
             )
         }
         .sortedBy { it.vlan }
+
+    // -----------------------------------------------------------------------
+    // swconfig — the pre-DSA switch chip
+    // -----------------------------------------------------------------------
+
+    /**
+     * [Commands.SWCONFIG] → one [SwitchDev] per chip.
+     *
+     * The section holds `swconfig list` followed by a `# <dev>` line and that device's `help`
+     * and `show` output, so the split is on those markers.
+     */
+    fun switchDevs(text: String): List<SwitchDev> {
+        if (text.isBlank()) return emptyList()
+        val blocks = linkedMapOf<String, StringBuilder>()
+        var current: StringBuilder? = null
+        text.lineSequence().forEach { line ->
+            val marker = line.trim().removePrefix("# ").trim()
+            if (line.trimStart().startsWith("# ") && marker.isNotEmpty()) {
+                current = StringBuilder().also { blocks[marker] = it }
+            } else {
+                current?.append(line)?.append('\n')
+            }
+        }
+        return blocks.map { (name, body) -> switchDev(name, body.toString()) }
+    }
+
+    /**
+     * One chip's `help` + `show` output.
+     *
+     * The header line reads
+     *   `switch0: mdio.0(MediaTek MT7530 V1), ports: 7 (cpu @ 6), vlans: 4095`
+     * and the rest is `Port N:` blocks with a `link:` line each, then `VLAN N:` blocks.
+     */
+    fun switchDev(name: String, text: String): SwitchDev {
+        val header = Regex("ports:\\s*(\\d+)(?:\\s*\\(cpu @ (\\d+)\\))?").find(text)
+        val model = Regex("^\\S+:\\s*(.+?),\\s*ports:", RegexOption.MULTILINE)
+            .find(text)?.groupValues?.get(1).orEmpty()
+        val links = mutableMapOf<Int, SwitchLink>()
+        Regex("link:\\s*port:(\\d+)\\s+link:(up|down)([^\\n]*)").findAll(text).forEach { match ->
+            val port = match.groupValues[1].toIntOrNull() ?: return@forEach
+            val rest = match.groupValues[3]
+            links[port] = SwitchLink(
+                port = port,
+                up = match.groupValues[2] == "up",
+                speedMbps = Regex("speed:(\\d+)base").find(rest)?.groupValues?.get(1)?.toIntOrNull(),
+                duplex = rest.contains("full-duplex"),
+            )
+        }
+        val liveVlans = mutableMapOf<Int, String>()
+        var vlan: Int? = null
+        text.lineSequence().forEach { line ->
+            val trimmed = line.trim()
+            Regex("^VLAN (\\d+):").find(trimmed)?.let { vlan = it.groupValues[1].toIntOrNull() }
+            if (trimmed.startsWith("ports:")) {
+                vlan?.let { liveVlans[it] = trimmed.removePrefix("ports:").trim() }
+            }
+        }
+        return SwitchDev(
+            name = name,
+            ports = header?.groupValues?.get(1)?.toIntOrNull() ?: 0,
+            cpuPort = header?.groupValues?.get(2)?.toIntOrNull(),
+            model = model,
+            links = links,
+            liveVlans = liveVlans,
+        )
+    }
+
+    /** `'3 5 0t'` → the ports and their tagging, in the order the chip lists them. */
+    fun swPorts(value: String): List<SwPort> = value.trim()
+        .split(' ', '\t', '\n')
+        .mapNotNull { token ->
+            val text = token.trim()
+            if (text.isEmpty()) return@mapNotNull null
+            val tagged = text.endsWith("t")
+            val port = text.removeSuffix("t").removeSuffix("*").toIntOrNull() ?: return@mapNotNull null
+            SwPort(port, tagged)
+        }
+
+    /** The `ports` option a swconfig VLAN carries, lowest port first. */
+    fun swPortsValue(ports: List<SwPort>): String =
+        ports.sortedBy { it.port }.joinToString(" ") { it.token() }
 
     /**
      * `12h` / `1d` / `infinite` → seconds, for the lease-time chips. Null when dnsmasq would

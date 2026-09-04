@@ -196,6 +196,32 @@ fun FilterChip(
     }
 }
 
+/**
+ * The hub-card chip from design screen 20 — `192.168.1.1/24`, `● DHCP active`, `12 clients`.
+ *
+ * One shape whether or not it carries a dot. The cards used to mix this with [MonoTag], which
+ * is a size smaller in every dimension, so "Connected" and the address beside it came out
+ * different heights and read as a mistake.
+ */
+@Composable
+fun InfoChip(
+    text: String,
+    color: Color = Wrt.TextTertiary,
+    border: Color = Wrt.BorderInput,
+    dot: Color? = null,
+) {
+    Row(
+        Modifier
+            .border(1.dp, border, RoundedCornerShape(5.dp))
+            .padding(horizontal = 7.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        if (dot != null) StatusDot(dot, 5.dp)
+        Text(text, style = mono(10f, 500, color), maxLines = 1)
+    }
+}
+
 /** Tiny bordered mono tag, e.g. "HOME", "WPA3-SAE", "Casa · 5G". */
 @Composable
 fun MonoTag(text: String, color: Color = Wrt.TextTertiary, border: Color = Wrt.BorderInput, size: Float = 9f) {
@@ -275,15 +301,23 @@ fun RouterTile(size: Dp = 42.dp, ledColor: Color = Wrt.Accent, dim: Boolean = fa
 
 /** Static sparkline from a fixed point list (design's CPU/RAM mini charts). */
 @Composable
-fun Sparkline(points: List<Float>, color: Color, modifier: Modifier = Modifier, maxY: Float = 18f) {
+fun Sparkline(
+    points: List<Float>,
+    color: Color,
+    modifier: Modifier = Modifier,
+    /** The value that reaches the top. Zero or less auto-scales to the series' own peak. */
+    maxY: Float = 18f,
+) {
     Canvas(modifier) {
+        if (points.size < 2) return@Canvas
+        val ceiling = if (maxY > 0f) maxY else (points.maxOrNull() ?: 1f).coerceAtLeast(1f)
         val w = size.width
         val h = size.height
         val step = w / (points.size - 1)
         val p = Path()
         points.forEachIndexed { i, v ->
             val x = i * step
-            val y = v / maxY * h
+            val y = sparkY(v, ceiling, h)
             if (i == 0) p.moveTo(x, y) else p.lineTo(x, y)
         }
         drawPath(p, color, alpha = 0.75f, style = Stroke(1.4.dp.toPx(), cap = StrokeCap.Round))
@@ -291,11 +325,32 @@ fun Sparkline(points: List<Float>, color: Color, modifier: Modifier = Modifier, 
 }
 
 /**
- * Live WAN throughput chart: teal down series with area fill, blue up line,
- * three hairline gridlines. New points append on the right (values in 0..100).
+ * Where one sparkline point sits, in canvas coordinates — where y grows DOWNWARD.
+ *
+ * This used to be `v / maxY * h`, which put zero at the top and the peak at the bottom: every
+ * sparkline in the app was drawn upside down, so rising CPU sloped downhill. Values past the
+ * ceiling clamp to the edges instead of drawing outside the box.
+ */
+internal fun sparkY(value: Float, maxY: Float, height: Float): Float =
+    height - (value / maxY).coerceIn(0f, 1f) * height
+
+/**
+ * Live WAN throughput chart: teal down series with area fill, blue up line, three hairline
+ * gridlines. New points append on the right.
+ *
+ * The series arrive in whatever units the caller holds and are scaled here against whichever
+ * of the two peaked. That used to be the caller's job, silently — a chart that wanted 0..100
+ * is a chart someone hands Mbps to, and the WAN card's line duly sat flat along the bottom.
  */
 @Composable
 fun ThroughputChart(down: List<Float>, up: List<Float>, modifier: Modifier = Modifier) {
+    val (scaledDown, scaledUp) =
+        com.vivekkaushik.wrtpulse.data.Telemetry.normalize(down, up)
+    ThroughputChartScaled(scaledDown, scaledUp, modifier)
+}
+
+@Composable
+private fun ThroughputChartScaled(down: List<Float>, up: List<Float>, modifier: Modifier = Modifier) {
     Canvas(modifier) {
         val w = size.width
         val h = size.height
@@ -456,6 +511,13 @@ fun SwipeToReveal(
     revealWidth: Dp = 78.dp,
     corner: Dp = 13.dp,
     behind: Color = Wrt.BgCardDim,
+    /**
+     * Painted under the row itself. The actions sit BEHIND the content, so a row with a
+     * translucent background shows them through and reads as half-swiped when it is not —
+     * which is what a 4%-alpha accent tint on the wireless uplink row did. Rows keep their
+     * own tint; this is the opaque ground it composites over.
+     */
+    base: Color = Wrt.BgScreen,
     content: @Composable (Modifier) -> Unit,
 ) {
     if (actions.isEmpty()) {
@@ -489,6 +551,7 @@ fun SwipeToReveal(
         content(
             Modifier
                 .offset { IntOffset(offset.roundToInt(), 0) }
+                .background(base, RoundedCornerShape(corner))
                 .draggable(
                     orientation = Orientation.Horizontal,
                     state = rememberDraggableState { delta ->

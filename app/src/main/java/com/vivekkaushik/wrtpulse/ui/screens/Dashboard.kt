@@ -223,12 +223,10 @@ private fun WanCard(ticker: LiveTicker, live: Telemetry?) {
             Text("↑ ${String.format("%.1f", (live?.up ?: ticker.up).last())}", style = mono(12.5f, 600, Wrt.Blue))
             Text("Mbps", style = mono(9.5f, 500, Wrt.TextDim))
         }
-        val (chartDown, chartUp) =
-            if (live != null) Telemetry.normalize(live.down, live.up)
-            else ticker.down to ticker.up
+        // The chart scales the series itself now; both sources hand it raw values.
         ThroughputChart(
-            down = chartDown,
-            up = chartUp,
+            down = live?.down ?: ticker.down,
+            up = live?.up ?: ticker.up,
             modifier = Modifier.fillMaxWidth().height(88.dp).padding(top = 6.dp),
         )
         // What the upstream actually is, under the numbers it produces.

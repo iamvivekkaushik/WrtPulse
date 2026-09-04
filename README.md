@@ -14,7 +14,7 @@ cannot, the app does not pretend otherwise.
 |---|---|
 | **Dashboard** | CPU, RAM, flash, load, uptime and live throughput, one batched command per second. The upstream card follows whichever interface actually holds the default route, so it is right whether the WAN is a cable or a Wi-Fi client. Reboot and a speed test live here. |
 | **Clients** | Every device on the router, wireless and wired, with signal, lease, and per-client usage when `nlbwmon` is installed. Rename, block, wake-on-LAN, and DHCP reservations. |
-| **Network** | **LAN & local network** — the subnet, the DHCP server on it, static leases, and the switch VLANs behind it. Radios and wireless interfaces. Add or edit APs and station (client) links, change channel, width, encryption and SSID. Every change is staged, shown as a diff, and applied in one `uci batch`. Neighbour scans suggest the least busy channel. |
+| **Network** | **LAN & local network** — the subnet, the DHCP server on it, static leases, and the switch VLANs behind it. **Internet & WAN gateways** — the uplinks, their port and VLAN tag, the IPv4 protocol, IPv6 and prefix delegation, and a connection test. Radios and wireless interfaces. Add or edit APs and station (client) links, change channel, width, encryption and SSID. Every change is staged, shown as a diff, and applied in one `uci batch`. Neighbour scans suggest the least busy channel. |
 | **Terminal** | A real SSH shell with a VT screen model — cursor addressing, scrollback, selection and paste — and multiple tabs on one connection. |
 | **System** | Live logs (`logread -f`), packages, services, firmware, backup & restore, regulatory domain, and SSH keys. |
 
@@ -28,10 +28,13 @@ cannot, the app does not pretend otherwise.
 - **Leases** — every device the router can see, whether it took a lease or only turned up in
   the neighbour table, and the static leases as their own list. Reserve the address a device
   already holds from its row, or add one by hand; edit and delete by swipe.
-- **VLANs** — the switch ports with their link state, and the DSA `bridge-vlan` port matrix,
-  where tapping a port cycles it untagged → tagged → off. On a swconfig board the VLANs are
-  shown and never written: the port numbering is board-specific and a wrong map takes the
-  router off the network with nothing left to fix it from.
+- **VLANs** — the port matrix, on both switch models. DSA boards get their `bridge-vlan`
+  sections with the sockets by name; swconfig boards get the chip's own port numbers, its
+  per-port link state (the only place that exists, since those sockets are not netdevs) and
+  which port is the CPU, read from `swconfig dev X help`. Tapping a port cycles it untagged →
+  tagged → off. The refusals are the ones that would take the board off the network with
+  nothing left to fix it from: a VLAN with no CPU port, an untagged CPU port across two VLANs,
+  a socket untagged in two VLANs, and anything that strands the VLAN the LAN itself rides.
 
 Everything is staged and applied in one pass across both `network` and `dhcp`, because a
 subnet that moves without its DHCP pool leaves every client asking the wrong router for an
@@ -39,6 +42,35 @@ address. The one change that ends the session issuing it — moving the router's
 is allowed, and says so before the fact: the connection dies with the reload, the phone keeps
 a lease on the old subnet until it renews, the saved router entry follows the router to its
 new address, and that address is a first contact for host keys.
+
+### Internet & WAN gateways, in more detail
+
+- **The uplinks** — every interface the firewall treats as a WAN, plus anything actually
+  carrying a default route, so a router uplinked over Wi-Fi is listed without being called
+  "wan". Lowest route metric first, which is how the kernel decides. Public address, delegated
+  IPv6 prefix, live throughput and uptime for whichever one is selected.
+- **Connection test** — pings the gateway, two public resolvers and a name, because "the line
+  is down" and "DNS is broken" look identical from a browser and different from here.
+- **Port, VLAN, MAC, MTU** — the socket the ISP is plugged into, an 802.1q tag written as a
+  real `config device` the interface then names, a cloned MAC, and the MTU. An uplink that is
+  a radio says so instead of offering ports it does not have.
+- **IPv4 protocol** — DHCP, static and PPPoE in full. Every other protocol is listed with
+  whether this router can actually run it, read from `/lib/netifd/proto`, and named with the
+  package that would provide it — but not edited, because an interface set to a protocol whose
+  settings are blank never comes up.
+- **IPv6** — off, native DHCPv6, dual-stack over an existing PPPoE session, or relay, plus the
+  prefix length asked of the ISP and how the LAN addresses itself. Relay writes both halves:
+  the LAN relays, and the upstream is marked master so odhcpd knows what it is relaying from.
+- **Failover order** — every uplink's route metric on one card. Lower wins the default route;
+  the rest carry traffic only once the winner's route is gone. That is the whole of failover on
+  a router without mwan3, and the review sheet says so rather than implying a health check.
+
+Applying arms a rollback first. The router copies `/etc/config/network`, starts a detached
+watcher, and puts the copy back unless the app reaches it again within 30 seconds — and what
+counts as reaching it is the app having re-read the config, not `ifup` returning 0, because
+ifup answers long before a PPPoE session is up. Adding a second uplink is not here yet:
+failover between two WANs is route metric, which the screen shows, or mwan3, which the app
+does not configure.
 
 ### System, in more detail
 
@@ -127,7 +159,7 @@ Run the unit tests:
 ./gradlew testDebugUnitTest
 ```
 
-562 JVM tests, mostly over `ops/` — real command output captured from a router, parsed and
+661 JVM tests, mostly over `ops/` — real command output captured from a router, parsed and
 pinned. Where an outside authority exists it is used: key fingerprints are checked against
 `ssh-keygen -lf` rather than against the app's own maths.
 
@@ -140,7 +172,9 @@ Scheduled tasks is a placeholder on the System screen. Factory reset is drawn bu
 the LAN screen the reads and the subnet move are verified against a real router — a router was
 moved from 192.168.1.1 to 192.168.0.1 through it, taking the session with it as designed, and
 the saved entry followed. The VLAN port matrix is built and gated but has not been applied to
-live hardware, and swconfig boards are read-only by design. The
+live hardware, and swconfig boards are read-only by design. On the WAN screens the reads and
+the connection test are verified against a real router; the editors and the rollback apply are
+unit-tested but have not been run against a live uplink. The
 restore has been built and gated but not yet run end to end on a live router — everything up
 to and including the router's `tar -tzf` listing has. The firmware flash itself has been built and gated but not yet run end to end
 on a live router — everything up to and including `sysupgrade -T` has.

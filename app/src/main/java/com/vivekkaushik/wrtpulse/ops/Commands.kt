@@ -766,7 +766,24 @@ object Commands {
         "echo $SECTION links" to NETDEVS,
         // Whether the DHCP server is actually serving, as opposed to configured to.
         "echo $SECTION dnsmasq" to "pgrep dnsmasq >/dev/null 2>&1 && echo running || echo stopped",
+        "echo $SECTION swconfig" to SWCONFIG,
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    /**
+     * The switch chip, on the boards that still have one.
+     *
+     * `help` carries the port count and which port is the CPU — the two facts that decide
+     * whether a VLAN edit can be offered at all — and `show` is the only place the per-socket
+     * link state exists, because a swconfig board's sockets are not netdevs. Empty on a DSA
+     * board, where the binary is not installed.
+     */
+    val SWCONFIG =
+        // `exit 0` would end the whole batched script and take any later section with it, so
+        // the absent-binary case is a plain empty branch.
+        "if command -v swconfig >/dev/null 2>&1; then swconfig list; " +
+        "for d in \$(swconfig list | sed -n 's/^Found:*[[:space:]]*\\([^ ]*\\).*/\\1/p'); do " +
+        "echo \"# \$d\"; swconfig dev \$d help 2>/dev/null; " +
+        "swconfig dev \$d show 2>/dev/null; done; fi"
 
     /**
      * A uci list is replaced wholesale: `set` on a list option collapses it to one value, so
@@ -795,6 +812,79 @@ object Commands {
         dhcp -> "/etc/init.d/dnsmasq restart >/dev/null 2>&1; echo done"
         else -> "echo done"
     }
+
+    // -----------------------------------------------------------------------
+    // Internet & WAN gateways — design screens 26-30
+    // -----------------------------------------------------------------------
+
+    /** Everything the WAN screens read, in one round trip. */
+    val WAN_STATE = listOf(
+        "echo $SECTION net" to NETWORK_CONFIG,
+        "echo $SECTION fw" to FIREWALL_CONFIG,
+        // The v6 half of the LAN is configured in dhcp, not network.
+        "echo $SECTION dhcp" to "uci show dhcp 2>/dev/null",
+        "echo $SECTION dump" to "ubus call network.interface dump 2>/dev/null || echo '{}'",
+        "echo $SECTION links" to NETDEVS,
+        // Which protocols netifd can actually bring up on this router.
+        "echo $SECTION protos" to "ls /lib/netifd/proto 2>/dev/null",
+    ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    /**
+     * The connection test: three pings each at the gateway, and at two resolvers beyond it.
+     *
+     * Split that way on purpose — the gateway answering while 1.1.1.1 does not is a
+     * different fault from the gateway itself being unreachable, and the screen can only say
+     * which if it measures both.
+     */
+    fun pingTest(gateway: String): String = buildList {
+        add("echo $SECTION gw" to pingOne(gateway.ifBlank { "127.0.0.1" }))
+        add("echo $SECTION dns1" to pingOne("1.1.1.1"))
+        add("echo $SECTION dns2" to pingOne("8.8.8.8"))
+        // Name resolution is a separate failure from reachability, and the one people meet.
+        add("echo $SECTION name" to pingOne("openwrt.org"))
+    }.joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    private fun pingOne(target: String) = "ping -c 3 -W 2 -q '$target' 2>&1 || true"
+
+    /**
+     * Arms the rollback, then applies. The router keeps a copy of `/etc/config/network` and
+     * puts it back unless the app confirms within [seconds] — which is the only protection
+     * available when the change being applied is the one that carries the connection.
+     *
+     * The watcher is detached from this session on purpose: it has to outlive the link.
+     */
+    fun wanApply(operations: List<String>, reload: String, seconds: Int = 30): String = buildString {
+        append("mkdir -p $ROLLBACK_DIR && ")
+        append("cp /etc/config/network $ROLLBACK_DIR/network && ")
+        append("rm -f $ROLLBACK_DIR/confirm && ")
+        append("(sleep $seconds; [ -f $ROLLBACK_DIR/confirm ] && exit 0; ")
+        append("cp $ROLLBACK_DIR/network /etc/config/network; ")
+        append("/etc/init.d/network reload; echo rolled-back > $ROLLBACK_DIR/last) ")
+        append(">/dev/null 2>&1 &\n")
+        append("uci batch <<'WRTPULSE_EOF'\n")
+        operations.forEach { append(it).append('\n') }
+        append("WRTPULSE_EOF\n")
+        append("uci commit network && ").append(reload).append("; echo applied")
+    }
+
+    const val ROLLBACK_DIR = "/tmp/wrtpulse-wan"
+
+    /**
+     * Disarms the rollback. Called once the app has re-read the router across the change, so
+     * "the app came back" is what confirms it rather than the command returning 0 — an
+     * `ifup` answers long before the line is actually up.
+     */
+    const val WAN_CONFIRM = "touch $ROLLBACK_DIR/confirm && echo confirmed"
+
+    /** Whether the watcher put the old config back while the app was away. */
+    const val WAN_ROLLBACK_STATE =
+        "cat $ROLLBACK_DIR/last 2>/dev/null; [ -f $ROLLBACK_DIR/confirm ] && echo confirmed || echo pending"
+
+    /** Brings one interface down and up — the gentle reload when no device section changed. */
+    fun ifup(name: String) = "ifup '$name' >/dev/null 2>&1; echo done"
+
+    /** A new or edited `config device` needs netifd to rebuild it, which ifup will not do. */
+    const val NETWORK_RELOAD = "/etc/init.d/network reload >/dev/null 2>&1; echo done"
 
     /** The raw uci lines behind one LAN section — what "view command" reveals. */
     fun showUci(path: String) = "uci show $path 2>/dev/null"

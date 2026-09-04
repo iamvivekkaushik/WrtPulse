@@ -10,6 +10,7 @@ import com.vivekkaushik.wrtpulse.ops.IpMath
 import com.vivekkaushik.wrtpulse.ops.LAN_STATUS
 import com.vivekkaushik.wrtpulse.ops.NETDEV_LINES
 import com.vivekkaushik.wrtpulse.ops.NETWORK_UCI
+import com.vivekkaushik.wrtpulse.ops.SWCONFIG_OUT
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -689,6 +690,287 @@ class LanStoreTest {
                 )
             )
         }
+
+    // ---- swconfig VLANs, the pre-DSA switch ----
+
+    /**
+     * A board shaped like the Deco: one switch chip, one VLAN holding both sockets and the
+     * CPU port tagged, and the LAN riding it through the bridge member `eth0.1` rather than
+     * through `network.lan.device`.
+     */
+    private fun swStore(dhcp: String = DHCP_UCI): LanStore =
+        LanStore(RouterSession(SshTarget("192.168.0.1"), unusedClient, { error("unused") })).apply {
+            ingest(
+                mapOf(
+                    "net" to """
+                        network.lan=interface
+                        network.lan.device='br-lan'
+                        network.lan.proto='static'
+                        network.lan.ipaddr='192.168.0.1/24'
+                        network.br_lan=device
+                        network.br_lan.name='br-lan'
+                        network.br_lan.type='bridge'
+                        network.br_lan.ports='eth0.1'
+                        network.@switch[0]=switch
+                        network.@switch[0].name='switch0'
+                        network.@switch[0].reset='1'
+                        network.@switch[0].enable_vlan='1'
+                        network.@switch_vlan[0]=switch_vlan
+                        network.@switch_vlan[0].device='switch0'
+                        network.@switch_vlan[0].vlan='1'
+                        network.@switch_vlan[0].ports='3 5 0t'
+                    """.trimIndent(),
+                    "dhcp" to dhcp,
+                    "live" to "{}",
+                    "leases" to "",
+                    "neigh" to "",
+                    "links" to "eth0 up 1 1000 02:00:00:00:00:02 phy wired\neth0.1 up 1 - 02:00:00:00:00:02 virt wired",
+                    "dnsmasq" to "running",
+                    "swconfig" to SWCONFIG_OUT,
+                )
+            )
+        }
+
+    @Test
+    fun `the chip's sockets exclude the cpu port`() {
+        val s = swStore()
+        assertEquals(0, s.switchDev!!.cpuPort)
+        assertEquals(listOf(1, 2, 3, 4, 5), s.switchSockets())
+        assertTrue(s.socketUp(3))
+        assertFalse(s.socketUp(5))
+        assertEquals(1000, s.socketSpeed(3))
+    }
+
+    /**
+     * The LAN's VLAN is not named by `network.lan.device` — that is `br-lan`. It is the
+     * bridge's member, `eth0.1`, and every refusal about the LAN's VLAN depends on finding it
+     * there.
+     */
+    @Test
+    fun `the lan's vlan is found through the bridge member`() {
+        assertEquals(1, swStore().lanSwVlan)
+    }
+
+    @Test
+    fun `a swconfig vlan reads back as ports with tagging`() {
+        val row = swStore().swVlanRows().single()
+        assertEquals(1, row.vlan)
+        assertEquals("switch0", row.device)
+        assertEquals(PortState.Untagged, swStore().swStateOf(row, 3))
+        assertEquals(PortState.Untagged, swStore().swStateOf(row, 5))
+        assertEquals(PortState.Tagged, swStore().swStateOf(row, 0))
+        assertEquals(PortState.Off, swStore().swStateOf(row, 4))
+    }
+
+    @Test
+    fun `a swconfig port chip cycles off to untagged to tagged and back`() {
+        val s = swStore()
+        fun row() = s.swVlanRows().single { it.vlan == 1 }
+        s.cycleSwPort(row(), 4)
+        assertEquals(PortState.Untagged, s.swStateOf(row(), 4))
+        s.cycleSwPort(row(), 4)
+        assertEquals(PortState.Tagged, s.swStateOf(row(), 4))
+        s.cycleSwPort(row(), 4)
+        assertEquals(PortState.Off, s.swStateOf(row(), 4))
+        // `3 5 0t` and `0t 3 5` are the same map, so a full cycle leaves nothing staged.
+        assertEquals(0, s.pendingCount)
+    }
+
+    /** And the diff still shows the file's own spelling on the line being replaced. */
+    @Test
+    fun `the diff quotes the ports option as the file has it`() {
+        val s = swStore()
+        s.setSwPort(s.swVlanRows().single(), 4, PortState.Tagged)
+        assertEquals(
+            listOf(
+                "- network.@switch_vlan[0].ports='3 5 0t'" to false,
+                "+ network.@switch_vlan[0].ports='0t 3 4t 5'" to true,
+            ),
+            s.diffLines(),
+        )
+    }
+
+    @Test
+    fun `moving a socket out of the lan vlan is one ports write`() {
+        val s = swStore()
+        s.setSwPort(s.swVlanRows().single(), 5, PortState.Off)
+        assertEquals(listOf("set network.@switch_vlan[0].ports='0t 3'"), s.ops())
+    }
+
+    /**
+     * The whole point of the feature: a socket in its own VLAN, ready for a WAN interface.
+     * The CPU port comes tagged by default, because a VLAN without it is invisible to the
+     * router — the mistake that makes this matrix dangerous.
+     */
+    @Test
+    fun `a new vlan arrives with the cpu port tagged`() {
+        val s = swStore()
+        val draft = s.addSwVlan(2)
+        assertEquals(listOf(0), draft.ports.map { it.port })
+        assertTrue(draft.ports.single().tagged)
+        s.setSwPort(s.swVlanRows().single { it.vlan == 2 }, 5, PortState.Untagged)
+        val ops = s.ops()
+        assertTrue(ops.contains("set network.swvlan2=switch_vlan"))
+        assertTrue(ops.contains("set network.swvlan2.device='switch0'"))
+        assertTrue(ops.contains("set network.swvlan2.vlan='2'"))
+        assertTrue(ops.contains("set network.swvlan2.ports='0t 5'"))
+    }
+
+    @Test
+    fun `the first free vlan id is offered`() {
+        assertEquals(2, swStore().freeSwVlanId())
+    }
+
+    /** A VLAN the router cannot see is the failure this matrix is famous for. */
+    @Test
+    fun `a vlan without the cpu port is refused`() {
+        val s = swStore()
+        s.addSwVlan(2)
+        s.setSwPort(s.swVlanRows().single { it.vlan == 2 }, 0, PortState.Off)
+        s.setSwPort(s.swVlanRows().single { it.vlan == 2 }, 5, PortState.Untagged)
+        assertTrue(s.problems().any { it.contains("does not include the CPU port") })
+    }
+
+    /** With two VLANs the CPU port has to be tagged or the router cannot tell them apart. */
+    @Test
+    fun `an untagged cpu port across two vlans is refused`() {
+        val s = swStore()
+        s.addSwVlan(2)
+        s.setSwPort(s.swVlanRows().single { it.vlan == 2 }, 0, PortState.Untagged)
+        assertTrue(s.problems().any { it.contains("has to be tagged") })
+    }
+
+    @Test
+    fun `a socket untagged in two vlans is refused`() {
+        val s = swStore()
+        s.addSwVlan(2)
+        s.setSwPort(s.swVlanRows().single { it.vlan == 2 }, 5, PortState.Untagged)
+        assertTrue(s.problems().any { it.contains("untagged in VLAN") })
+    }
+
+    @Test
+    fun `taking the cpu port out of the lan's own vlan is refused`() {
+        val s = swStore()
+        s.setSwPort(s.swVlanRows().single(), 0, PortState.Off)
+        assertTrue(s.problems().any { it.contains("carries the LAN") })
+    }
+
+    @Test
+    fun `the lan's vlan cannot be deleted from its row`() {
+        val s = swStore()
+        assertNotNull(s.swVlanDeleteBlock(s.swVlanRows().single()))
+        s.addSwVlan(2)
+        assertNull(s.swVlanDeleteBlock(s.swVlanRows().single { it.vlan == 2 }))
+    }
+
+    @Test
+    fun `an empty vlan does nothing and says so`() {
+        val s = swStore()
+        s.addSwVlan(2)
+        s.setSwPort(s.swVlanRows().single { it.vlan == 2 }, 0, PortState.Off)
+        assertTrue(s.problems().any { it.contains("has no ports") })
+    }
+
+    /** Port numbers are the chip's, and link state is the only way to map them to holes. */
+    @Test
+    fun `the notes say which socket has a link and what is left to do`() {
+        val s = swStore()
+        s.addSwVlan(2)
+        s.setSwPort(s.swVlanRows().single { it.vlan == 1 }, 5, PortState.Off)
+        s.setSwPort(s.swVlanRows().single { it.vlan == 2 }, 5, PortState.Untagged)
+        val notes = s.notes()
+        assertTrue(notes.any { it.contains("port 3") && it.contains("link") })
+        // A new VLAN is a separated socket, not an uplink.
+        assertTrue(notes.any { it.contains("firewall's wan zone") })
+    }
+
+    @Test
+    fun `a socket left in no vlan is called out`() {
+        val s = swStore()
+        s.setSwPort(s.swVlanRows().single(), 5, PortState.Off)
+        assertTrue(s.notes().any { it.contains("in no VLAN at all") && it.contains("5") })
+    }
+
+    /**
+     * Only ports the change strands. The reference board has ports that were never in any
+     * VLAN — port 6 on its AR8337 is up and in none — and naming those every time would bury
+     * the one that actually just lost its VLAN.
+     */
+    @Test
+    fun `ports that were never in a vlan are not reported as stranded`() {
+        val s = swStore()
+        s.setSwPort(s.swVlanRows().single(), 4, PortState.Tagged)
+        assertTrue(s.notes().none { it.contains("in no VLAN at all") })
+    }
+
+    /** VLAN mode off means the whole map is inert, so turning it on is staged visibly. */
+    @Test
+    fun `adding a vlan turns vlan mode on when it is off`() {
+        val s = LanStore(RouterSession(SshTarget("192.168.0.1"), unusedClient, { error("unused") }))
+        s.ingest(
+            mapOf(
+                "net" to """
+                    network.lan=interface
+                    network.lan.device='eth0.1'
+                    network.lan.ipaddr='192.168.0.1'
+                    network.lan.netmask='255.255.255.0'
+                    network.@switch[0]=switch
+                    network.@switch[0].name='switch0'
+                    network.@switch[0].enable_vlan='0'
+                    network.@switch_vlan[0]=switch_vlan
+                    network.@switch_vlan[0].device='switch0'
+                    network.@switch_vlan[0].vlan='1'
+                    network.@switch_vlan[0].ports='3 5 0t'
+                """.trimIndent(),
+                "dhcp" to DHCP_UCI,
+                "live" to "{}",
+                "leases" to "",
+                "neigh" to "",
+                "links" to "eth0 up 1 1000 02:00:00:00:00:02 phy wired",
+                "dnsmasq" to "running",
+                "swconfig" to SWCONFIG_OUT,
+            )
+        )
+        assertFalse(s.vlanModeOn)
+        s.addSwVlan(2)
+        assertTrue(s.vlanModeOn)
+        assertTrue(s.ops().contains("set network.@switch[0].enable_vlan='1'"))
+    }
+
+    /** With no CPU port reported, the guards cannot run, and the screen has to admit it. */
+    @Test
+    fun `a chip that hides its cpu port says the checks cannot run`() {
+        val s = LanStore(RouterSession(SshTarget("192.168.0.1"), unusedClient, { error("unused") }))
+        s.ingest(
+            mapOf(
+                "net" to """
+                    network.lan=interface
+                    network.lan.device='eth0.1'
+                    network.lan.ipaddr='192.168.0.1'
+                    network.lan.netmask='255.255.255.0'
+                    network.@switch_vlan[0]=switch_vlan
+                    network.@switch_vlan[0].device='switch0'
+                    network.@switch_vlan[0].vlan='1'
+                    network.@switch_vlan[0].ports='1 2 6t'
+                """.trimIndent(),
+                "dhcp" to DHCP_UCI,
+                "live" to "{}",
+                "leases" to "",
+                "neigh" to "",
+                "links" to "eth0 up 1 1000 02:00:00:00:00:02 phy wired",
+                "dnsmasq" to "running",
+                "swconfig" to """
+                    # switch0
+                    switch0: eth0(Generic), ports: 5, vlans: 16
+                    Port 1:
+                    	link: port:1 link:up speed:100baseT full-duplex
+                """.trimIndent(),
+            )
+        )
+        assertTrue(s.cpuPortUnknown)
+        s.setSwPort(s.swVlanRows().single(), 2, PortState.Tagged)
+        assertTrue(s.notes().any { it.contains("did not report which port is the CPU") })
+    }
 
     /** A board with no bridge VLANs has none to show, and nothing pretends otherwise. */
     @Test

@@ -19,6 +19,8 @@ import com.vivekkaushik.wrtpulse.ops.Neigh
 import com.vivekkaushik.wrtpulse.ops.NetDev
 import com.vivekkaushik.wrtpulse.ops.Parsers
 import com.vivekkaushik.wrtpulse.ops.Reservation
+import com.vivekkaushik.wrtpulse.ops.SwPort
+import com.vivekkaushik.wrtpulse.ops.SwitchDev
 import com.vivekkaushik.wrtpulse.ops.SwitchVlan
 import com.vivekkaushik.wrtpulse.ops.VlanPort
 
@@ -65,6 +67,15 @@ class LanStore(private val session: RouterSession) {
     val vlans = mutableStateListOf<BridgeVlan>()
     val swVlans = mutableStateListOf<SwitchVlan>()
 
+    /** The switch chips, on the boards that have one. Empty on DSA. */
+    val swDevs = mutableStateListOf<SwitchDev>()
+
+    /** The `network` config as read, for the handful of lookups that need the raw map. */
+    private val networkUci = mutableStateMapOf<String, String>()
+
+    /** swconfig VLANs the apply would create. */
+    val swVlanDrafts = mutableStateListOf<SwVlanDraft>()
+
     /** dnsmasq's process, not its config: `ignore '0'` with nothing running serves nobody. */
     var dnsmasqRunning by mutableStateOf(false); private set
 
@@ -93,7 +104,8 @@ class LanStore(private val session: RouterSession) {
     private var nextDraftId by mutableIntStateOf(1)
 
     val pendingCount: Int
-        get() = staged.size + stagedLists.size + deletions.size + resvDrafts.size + vlanDrafts.size
+        get() = staged.size + stagedLists.size + deletions.size + resvDrafts.size +
+            vlanDrafts.size + swVlanDrafts.size
 
     // -----------------------------------------------------------------------
     // Reading
@@ -128,6 +140,8 @@ class LanStore(private val session: RouterSession) {
         devs.clear(); devs.addAll(Parsers.netdevs(parts["links"].orEmpty()))
         vlans.clear(); vlans.addAll(Parsers.bridgeVlans(network))
         swVlans.clear(); swVlans.addAll(Parsers.switchVlans(network))
+        swDevs.clear(); swDevs.addAll(Parsers.switchDevs(parts["swconfig"].orEmpty()))
+        networkUci.clear(); networkUci.putAll(network)
         dnsmasqRunning = parts["dnsmasq"].orEmpty().contains("running")
     }
 
@@ -149,6 +163,23 @@ class LanStore(private val session: RouterSession) {
 
     fun value(path: String, saved: String): String = staged[path]?.second ?: saved
 
+    /**
+     * Stages a value whose spelling is not significant.
+     *
+     * `ports '3 5 0t'` and `ports '0t 3 5'` are the same port map, so cycling a chip all the
+     * way round must not leave a staged change that rewrites the option for nothing. The
+     * `-` line in the diff still shows the file's own spelling.
+     */
+    private fun stageNormalised(
+        path: String,
+        saved: String,
+        value: String,
+        normalise: (String) -> String,
+    ) {
+        if (normalise(value) == normalise(saved)) staged.remove(path)
+        else staged[path] = saved to value
+    }
+
     fun stageList(path: String, saved: List<String>, values: List<String>) {
         if (values == saved) stagedLists.remove(path) else stagedLists[path] = saved to values
     }
@@ -169,6 +200,7 @@ class LanStore(private val session: RouterSession) {
         deletions.clear()
         resvDrafts.clear()
         vlanDrafts.clear()
+        swVlanDrafts.clear()
         error = null
     }
 
@@ -450,9 +482,11 @@ class LanStore(private val session: RouterSession) {
             if (index >= 0) vlanDrafts[index] = vlanDrafts[index].copy(ports = updated)
         } else if (row.section != null) {
             val savedPorts = vlans.firstOrNull { it.section == row.section }?.ports.orEmpty()
+            // Sorted on both sides for the same reason the swconfig map is normalised: a
+            // round trip through the chips must come back to "nothing staged".
             stageList(
                 "network.${row.section}.ports",
-                savedPorts.map { it.token() },
+                savedPorts.map { it.token() }.sorted(),
                 updated.map { it.token() },
             )
         }
@@ -483,6 +517,191 @@ class LanStore(private val session: RouterSession) {
             "VLAN ${row.vlan} carries ${net?.device} — the LAN interface itself sits on it."
         else -> null
     }
+
+    // ---- swconfig VLANs ----
+
+    /** The chip this screen edits. Boards with two switches are rare; the first is the one. */
+    val switchDev: SwitchDev? get() = swDevs.firstOrNull()
+
+    /** Sockets on the chip, CPU port excluded — those are the ones a cable goes into. */
+    fun switchSockets(): List<Int> {
+        val dev = switchDev ?: return emptyList()
+        val count = if (dev.ports > 0) dev.ports else 6
+        return (0 until count).filter { it != dev.cpuPort }
+    }
+
+    /**
+     * The VLAN the LAN rides on a swconfig board.
+     *
+     * Not `network.lan.device` — that is `br-lan`. The VLAN is named by the bridge's member,
+     * `eth0.1`, so the search goes through the bridge's port list as well as the interface's
+     * own device and the legacy `ifname`.
+     */
+    val lanSwVlan: Int?
+        get() {
+            val device = net?.device.orEmpty()
+            device.substringAfter('.', "").toIntOrNull()?.let { return it }
+            val members = buildList {
+                // A `config device` bridge lists its members in `ports`.
+                networkUci.entries.filter { it.value == "device" && it.key.count { c -> c == '.' } == 1 }
+                    .forEach { (key, _) ->
+                        val section = key.substringAfter('.')
+                        if (networkUci["network.$section.name"] == device) {
+                            addAll(Parsers.uciList(networkUci["network.$section.ports"].orEmpty())
+                                .flatMap { it.split(' ') })
+                        }
+                    }
+                // Pre-bridge configs put the members straight on the interface.
+                addAll(Parsers.uciList(networkUci["network.${section}.ifname"].orEmpty())
+                    .flatMap { it.split(' ') })
+            }
+            return members.mapNotNull { it.substringAfter('.', "").toIntOrNull() }.firstOrNull()
+        }
+
+    /** True when the chip is in VLAN mode at all; adding VLANs does nothing while it is off. */
+    val vlanModeOn: Boolean
+        get() {
+            val switchSection = networkUci.entries
+                .firstOrNull { it.value == "switch" && it.key.count { c -> c == '.' } == 1 }
+                ?.key?.substringAfter('.') ?: return true
+            val value = value(
+                "network.$switchSection.enable_vlan",
+                networkUci["network.$switchSection.enable_vlan"].orEmpty(),
+            )
+            // Absent means the driver default, which is on for every board that ships VLANs.
+            return value != "0"
+        }
+
+    fun swVlanRows(): List<SwVlanRow> {
+        val saved = swVlans.map { vlan ->
+            val path = "network.${vlan.section}"
+            SwVlanRow(
+                key = path,
+                section = vlan.section,
+                draftId = null,
+                device = vlan.device,
+                vlan = vlan.vlan,
+                ports = Parsers.swPorts(value("$path.ports", vlan.ports)),
+                isNew = false,
+                changed = "$path.ports" in staged,
+                deleting = path in deletions,
+            )
+        }
+        val drafts = swVlanDrafts.map { draft ->
+            SwVlanRow(
+                key = "swdraft:${draft.id}",
+                section = null,
+                draftId = draft.id,
+                device = draft.device,
+                vlan = draft.vlan,
+                ports = draft.ports,
+                isNew = true,
+                changed = true,
+                deleting = false,
+            )
+        }
+        return (saved + drafts).sortedBy { it.vlan }
+    }
+
+    fun swStateOf(row: SwVlanRow, port: Int): PortState {
+        val entry = row.ports.firstOrNull { it.port == port } ?: return PortState.Off
+        return if (entry.tagged) PortState.Tagged else PortState.Untagged
+    }
+
+    /** Off → untagged → tagged → off, the same cycle the DSA matrix uses. */
+    fun cycleSwPort(row: SwVlanRow, port: Int) {
+        val next = when (swStateOf(row, port)) {
+            PortState.Off -> PortState.Untagged
+            PortState.Untagged -> PortState.Tagged
+            PortState.Tagged -> PortState.Off
+        }
+        setSwPort(row, port, next)
+    }
+
+    fun setSwPort(row: SwVlanRow, port: Int, state: PortState) {
+        val without = row.ports.filterNot { it.port == port }
+        val updated = when (state) {
+            PortState.Off -> without
+            PortState.Untagged -> without + SwPort(port, tagged = false)
+            PortState.Tagged -> without + SwPort(port, tagged = true)
+        }.sortedBy { it.port }
+        if (row.draftId != null) {
+            val index = swVlanDrafts.indexOfFirst { it.id == row.draftId }
+            if (index >= 0) swVlanDrafts[index] = swVlanDrafts[index].copy(ports = updated)
+        } else if (row.section != null) {
+            val savedPorts = swVlans.firstOrNull { it.section == row.section }?.ports.orEmpty()
+            stageNormalised(
+                "network.${row.section}.ports",
+                savedPorts,
+                Parsers.swPortsValue(updated),
+            ) { Parsers.swPortsValue(Parsers.swPorts(it)) }
+        }
+    }
+
+    /**
+     * Stages a new swconfig VLAN with the CPU port already tagged in it.
+     *
+     * Without the CPU port the router cannot see the VLAN at all, so the app puts it there
+     * rather than leaving the user to discover that by locking a socket into a VLAN nothing
+     * can reach.
+     */
+    fun addSwVlan(vlan: Int): SwVlanDraft {
+        val dev = switchDev
+        val cpu = dev?.cpuPort
+        // A VLAN added while the chip is not in VLAN mode does nothing at all. Turning the
+        // mode on is staged alongside, so it shows in the diff rather than happening quietly
+        // or being left as a puzzle.
+        if (!vlanModeOn) {
+            networkUci.entries
+                .firstOrNull { it.value == "switch" && it.key.count { c -> c == '.' } == 1 }
+                ?.key?.substringAfter('.')
+                ?.let { switchSection ->
+                    stage(
+                        "network.$switchSection.enable_vlan",
+                        networkUci["network.$switchSection.enable_vlan"].orEmpty(),
+                        "1",
+                    )
+                }
+        }
+        val draft = SwVlanDraft(
+            id = nextDraftId++,
+            device = dev?.name ?: swVlans.firstOrNull()?.device ?: "switch0",
+            vlan = vlan,
+            ports = if (cpu != null) listOf(SwPort(cpu, tagged = true)) else emptyList(),
+        )
+        swVlanDrafts.add(draft)
+        return draft
+    }
+
+    fun removeSwVlanDraft(id: Int) = swVlanDrafts.removeAll { it.id == id }
+
+    fun freeSwVlanId(): Int {
+        val taken = (swVlans.map { it.vlan } + swVlanDrafts.map { it.vlan }).toSet()
+        return (1..4094).firstOrNull { it !in taken } ?: 4094
+    }
+
+    /**
+     * Why a swconfig VLAN cannot be deleted from its row: the LAN rides one of them, and
+     * removing it takes the netdev the router's own address sits on.
+     */
+    fun swVlanDeleteBlock(row: SwVlanRow): String? = when {
+        row.draftId != null -> null
+        row.vlan == lanSwVlan ->
+            "VLAN ${row.vlan} carries ${net?.device} through ${lanMember()} — the LAN itself is on it."
+        else -> null
+    }
+
+    /** `eth0.1` — the bridge member that ties the LAN to its VLAN, for the refusal's wording. */
+    private fun lanMember(): String {
+        val vlan = lanSwVlan ?: return "the LAN bridge"
+        val base = swVlans.firstOrNull()?.device?.let { if (it.startsWith("switch")) "eth0" else it }
+        return "${base ?: "eth0"}.$vlan"
+    }
+
+    /** Whether a socket is up right now — the only way to tell which number is which case hole. */
+    fun socketUp(port: Int): Boolean = switchDev?.links?.get(port)?.up == true
+
+    fun socketSpeed(port: Int): Int? = switchDev?.links?.get(port)?.speedMbps
 
     /** Devices seen on a VLAN's netdev, for the row's "N clients". */
     fun clientsOn(netdev: String): Int =
@@ -537,6 +756,15 @@ class LanStore(private val session: RouterSession) {
                 "set dhcp.$name.$option='${Commands.escapeValue(value)}'"
             }
         }
+        val newSwVlans = swVlanDrafts.flatMap { draft ->
+            val name = swVlanSection(draft)
+            listOf(
+                "set network.$name=switch_vlan",
+                "set network.$name.device='${draft.device}'",
+                "set network.$name.vlan='${draft.vlan}'",
+                "set network.$name.ports='${Parsers.swPortsValue(draft.ports)}'",
+            )
+        }
         val newVlans = vlanDrafts.flatMap { draft ->
             val name = vlanSection(draft)
             listOf(
@@ -547,8 +775,11 @@ class LanStore(private val session: RouterSession) {
                 // A brand new list has nothing to delete first.
                 .filterNot { it.startsWith("delete ") }
         }
-        return scalars + lists + removals + newReservations + newVlans
+        return scalars + lists + removals + newReservations + newVlans + newSwVlans
     }
+
+    private fun swVlanSection(draft: SwVlanDraft): String =
+        WifiStore.free("swvlan${draft.vlan}", swVlans.map { it.section }.toSet())
 
     private fun resvOptions(draft: ResvDraft): List<Pair<String, String>> = buildList {
         if (draft.name.isNotEmpty()) add("name" to draft.name)
@@ -579,6 +810,13 @@ class LanStore(private val session: RouterSession) {
             val name = resvSection(draft)
             add("+ dhcp.$name=host" to true)
             resvOptions(draft).forEach { (option, value) -> add("+ dhcp.$name.$option='$value'" to true) }
+        }
+        swVlanDrafts.forEach { draft ->
+            val name = swVlanSection(draft)
+            add("+ network.$name=switch_vlan" to true)
+            add("+ network.$name.device='${draft.device}'" to true)
+            add("+ network.$name.vlan='${draft.vlan}'" to true)
+            add("+ network.$name.ports='${Parsers.swPortsValue(draft.ports)}'" to true)
         }
         vlanDrafts.forEach { draft ->
             val name = vlanSection(draft)
@@ -638,6 +876,7 @@ class LanStore(private val session: RouterSession) {
         addAll(dhcpProblems())
         addAll(reservationProblems())
         addAll(vlanProblems())
+        addAll(swVlanProblems())
     }
 
     private fun subnetProblems(): List<String> = buildList {
@@ -721,6 +960,69 @@ class LanStore(private val session: RouterSession) {
         }
     }
 
+    /**
+     * What a swconfig port map has to satisfy before it can be applied.
+     *
+     * These are the mistakes that take a board off the network with nothing left to fix it
+     * from, which is why the matrix was read-only until now.
+     */
+    private fun swVlanProblems(): List<String> = buildList {
+        val rows = swVlanRows().filterNot { it.deleting }
+        if (rows.isEmpty()) return@buildList
+        val cpu = switchDev?.cpuPort
+        rows.forEach { row ->
+            if (row.vlan !in 1..4094) add("VLAN ${row.vlan} is outside the 1-4094 the standard allows.")
+            if (row.ports.isEmpty()) add("VLAN ${row.vlan} has no ports, so it does nothing.")
+            // The CPU port is the wire to the router itself. A VLAN without it exists only
+            // between the sockets; the router cannot see it, so nothing can route or serve
+            // DHCP on it.
+            if (cpu != null && rows.size > 1 && row.ports.none { it.port == cpu }) {
+                add(
+                    "VLAN ${row.vlan} does not include the CPU port ($cpu) — the router itself " +
+                        "cannot see that VLAN, so nothing on it reaches the internet."
+                )
+            }
+            if (cpu != null && rows.size > 1 && row.ports.any { it.port == cpu && !it.tagged }) {
+                add(
+                    "With more than one VLAN the CPU port has to be tagged (${cpu}t), or the " +
+                        "router cannot tell the VLANs apart."
+                )
+            }
+        }
+        // A socket can only be untagged in one VLAN: that is what its ingress VLAN is.
+        rows.flatMap { row -> row.ports.filterNot { it.tagged }.map { it.port to row.vlan } }
+            .groupBy({ it.first }, { it.second })
+            .filter { it.value.size > 1 }
+            .forEach { (port, vlans) ->
+                add("Port $port is untagged in VLAN ${vlans.joinToString(" and ")} — it can only be untagged in one.")
+            }
+        lanSwVlan?.let { lanVlan ->
+            val lanRow = rows.firstOrNull { it.vlan == lanVlan }
+            if (lanRow == null) {
+                add(
+                    "VLAN $lanVlan carries the LAN, and this change removes it. The router's " +
+                        "own address goes with it."
+                )
+            } else if (cpu != null && lanRow.ports.none { it.port == cpu }) {
+                add(
+                    "VLAN $lanVlan carries the LAN. Without the CPU port the router drops off " +
+                        "its own network, including this app."
+                )
+            }
+        }
+        if (!vlanModeOn && rows.size > 1) {
+            add("VLAN mode is off on ${switchDev?.name ?: "the switch"}, so these VLANs would do nothing.")
+        }
+    }
+
+    /**
+     * True when the chip did not say which port is the CPU.
+     *
+     * Every guard about the CPU port depends on knowing which one it is, so when the chip
+     * will not say, the screen says that instead of implying the checks ran.
+     */
+    val cpuPortUnknown: Boolean get() = switchDev != null && switchDev?.cpuPort == null
+
     private fun vlanProblems(): List<String> = buildList {
         val rows = vlanRows().filterNot { it.deleting }
         rows.groupBy { it.device to it.vlan }
@@ -801,6 +1103,50 @@ class LanStore(private val session: RouterSession) {
             add(
                 "${resv.name.ifBlank { resv.mac }} goes back to a pool address at its next renewal, " +
                     "so ${resv.ip} stops being where it answers."
+            )
+        }
+        val swTouched = staged.keys.any { key ->
+            swVlans.any { key == "network.${it.section}.ports" }
+        } || swVlanDrafts.isNotEmpty()
+        if (swTouched) {
+            val up = switchSockets().filter { socketUp(it) }
+            add(
+                "Switch port numbers are the chip's, not the case's. Right now " +
+                    (if (up.isEmpty()) "no socket has a link" else "port ${up.joinToString(" and ")} " +
+                        "${if (up.size == 1) "has" else "have"} a link") +
+                    " — plug a cable in and re-read this screen to tell which number is which hole."
+            )
+            // Only ports this change strands. A board can have ports that were never in any
+            // VLAN — port 6 on the Atheros AR8337 in the reference router is up and in none —
+            // and warning about those every time would bury the one that matters.
+            val wasMember = { port: Int ->
+                swVlans.any { vlan -> Parsers.swPorts(vlan.ports).any { it.port == port } }
+            }
+            val orphaned = switchSockets().filter { port ->
+                wasMember(port) &&
+                    swVlanRows().filterNot { it.deleting }.none { row -> row.ports.any { it.port == port } }
+            }
+            if (orphaned.isNotEmpty()) {
+                add(
+                    "Port ${orphaned.joinToString(", ")} would be in no VLAN at all. A socket in " +
+                        "no VLAN is dead — nothing plugged into it reaches anything."
+                )
+            }
+        }
+        if (swTouched && cpuPortUnknown) {
+            add(
+                "${switchDev?.name ?: "The switch"} did not report which port is the CPU, so " +
+                    "the app cannot warn you about removing it. A VLAN missing the CPU port is " +
+                    "invisible to the router — usually the tagged one in the existing list."
+            )
+        }
+        if (swVlanDrafts.isNotEmpty()) {
+            // The reason someone splits a swconfig VLAN in the first place.
+            add(
+                "A new VLAN is a socket separated from the others, and nothing more. To make it " +
+                    "an internet uplink it still needs an interface on " +
+                    "${lanMember().substringBefore('.')}.${swVlanDrafts.first().vlan} and a place " +
+                    "in the firewall's wan zone — neither of which this screen writes yet."
             )
         }
         if (stagedLists.keys.any { it.startsWith("network.") && it.endsWith(".ports") } ||
@@ -912,6 +1258,27 @@ data class ResvRow(
     val name: String,
     val mac: String,
     val ip: String,
+    val isNew: Boolean,
+    val changed: Boolean,
+    val deleting: Boolean,
+)
+
+/** A swconfig VLAN staged onto the chip. */
+data class SwVlanDraft(
+    val id: Int,
+    val device: String,
+    val vlan: Int,
+    val ports: List<SwPort>,
+)
+
+/** One row of the swconfig VLAN matrix. */
+data class SwVlanRow(
+    val key: String,
+    val section: String?,
+    val draftId: Int?,
+    val device: String,
+    val vlan: Int,
+    val ports: List<SwPort>,
     val isNew: Boolean,
     val changed: Boolean,
     val deleting: Boolean,

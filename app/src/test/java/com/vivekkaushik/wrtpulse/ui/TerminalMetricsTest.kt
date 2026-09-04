@@ -66,3 +66,32 @@ class TerminalMetricsTest {
         assertTrue("chrome is at its floor", chromeHeight(0f, false) > 120.dp - MIN_OUTPUT)
     }
 }
+
+/**
+ * The sparkline was drawn upside down: `y = v / maxY * h` puts zero at the TOP of a canvas
+ * whose y grows downward, so every rising series sloped downhill — the CPU and RAM gauges on
+ * the dashboard included.
+ */
+class SparklineTest {
+
+    @Test
+    fun `a bigger value is drawn higher`() {
+        val low = com.vivekkaushik.wrtpulse.ui.sparkY(10f, 100f, 100f)
+        val high = com.vivekkaushik.wrtpulse.ui.sparkY(90f, 100f, 100f)
+        assertTrue("higher value must have the smaller y", high < low)
+    }
+
+    @Test
+    fun `zero sits on the floor and the ceiling touches the top`() {
+        assertEquals(100f, com.vivekkaushik.wrtpulse.ui.sparkY(0f, 100f, 100f), 0.01f)
+        assertEquals(0f, com.vivekkaushik.wrtpulse.ui.sparkY(100f, 100f, 100f), 0.01f)
+        assertEquals(50f, com.vivekkaushik.wrtpulse.ui.sparkY(50f, 100f, 100f), 0.01f)
+    }
+
+    /** A series past its ceiling clamps to the box instead of drawing outside it. */
+    @Test
+    fun `values outside the range clamp to the edges`() {
+        assertEquals(0f, com.vivekkaushik.wrtpulse.ui.sparkY(400f, 18f, 100f), 0.01f)
+        assertEquals(100f, com.vivekkaushik.wrtpulse.ui.sparkY(-5f, 18f, 100f), 0.01f)
+    }
+}

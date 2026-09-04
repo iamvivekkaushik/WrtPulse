@@ -38,6 +38,7 @@ import com.vivekkaushik.wrtpulse.data.BackupStore
 import com.vivekkaushik.wrtpulse.data.FirmwareStore
 import com.vivekkaushik.wrtpulse.data.Inventory
 import com.vivekkaushik.wrtpulse.data.LanStore
+import com.vivekkaushik.wrtpulse.data.WanStore
 import com.vivekkaushik.wrtpulse.data.LiveLogs
 import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.PackageStore
@@ -145,6 +146,7 @@ private fun WrtPulseApp() {
     val inventory = remember(session) { session?.let { Inventory(it) } }
     val wifiStore = remember(session) { session?.let { WifiStore(it) } }
     val lanStore = remember(session) { session?.let { LanStore(it) } }
+    val wanStore = remember(session) { session?.let { WanStore(it) } }
     val termSessions = remember(session) { session?.let { TerminalSessions(it, scope) } }
     val routerOps = remember(session) { session?.let { RouterOps(it) } }
     val liveLogs = remember(session) { session?.let { LiveLogs(it) } }
@@ -379,6 +381,8 @@ private fun WrtPulseApp() {
                                     ticker = ticker,
                                     store = wifiStore,
                                     lan = lanStore,
+                                    wan = wanStore,
+                                    live = telemetry,
                                     liveLatencyMs = telemetry?.latencyMs,
                                     routerName = currentRouter,
                                     pendingCount = wifiStore?.pendingCount ?: pendingChanges,

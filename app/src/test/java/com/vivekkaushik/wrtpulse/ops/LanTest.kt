@@ -611,3 +611,99 @@ class LanCommandTest {
         assertEquals("it'\\''s", Commands.escapeValue("it's"))
     }
 }
+
+/**
+ * `swconfig list` plus `help` and `show` for one chip, in the shape [Commands.SWCONFIG]
+ * assembles them. Shaped after the TP-Link Deco M4R, whose VLAN 1 is `ports '3 5 0t'` — so
+ * port 0 is the CPU on that board, which is exactly why the app asks rather than assuming.
+ */
+internal val SWCONFIG_OUT = """
+    Found: switch0 - mdio.0
+    # switch0
+    switch0: mdio.0(MediaTek MT7530 V1), ports: 6 (cpu @ 0), vlans: 4095
+         --switch
+    	Attribute 1 (int): enable_vlan (Enable VLAN mode)
+         --port
+    	Attribute 1 (int): pvid (Primary VLAN ID)
+    Global attributes:
+    	enable_vlan: 1
+    Port 0:
+    	pvid: 1
+    	link: port:0 link:up speed:1000baseT full-duplex
+    Port 3:
+    	pvid: 1
+    	link: port:3 link:up speed:1000baseT full-duplex
+    Port 4:
+    	pvid: 1
+    	link: port:4 link:down
+    Port 5:
+    	pvid: 1
+    	link: port:5 link:down
+    VLAN 1:
+    	vid: 1
+    	ports: 3 5 0t
+""".trimIndent()
+
+class SwconfigParseTest {
+
+    private val dev = Parsers.switchDevs(SWCONFIG_OUT).single()
+
+    @Test
+    fun `the header carries the port count and the cpu port`() {
+        assertEquals("switch0", dev.name)
+        assertEquals(6, dev.ports)
+        assertEquals(0, dev.cpuPort)
+        assertTrue(dev.model.contains("MT7530"))
+    }
+
+    /** On a swconfig board this is the ONLY place a socket's link state exists. */
+    @Test
+    fun `per-port link state comes off show`() {
+        assertTrue(dev.links.getValue(3).up)
+        assertEquals(1000, dev.links.getValue(3).speedMbps)
+        assertTrue(dev.links.getValue(3).duplex)
+        assertFalse(dev.links.getValue(5).up)
+        assertNull(dev.links.getValue(5).speedMbps)
+    }
+
+    @Test
+    fun `the live vlan membership is read alongside the config`() {
+        assertEquals("3 5 0t", dev.liveVlans[1])
+    }
+
+    @Test
+    fun `a board with no swconfig reports no chips`() {
+        assertEquals(emptyList<SwitchDev>(), Parsers.switchDevs(""))
+    }
+
+    /** A bare number is untagged, a trailing t is tagged, and the pair round-trips. */
+    @Test
+    fun `port tokens parse and render back`() {
+        val ports = Parsers.swPorts("3 5 0t")
+        assertEquals(listOf(3, 5, 0), ports.map { it.port })
+        assertEquals(listOf(false, false, true), ports.map { it.tagged })
+        assertEquals("0t 3 5", Parsers.swPortsValue(ports))
+    }
+
+    @Test
+    fun `junk between the numbers is ignored`() {
+        assertEquals(listOf(1, 2), Parsers.swPorts("  1   2  ").map { it.port })
+        assertEquals(emptyList<SwPort>(), Parsers.swPorts(""))
+    }
+
+    /** The chip that will not say which port is the CPU still parses. */
+    @Test
+    fun `a header without a cpu port is still a switch`() {
+        val quiet = Parsers.switchDevs(
+            """
+            # switch0
+            switch0: eth0(Generic), ports: 5, vlans: 16
+            Port 1:
+            	link: port:1 link:up speed:100baseT full-duplex
+            """.trimIndent()
+        ).single()
+        assertEquals(5, quiet.ports)
+        assertNull(quiet.cpuPort)
+        assertEquals(100, quiet.links.getValue(1).speedMbps)
+    }
+}
