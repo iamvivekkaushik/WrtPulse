@@ -127,7 +127,7 @@ Run the unit tests:
 ./gradlew testDebugUnitTest
 ```
 
-549 JVM tests, mostly over `ops/` — real command output captured from a router, parsed and
+562 JVM tests, mostly over `ops/` — real command output captured from a router, parsed and
 pinned. Where an outside authority exists it is used: key fingerprints are checked against
 `ssh-keygen -lf` rather than against the app's own maths.
 
@@ -137,9 +137,10 @@ SSH is JSch with BouncyCastle, which Android needs for ed25519.
 ## Not done yet
 
 Scheduled tasks is a placeholder on the System screen. Factory reset is drawn but inert. On
-the LAN screen every read is verified against real routers and every write is staged, shown as
-a diff and reverted — the apply itself has not been run on live hardware, so the subnet move
-and the VLAN port matrix are built and gated but unproven end to end. The
+the LAN screen the reads and the subnet move are verified against a real router — a router was
+moved from 192.168.1.1 to 192.168.0.1 through it, taking the session with it as designed, and
+the saved entry followed. The VLAN port matrix is built and gated but has not been applied to
+live hardware, and swconfig boards are read-only by design. The
 restore has been built and gated but not yet run end to end on a live router — everything up
 to and including the router's `tar -tzf` listing has. The firmware flash itself has been built and gated but not yet run end to end
 on a live router — everything up to and including `sysupgrade -T` has.

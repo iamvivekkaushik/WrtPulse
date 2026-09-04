@@ -26,6 +26,24 @@ class ConnectGateTest {
         assertNull(OnboardingFlow.connectBlock("192.168.1.1"))
     }
 
+    /**
+     * A rename has to survive reconnecting. The row was rewritten with the router's hostname
+     * on every connect, so renaming a router and then reconnecting — which is exactly what a
+     * subnet move forces you to do — put the old name straight back.
+     */
+    @Test
+    fun `a saved name is not overwritten by the hostname`() {
+        assertEquals("Deco", OnboardingFlow.savedName("Deco", "OpenWrt"))
+        assertEquals("Deco", OnboardingFlow.savedName("  Deco  ", "OpenWrt"))
+    }
+
+    @Test
+    fun `a router with nothing saved takes the derived name`() {
+        assertEquals("OpenWrt", OnboardingFlow.savedName(null, "OpenWrt"))
+        assertEquals("OpenWrt", OnboardingFlow.savedName("", "OpenWrt"))
+        assertEquals("OpenWrt", OnboardingFlow.savedName("   ", "OpenWrt"))
+    }
+
     @Test
     fun `the address is still required`() {
         assertNotNull(OnboardingFlow.connectBlock(""))

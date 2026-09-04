@@ -171,7 +171,7 @@ class OnboardingFlow(
             dao.upsert(
                 RouterEntity(
                     id = existing?.id ?: 0,
-                    name = routerName,
+                    name = savedName(existing?.name, routerName),
                     host = t.host,
                     port = t.port,
                     username = t.username,
@@ -221,6 +221,19 @@ class OnboardingFlow(
     }
 
     companion object {
+
+        /**
+         * The name to write for a router that is already saved.
+         *
+         * A name the user typed is theirs; the hostname is only a starting suggestion for a
+         * router nothing is saved for yet. This used to write the derived name every time,
+         * so reconnecting silently undid a rename — most visibly after a subnet move, where
+         * reconnecting is the only way back in. The cost of the rule is a name that stays
+         * behind if the router's hostname later changes, which the router list's Edit action
+         * fixes in two taps; an overwritten rename could not be fixed at all.
+         */
+        fun savedName(existing: String?, derived: String): String =
+            existing?.trim()?.takeIf { it.isNotEmpty() } ?: derived
 
         /**
          * Why Connect cannot proceed, or null.
