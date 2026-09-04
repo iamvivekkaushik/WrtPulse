@@ -550,7 +550,7 @@ private fun ExpandedClientCard(
 }
 
 @Composable
-private fun WrtInputDialog(
+fun WrtInputDialog(
     title: String,
     label: String,
     initial: String,

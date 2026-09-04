@@ -656,4 +656,177 @@ class InterfaceRowTest {
         val plain = store().apply { addDraft(listOf("radio0"), "ap", "IoT", "psk2", "hunter22") }
         assertFalse(plain.ops().any { it.contains(".isolate") })
     }
+
+    // ---- swipe-to-delete (design screen 3e) ----
+    // These use the class's own store()/ap() fixtures. Adding a second "radio0" instead of
+    // replacing the fixture's one made radioEnabled() find the enabled copy first, which is
+    // how the radio-off case first passed for the wrong reason.
+
+    private fun sta(section: String, device: String, ssid: String, network: String, disabled: Boolean) =
+        com.vivekkaushik.wrtpulse.ops.WifiNetwork(
+            section, device, ssid, "psk2", "hunter22", disabled, "sta", network, false, false,
+        )
+
+    @Test
+    fun `a staged delete becomes a uci delete and counts as pending`() {
+        val s = store()
+        s.networks.add(ap("wrtpulse", "radio0", "WrtPulse", disabled = true))
+        s.stageDelete("wrtpulse")
+        assertEquals(listOf("delete wireless.wrtpulse"), s.ops())
+        assertEquals(1, s.pendingCount)
+    }
+
+    @Test
+    fun `staging the same delete twice still deletes once`() {
+        val s = store()
+        s.networks.add(ap("wrtpulse", "radio0", "WrtPulse", disabled = true))
+        s.stageDelete("wrtpulse")
+        s.stageDelete("wrtpulse")
+        assertEquals(1, s.ops().size)
+    }
+
+    @Test
+    fun `a delete can be undone in place`() {
+        val s = store()
+        s.networks.add(ap("wrtpulse", "radio0", "WrtPulse", disabled = true))
+        s.stageDelete("wrtpulse")
+        assertTrue(s.isDeleting("wrtpulse"))
+        s.undoDelete("wrtpulse")
+        assertFalse(s.isDeleting("wrtpulse"))
+        assertEquals(0, s.pendingCount)
+        assertTrue(s.ops().isEmpty())
+    }
+
+    /** Setting an option on a section the same batch is about to delete is noise. */
+    @Test
+    fun `edits to a deleted section never reach the batch`() {
+        val s = store()
+        s.networks.add(ap("wrtpulse", "radio0", "WrtPulse", disabled = true))
+        s.stage("wrtpulse", "ssid", "WrtPulse", "Renamed")
+        s.stageDelete("wrtpulse")
+        assertEquals(listOf("delete wireless.wrtpulse"), s.ops())
+        assertTrue(s.diffLines().none { it.first.contains("Renamed") })
+    }
+
+    @Test
+    fun `the review sheet shows a delete as a removal`() {
+        val s = store()
+        s.networks.add(ap("wrtpulse", "radio0", "WrtPulse", disabled = true))
+        s.stageDelete("wrtpulse")
+        assertEquals(listOf("- wrtpulse=wifi-iface" to false), s.diffLines())
+    }
+
+    @Test
+    fun `revert drops staged deletes with everything else`() {
+        val s = store()
+        s.networks.add(ap("wrtpulse", "radio0", "WrtPulse", disabled = true))
+        s.stageDelete("wrtpulse")
+        s.revert()
+        assertEquals(0, s.pendingCount)
+        assertTrue(s.ops().isEmpty())
+    }
+
+    /**
+     * Every saved interface is swipeable, on the air or not — a deliberate departure from
+     * design screen 3e. The protection is that the swipe only STAGES, and the review sheet
+     * names the cost; see the deletionNotes tests below.
+     */
+    @Test
+    fun `every saved interface offers the swipe`() {
+        val off = store().apply { networks.add(ap("a", "radio0", "Off", disabled = true)) }
+        assertTrue(off.interfaceRows().single().deletable)
+
+        val live = store().apply { networks.add(ap("a", "radio0", "Live", disabled = false)) }
+        assertTrue(live.interfaceRows().single().deletable)
+    }
+
+    @Test
+    fun `an unsaved draft is not swipe-deletable`() {
+        val s = store()
+        s.addDraft(listOf("radio0"), "ap", "Guest", "psk2", "guestpass")
+        val draft = s.interfaceRows().single { it.isNew }
+        assertFalse(draft.deletable)
+    }
+
+    /** Deleting a live AP costs its clients the network, so the sheet has to say so. */
+    @Test
+    fun `deleting an on-air access point warns that clients lose it`() {
+        val s = store()
+        s.networks.add(ap("default_radio0", "radio0", "OpenWrt", disabled = false))
+        s.stageDelete("default_radio0")
+        val note = s.deletionNotes().single()
+        assertTrue(note.contains("OpenWrt"))
+        assertTrue(note.contains("on the air"))
+        assertTrue(note.contains("this phone"))
+    }
+
+    /** The uplink is the one deletion that takes the router's own internet with it. */
+    @Test
+    fun `deleting the uplink warns about losing the router's internet`() {
+        val s = store()
+        s.networks.add(sta("wwan_2", "radio0", "VivekWifi_5G", "wwan", false))
+        s.stageDelete("wwan_2")
+        val notes = s.deletionNotes()
+        assertTrue(notes.any { it.contains("upstream link") && it.contains("internet") })
+        // and still the orphaned network stanza
+        assertTrue(notes.any { it.contains("network.wwan") })
+    }
+
+    @Test
+    fun `a switched-off interface gets no on-air warning`() {
+        val s = store()
+        s.networks.add(ap("wrtpulse", "radio0", "WrtPulse", disabled = true))
+        s.stageDelete("wrtpulse")
+        assertTrue(s.deletionNotes().none { it.contains("on the air") })
+    }
+
+    /** An enabled interface whose radio is off is not on the air, and is not described as such. */
+    @Test
+    fun `an interface on a switched-off radio is not called on-air`() {
+        val s = store()
+        s.radios[0] = com.vivekkaushik.wrtpulse.ops.WifiRadio("radio0", "2.4G", "11", "HT40", true)
+        s.networks.add(ap("wrtpulse", "radio0", "WrtPulse", disabled = false))
+        s.stageDelete("wrtpulse")
+        assertTrue(s.interfaceRows().single().deletable)
+        assertTrue(s.deletionNotes().none { it.contains("on the air") })
+    }
+
+    @Test
+    fun `the row reports it is being deleted so the list can mark it`() {
+        val s = store()
+        s.networks.add(ap("wrtpulse", "radio0", "WrtPulse", disabled = true))
+        s.stageDelete("wrtpulse")
+        assertTrue(s.interfaceRows().single().deleting)
+    }
+
+    /** A wifi-iface delete does not take the network stanza it pointed at. */
+    @Test
+    fun `deleting a client interface warns about the uplink it leaves behind`() {
+        val s = store()
+        s.networks.add(sta("wifinet2", "radio0", "VivekWifi", "wwan", true))
+        s.stageDelete("wifinet2")
+        val note = s.deletionNotes().single()
+        assertTrue(note.contains("network.wwan"))
+        assertTrue(note.contains("firewall"))
+    }
+
+    /**
+     * A switched-off uplink is not carrying anything, so it must not claim that deleting it
+     * takes the router offline — that warning is reserved for one that is actually up.
+     */
+    @Test
+    fun `a switched-off uplink does not claim to be carrying the internet`() {
+        val s = store()
+        s.networks.add(sta("wifinet2", "radio0", "VivekWifi", "wwan", true))
+        s.stageDelete("wifinet2")
+        assertTrue(s.deletionNotes().none { it.contains("upstream link") })
+    }
+
+    @Test
+    fun `deleting a switched-off AP has nothing to warn about`() {
+        val s = store()
+        s.networks.add(ap("wrtpulse", "radio0", "WrtPulse", disabled = true))
+        s.stageDelete("wrtpulse")
+        assertTrue(s.deletionNotes().isEmpty())
+    }
 }

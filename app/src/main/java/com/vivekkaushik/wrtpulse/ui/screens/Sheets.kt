@@ -264,6 +264,20 @@ fun DiffSheetContent(
                 style = sans(12f, 400, Wrt.AmberText, lineHeight = 18.sp),
             )
         }
+        store?.deletionNotes()?.forEach { note ->
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp)
+                    .border(1.dp, Wrt.Amber.copy(alpha = 0.4f), RoundedCornerShape(11.dp))
+                    .background(Wrt.Amber.copy(alpha = 0.06f), RoundedCornerShape(11.dp))
+                    .padding(horizontal = 13.dp, vertical = 11.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(WrtIcons.Warning, null, Modifier.padding(top = 1.dp).size(16.dp), tint = Wrt.Amber)
+                Text(note, style = sans(12f, 400, Wrt.AmberText, lineHeight = 18.sp))
+            }
+        }
         // A change the router would reject must not reach the Apply button.
         val problems = store?.problems().orEmpty()
         problems.forEach { problem ->

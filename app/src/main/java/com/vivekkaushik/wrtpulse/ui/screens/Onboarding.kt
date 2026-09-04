@@ -164,6 +164,13 @@ fun OnboardingConnectScreen(
                 keyboard = KeyboardType.Password,
                 isPassword = true,
             )
+            Text(
+                // A freshly flashed OpenWrt has no root password, which is precisely when
+                // someone is adding it to this app.
+                "Leave blank if root has no password yet — that is how OpenWrt ships.",
+                style = sans(10.5f, 400, Wrt.TextDim),
+                modifier = Modifier.padding(top = 7.dp, start = 2.dp),
+            )
             if (flow.error != null) {
                 Spacer(Modifier.height(14.dp))
                 ErrorCard(flow.error!!)

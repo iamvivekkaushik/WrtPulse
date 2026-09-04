@@ -56,9 +56,25 @@ data class InterfaceRow(
     val radioOn: Boolean,
     val changed: Boolean,
     val detail: String,
+    /** Staged for `uci delete` — shown in place, still undoable, applied with everything else. */
+    val deleting: Boolean = false,
+
 ) {
     /** What actually reaches the air. */
     val onAir: Boolean get() = enabled && radioOn
+
+    /**
+     * Whether the row offers swipe-to-delete: any interface the router has saved, on the air
+     * or not.
+     *
+     * Design screen 3e restricts the swipe to disabled interfaces; this is a deliberate
+     * departure on the user's call. Nothing is lost on the spot — the swipe stages a
+     * `uci delete` that shows up in the review sheet with [WifiStore.deletionNotes] spelling
+     * out what a live network costs, and Revert drops it. Unsaved drafts stay out: they have
+     * nothing on the router to delete, and the editor already discards them.
+     */
+    val deletable: Boolean get() = section != null
+
 }
 
 /**
@@ -73,6 +89,13 @@ class WifiStore(private val session: RouterSession) {
 
     /** "section.option" → (saved value, staged value). */
     val staged = mutableStateMapOf<String, Pair<String, String>>()
+
+    /**
+     * Sections staged for `uci delete`. Deletion is staged like every other edit rather than
+     * run on the spot, so it lands in the same review-and-apply pass — which is what design
+     * screen 3e means by "stages uci delete".
+     */
+    val deletions = mutableStateListOf<String>()
 
     /** Networks the user has drawn up but not applied. */
     val drafts = mutableStateListOf<DraftIface>()
@@ -104,7 +127,7 @@ class WifiStore(private val session: RouterSession) {
     var applying by mutableStateOf(false); private set
     var error by mutableStateOf<String?>(null)
 
-    val pendingCount: Int get() = staged.size + drafts.size
+    val pendingCount: Int get() = staged.size + drafts.size + deletions.size
 
     /** Every uci op an apply would run — what the review sheet counts. */
     val opCount: Int get() = ops().size + networkOps().size
@@ -195,6 +218,16 @@ class WifiStore(private val session: RouterSession) {
     private fun phyFor(radio: String) = "phy" + radio.filter { it.isDigit() }.ifEmpty { "0" }
 
     /** Stages one option; staging the saved value back un-stages it. */
+    fun stageDelete(section: String) {
+        if (section !in deletions) deletions.add(section)
+    }
+
+    fun undoDelete(section: String) {
+        deletions.remove(section)
+    }
+
+    fun isDeleting(section: String?): Boolean = section != null && section in deletions
+
     fun stage(section: String, option: String, saved: String, value: String) {
         val key = "$section.$option"
         if (value == saved) staged.remove(key) else staged[key] = saved to value
@@ -257,10 +290,12 @@ class WifiStore(private val session: RouterSession) {
     fun revert() {
         staged.clear()
         drafts.clear()
+        deletions.clear()
     }
 
     /** `- key='old'` / `+ key='new'` pairs for the review sheet, secrets masked. */
     fun diffLines(): List<Pair<String, Boolean>> = staged.entries
+        .filterNot { it.key.substringBefore('.') in deletions }
         .sortedBy { it.key }
         .flatMap { (key, change) ->
             val (old, new) = change
@@ -271,7 +306,7 @@ class WifiStore(private val session: RouterSession) {
             ) + if (removed) emptyList() else listOf(
                 "+ $key='${if (secret) mask(new) else new}'" to true,
             )
-        } + drafts.flatMap { draft ->
+        } + deletions.sorted().map { "- $it=wifi-iface" to false } + drafts.flatMap { draft ->
             draft.devices.flatMap { device ->
                 val section = draft.sections.getValue(device)
                 listOf("+ $section=wifi-iface" to true) +
@@ -280,6 +315,44 @@ class WifiStore(private val session: RouterSession) {
                     }
             }
         }
+
+    /**
+     * What a staged delete leaves behind. Removing a `wifi-iface` does not remove the
+     * `network.<name>` interface it pointed at, nor its firewall zone membership. For a
+     * client interface that is a whole uplink stanza orphaned, so the sheet says so instead
+     * of the app silently reaching into two more config files.
+     */
+    fun deletionNotes(): List<String> = deletions.sorted().flatMap { section ->
+        val net = networks.firstOrNull { it.section == section } ?: return@flatMap emptyList()
+        val live = !net.disabled && radioEnabled(net.device)
+        val uplink = net.isClient && zoneFor(net.network) == "wan"
+        buildList {
+            // A live interface can be deleted, so the review sheet is where the cost gets
+            // stated. Most severe first, and only one severity line per section.
+            // An uplink only carries the internet while it is actually up: claiming a
+            // switched-off one would take the router offline is simply false.
+            if (uplink && live) {
+                add(
+                    "$section is this router's upstream link. Deleting it takes the router's " +
+                        "internet with it, and everything behind the router loses access."
+                )
+            } else if (live && !net.isClient) {
+                add(
+                    "${net.ssid.ifBlank { section }} is on the air. Deleting it removes the " +
+                        "network and its clients lose it — including this phone, if it is on " +
+                        "that SSID."
+                )
+            } else if (live) {
+                add("$section is connected right now. Deleting it drops that link.")
+            }
+            if (net.isClient) {
+                add(
+                    "Deleting $section leaves network.${net.network} and its firewall zone " +
+                        "behind — remove those by hand if nothing else uses them."
+                )
+            }
+        }
+    }
 
     /** A draft's options for one radio, in the order they are written. */
     private fun draftOptions(draft: DraftIface, device: String): List<Pair<String, String>> = buildList {
@@ -294,6 +367,9 @@ class WifiStore(private val session: RouterSession) {
     }
 
     fun ops(): List<String> = staged.entries
+        // An option set on a section that is about to be deleted is noise at best. The
+        // delete supersedes it, so it never reaches the batch.
+        .filterNot { it.key.substringBefore('.') in deletions }
         .sortedBy { it.key }
         .map { (key, change) ->
             // Switching a network to open leaves the old passphrase sitting in the config
@@ -301,6 +377,7 @@ class WifiStore(private val session: RouterSession) {
             if (key.endsWith(".key") && change.second.isEmpty()) "delete wireless.$key"
             else "set wireless.$key='${escape(change.second)}'"
         } +
+        deletions.sorted().map { "delete wireless.$it" } +
         drafts.flatMap { draft ->
             draft.devices.flatMap { device ->
                 val section = draft.sections.getValue(device)
@@ -406,6 +483,7 @@ class WifiStore(private val session: RouterSession) {
                 enabled = enabled,
                 radioOn = radioOn,
                 changed = changedIn(net.section),
+                deleting = net.section in deletions,
                 detail = when {
                     // The radio being off outranks everything else this row could say: the
                     // network is configured and nothing is on the air.
@@ -494,6 +572,7 @@ class WifiStore(private val session: RouterSession) {
             session.exec(script, timeoutMs = 60_000).requireOk("uci batch")
             staged.clear()
             drafts.clear()
+            deletions.clear()
             load()
             true
         } catch (e: SshException) {

@@ -51,6 +51,11 @@ import com.vivekkaushik.wrtpulse.ui.WrtIcons
 import com.vivekkaushik.wrtpulse.ui.mono
 import com.vivekkaushik.wrtpulse.ui.sans
 import com.vivekkaushik.wrtpulse.ui.theme.Wrt
+import androidx.compose.ui.window.Dialog
+import com.vivekkaushik.wrtpulse.ui.SwipeToReveal
+import com.vivekkaushik.wrtpulse.ui.PrimaryButton
+import com.vivekkaushik.wrtpulse.ui.GhostButton
+import com.vivekkaushik.wrtpulse.ui.RevealAction
 
 /** "just now", "4 min ago", "3 h ago", "2 d ago" */
 fun agoLabel(epoch: Long, nowEpoch: Long = System.currentTimeMillis() / 1000): String {
@@ -112,7 +117,11 @@ fun RouterListScreen(
     onOpenRouter: (Router) -> Unit,
     onOpenSaved: (RouterEntity) -> Unit,
     onAdd: () -> Unit,
+    onDelete: (RouterEntity) -> Unit = {},
+    onRename: (RouterEntity, String) -> Unit = { _, _ -> },
 ) {
+    var confirmDelete by remember { mutableStateOf<RouterEntity?>(null) }
+    var renaming by remember { mutableStateOf<RouterEntity?>(null) }
     var filter by remember { mutableIntStateOf(0) }
     val filters = listOf("All", "Home", "Office", "Parents")
     var searching by remember { mutableStateOf(false) }
@@ -185,10 +194,20 @@ fun RouterListScreen(
             ) {
                 if (saved != null && shownSaved != null) {
                     shownSaved.forEach { e ->
-                        RouterCard(
-                            e.asRouter(connectedHost, connectingHost),
-                            onClick = { onOpenSaved(e) },
-                        )
+                        SwipeToReveal(
+                            actions = listOf(
+                                RevealAction("Rename", WrtIcons.Pencil, Wrt.Accent) { renaming = e },
+                                RevealAction("Delete", WrtIcons.Trash, Wrt.Red) { confirmDelete = e },
+                            ),
+                            resetKey = e.id,
+                            corner = 14.dp,
+                        ) { swipe ->
+                            RouterCard(
+                                e.asRouter(connectedHost, connectingHost),
+                                onClick = { onOpenSaved(e) },
+                                modifier = swipe,
+                            )
+                        }
                     }
                     if (saved.isEmpty()) {
                         Text(
@@ -215,6 +234,28 @@ fun RouterListScreen(
                 }
                 Spacer(Modifier.height(90.dp))
             }
+        }
+        renaming?.let { entity ->
+            WrtInputDialog(
+                title = "Rename router",
+                label = "NAME",
+                initial = entity.name,
+                confirmLabel = "Save name",
+                onDismiss = { renaming = null },
+                onConfirm = { value ->
+                    renaming = null
+                    // A blank name would leave a card with nothing to identify it by.
+                    routerName(value)?.let { onRename(entity, it) }
+                },
+            )
+        }
+        confirmDelete?.let { entity ->
+            ForgetRouterDialog(
+                entity = entity,
+                connectedHost = connectedHost,
+                onDismiss = { confirmDelete = null },
+                onConfirm = { onDelete(entity); confirmDelete = null },
+            )
         }
         // FAB
         Box(
@@ -265,8 +306,37 @@ private fun SearchBar(query: String, onQuery: (String) -> Unit, onClose: () -> U
     }
 }
 
+/**
+ * A typed router name, or null when there is nothing usable in it.
+ *
+ * The name is the only thing identifying a card once several routers are saved, so a blank
+ * one is refused rather than accepted and rendered as an empty row.
+ */
+internal fun routerName(input: String): String? =
+    input.trim().take(48).ifBlank { null }
+
+/**
+ * What forgetting a saved router costs, beyond the row itself.
+ *
+ * Deleting the entry is local — it never touches the router — so the things worth saying are
+ * the ones the app cannot undo for you: a key it installed stays installed, and a live
+ * session outlives its entry.
+ */
+internal fun forgetRouterNotes(entity: RouterEntity, connectedHost: String?): List<String> = buildList {
+    if (entity.privateKey != null) {
+        add(
+            "The app's SSH key stays in this router's authorized_keys. Remove it from " +
+                "System · SSH keys first if you want it gone."
+        )
+    }
+    if (connectedHost != null && connectedHost == entity.host) {
+        add("You are connected to this router now. The session stays open, but the saved entry goes.")
+    }
+    add("Its saved password or key is deleted from this phone. Nothing changes on the router.")
+}
+
 @Composable
-private fun RouterCard(r: Router, onClick: () -> Unit) {
+private fun RouterCard(r: Router, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val offline = r.status == RouterStatus.Offline
     val borderColor = when {
         r.status == RouterStatus.Online -> Wrt.Accent.copy(alpha = 0.4f)
@@ -280,7 +350,7 @@ private fun RouterCard(r: Router, onClick: () -> Unit) {
         RouterStatus.Saved -> Quad(Wrt.TextTertiary, "saved", false, 0)
     }
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
             .border(1.dp, borderColor, RoundedCornerShape(14.dp))
             .background(if (offline) Wrt.BgCardDim else Wrt.BgCard, RoundedCornerShape(14.dp))
@@ -324,3 +394,41 @@ private fun RouterCard(r: Router, onClick: () -> Unit) {
 }
 
 private data class Quad(val c: Color, val s: String, val p: Boolean, val ms: Int)
+
+/** Forgetting a router is local and reversible only by adding it again, so it is confirmed. */
+@Composable
+private fun ForgetRouterDialog(
+    entity: RouterEntity,
+    connectedHost: String?,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .border(1.dp, Wrt.BorderCard, RoundedCornerShape(16.dp))
+                .background(Wrt.BgBar, RoundedCornerShape(16.dp))
+                .padding(18.dp)
+        ) {
+            Text("Forget this router?", style = sans(15f, 650))
+            Text(
+                entity.name,
+                style = sans(12.5f, 600, Wrt.TextSecondary),
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            Text(
+                "${entity.username}@${entity.host}:${entity.port}",
+                style = mono(10.5f, 500, Wrt.TextDim),
+                modifier = Modifier.padding(top = 3.dp),
+            )
+            forgetRouterNotes(entity, connectedHost).forEach {
+                Text(it, style = sans(10.5f, 500, Wrt.AmberText), modifier = Modifier.padding(top = 10.dp))
+            }
+            Spacer(Modifier.height(16.dp))
+            PrimaryButton("Forget", color = Wrt.Red, textColor = Wrt.OnRed, onClick = onConfirm)
+            Spacer(Modifier.height(6.dp))
+            GhostButton("Cancel", border = Wrt.TextTertiary, onClick = onDismiss)
+        }
+    }
+}

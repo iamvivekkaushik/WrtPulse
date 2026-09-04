@@ -312,6 +312,17 @@ private fun WrtPulseApp() {
                         }
                     },
                     onAdd = { flow.keyPem = null; flow.password = ""; dest = Dest.Onboarding1 },
+                    onRename = { e, name ->
+                        scope.launch { runCatching { WrtRuntime.db.routers().rename(e.id, name) } }
+                        // The top bar shows the name of the router in hand, and it is not
+                        // rebuilt from the saved row, so it has to be told.
+                        if (currentRouter == e.name) currentRouter = name
+                    },
+                    onDelete = { e ->
+                        // Local only: the row and its sealed credential go, the router is
+                        // never touched. RouterList spells that out before confirming.
+                        scope.launch { runCatching { WrtRuntime.db.routers().delete(e.id) } }
+                    },
                 )
                 Dest.HostKey -> {
                     val change = flow.keyChange

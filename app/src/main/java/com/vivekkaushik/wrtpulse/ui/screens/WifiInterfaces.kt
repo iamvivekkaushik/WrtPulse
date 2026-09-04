@@ -61,6 +61,8 @@ import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.MonoTag
 import com.vivekkaushik.wrtpulse.ui.SectionLabel
 import com.vivekkaushik.wrtpulse.ui.SignalBars
+import com.vivekkaushik.wrtpulse.ui.RevealAction
+import com.vivekkaushik.wrtpulse.ui.SwipeToReveal
 import com.vivekkaushik.wrtpulse.ui.StatusDot
 import com.vivekkaushik.wrtpulse.ui.WToggle
 import com.vivekkaushik.wrtpulse.ui.WrtIcons
@@ -105,7 +107,9 @@ fun InterfacesScreen(
             }
         }
         Text(
-            "Tap to edit · long-press for UCI config",
+            if (rows.any { it.deletable || it.deleting }) {
+                "Tap to edit · long-press for UCI · swipe a network to delete"
+            } else "Tap to edit · long-press for UCI config",
             style = sans(11f, 400, Wrt.TextDim),
             modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 10.dp),
         )
@@ -139,6 +143,14 @@ fun InterfacesScreen(
     }
 }
 
+/**
+ * A row that can be swiped aside to reveal Delete, per design screen 3e.
+ *
+ * Offered for every saved interface, on the air or not. The tap stages a `uci delete` rather
+ * than running one: the row stays put, marked and undoable, and the review sheet names what
+ * a live network costs before anything is applied. Unsaved drafts render without any of
+ * this — the editor discards those.
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun InterfaceListRow(
@@ -147,8 +159,40 @@ private fun InterfaceListRow(
     onEdit: (InterfaceRow) -> Unit,
     onShowUci: (String) -> Unit,
 ) {
+    if (!row.deletable && !row.deleting) {
+        InterfaceRowBody(store, row, onEdit, onShowUci)
+        return
+    }
+    val undoing = row.deleting
+    SwipeToReveal(
+        actions = listOf(
+            RevealAction(
+                label = if (undoing) "Undo" else "Delete",
+                icon = if (undoing) WrtIcons.Reboot else WrtIcons.Trash,
+                tint = if (undoing) Wrt.Accent else Wrt.Red,
+                onAction = {
+                    row.section?.let { if (undoing) store.undoDelete(it) else store.stageDelete(it) }
+                },
+            )
+        ),
+        resetKey = row.key,
+    ) { swipe ->
+        InterfaceRowBody(store, row, onEdit, onShowUci, swipe)
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun InterfaceRowBody(
+    store: WifiStore,
+    row: InterfaceRow,
+    onEdit: (InterfaceRow) -> Unit,
+    onShowUci: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     // The uplink is the one interface the router itself depends on — it earns the accent.
     val border = when {
+        row.deleting -> Wrt.Red.copy(alpha = 0.55f)
         !row.radioOn -> Wrt.Amber.copy(alpha = 0.4f)
         row.isUplink -> Wrt.Accent.copy(alpha = 0.4f)
         row.changed -> Wrt.Accent.copy(alpha = 0.35f)
@@ -156,7 +200,7 @@ private fun InterfaceListRow(
         else -> Wrt.BorderHair
     }
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
             .border(1.dp, border, RoundedCornerShape(13.dp))
             .background(
@@ -191,6 +235,7 @@ private fun InterfaceListRow(
                 }
                 if (row.bands.isNotEmpty()) MonoTag(row.bands, size = 9f)
                 if (row.isNew) Badge("NEW", Wrt.Green)
+                if (row.deleting) Badge("WILL DELETE", Wrt.Red)
                 if (!row.radioOn) Badge("RADIO OFF", Wrt.Amber)
             }
             Text(

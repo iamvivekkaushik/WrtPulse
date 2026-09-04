@@ -44,6 +44,21 @@ import androidx.compose.ui.unit.sp
 import com.vivekkaushik.wrtpulse.ui.theme.MonoFamily
 import com.vivekkaushik.wrtpulse.ui.theme.SansFamily
 import com.vivekkaushik.wrtpulse.ui.theme.Wrt
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 
 // ---------- text style helpers ----------
 
@@ -391,6 +406,79 @@ fun ConnectionTopBar(
         trailing?.invoke()
     }
     HorizontalHairline()
+}
+
+/** One button in a [SwipeToReveal] panel. */
+data class RevealAction(
+    val label: String,
+    val icon: ImageVector,
+    val tint: Color,
+    val onAction: () -> Unit,
+)
+
+/**
+ * A row that slides aside to reveal one or more actions, per design screen 3e's 78px panel.
+ *
+ * Shared because several screens need it — wireless interfaces and the saved-router list —
+ * and the first hand-rolled copy had already drifted before the second one existed.
+ * [content] is handed the modifier that carries the offset and the drag, so the caller keeps
+ * its own border, background and click handling.
+ *
+ * The panel is laid out end-aligned, so the LAST action sits at the screen edge: put the
+ * destructive one there, which is what a full swipe reaches.
+ */
+@Composable
+fun SwipeToReveal(
+    actions: List<RevealAction>,
+    /** Changing this snaps the row shut — pass the row's identity so a list reshuffle
+     *  cannot leave a different item held open. */
+    resetKey: Any? = null,
+    /** Width of ONE action; the reveal is this times the number of actions. */
+    revealWidth: Dp = 78.dp,
+    corner: Dp = 13.dp,
+    behind: Color = Wrt.BgCardDim,
+    content: @Composable (Modifier) -> Unit,
+) {
+    if (actions.isEmpty()) {
+        content(Modifier)
+        return
+    }
+    val revealPx = with(LocalDensity.current) { (revealWidth * actions.size).toPx() }
+    var target by remember(resetKey) { mutableFloatStateOf(0f) }
+    val offset by animateFloatAsState(target, label = "reveal")
+    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(corner))) {
+        Row(
+            Modifier.matchParentSize().background(behind),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            actions.forEach { action ->
+                Column(
+                    Modifier
+                        .width(revealWidth)
+                        .fillMaxHeight()
+                        .background(action.tint.copy(alpha = 0.2f))
+                        .clickable { action.onAction(); target = 0f },
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(action.icon, null, Modifier.size(15.dp), tint = action.tint)
+                    Spacer(Modifier.height(3.dp))
+                    Text(action.label, style = sans(9f, 600, action.tint))
+                }
+            }
+        }
+        content(
+            Modifier
+                .offset { IntOffset(offset.roundToInt(), 0) }
+                .draggable(
+                    orientation = Orientation.Horizontal,
+                    state = rememberDraggableState { delta ->
+                        target = (target + delta).coerceIn(-revealPx, 0f)
+                    },
+                    onDragStopped = { target = if (target < -revealPx / 2f) -revealPx else 0f },
+                )
+        )
+    }
 }
 
 @Composable

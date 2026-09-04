@@ -67,14 +67,7 @@ class OnboardingFlow(
     fun connect(onFirstContact: () -> Unit, onConnected: () -> Unit, onKeyChanged: () -> Unit) {
         if (busy) return
         val t = target
-        if (t.host.isEmpty()) {
-            error = "Enter the router's address."
-            return
-        }
-        if (password.isEmpty() && keyPem == null) {
-            error = "Enter the password."
-            return
-        }
+        connectBlock(t.host)?.let { error = it; return }
         scope.launch {
             busy = true
             error = null
@@ -225,6 +218,20 @@ class OnboardingFlow(
                 busy = false
             }
         }
+    }
+
+    companion object {
+
+        /**
+         * Why Connect cannot proceed, or null.
+         *
+         * The address is the only thing genuinely required. An EMPTY PASSWORD is legitimate
+         * and must not be blocked: a freshly flashed OpenWrt has no root password at all, and
+         * an empty one is exactly what `ssh root@192.168.1.1` sends. Blocking it here made
+         * the app unable to reach the routers most in need of setting up.
+         */
+        fun connectBlock(host: String): String? =
+            if (host.isEmpty()) "Enter the router's address." else null
     }
 
     private fun friendly(e: SshException): String = when (e) {

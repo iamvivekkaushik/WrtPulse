@@ -31,8 +31,43 @@ data class RouterEntity(
     val lastSeenEpoch: Long,
     val privateKey: ByteArray? = null,  // sealed OpenSSH PEM; when set, key auth replaces the password
 ) {
-    override fun equals(other: Any?) = other is RouterEntity && other.id == id
-    override fun hashCode() = id.hashCode()
+    /**
+     * Compared field by field, with content equality for the sealed blobs.
+     *
+     * Both easy answers are wrong here. Generated data-class equality compares the
+     * ByteArrays by IDENTITY, so two reads of the same row never match. Comparing by `id`
+     * alone — what this used to do — fails the other way: a renamed row compares EQUAL to
+     * its old self, so `collectAsState`'s structural equality sees no change and Compose
+     * never recomposes. A rename then wrote to the database and appeared to do nothing.
+     */
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is RouterEntity) return false
+        return id == other.id &&
+            name == other.name &&
+            host == other.host &&
+            port == other.port &&
+            username == other.username &&
+            model == other.model &&
+            summary == other.summary &&
+            lastSeenEpoch == other.lastSeenEpoch &&
+            credential.contentEquals(other.credential) &&
+            privateKey.contentEquals(other.privateKey)
+    }
+
+    override fun hashCode(): Int {
+        var result = id.hashCode()
+        result = 31 * result + name.hashCode()
+        result = 31 * result + host.hashCode()
+        result = 31 * result + port
+        result = 31 * result + username.hashCode()
+        result = 31 * result + model.hashCode()
+        result = 31 * result + summary.hashCode()
+        result = 31 * result + lastSeenEpoch.hashCode()
+        result = 31 * result + (credential?.contentHashCode() ?: 0)
+        result = 31 * result + (privateKey?.contentHashCode() ?: 0)
+        return result
+    }
 }
 
 /** A user-chosen display name for a client, keyed by MAC. Local to the app. */
@@ -70,6 +105,9 @@ interface RouterDao {
 
     @Query("UPDATE routers SET lastSeenEpoch = :epoch WHERE id = :id")
     suspend fun touch(id: Long, epoch: Long)
+
+    @Query("UPDATE routers SET name = :name WHERE id = :id")
+    suspend fun rename(id: Long, name: String)
 
     @Query("DELETE FROM routers WHERE id = :id")
     suspend fun delete(id: Long)

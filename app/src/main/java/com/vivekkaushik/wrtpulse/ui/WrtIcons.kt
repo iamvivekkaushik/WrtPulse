@@ -107,6 +107,15 @@ object WrtIcons {
      * going off the bottom. [WiredDevice] is a panel with three lines on it, which reads as
      * a document long before it reads as a network cable.
      */
+    /** The swipe-to-delete panel on design screen 3e. */
+    val Trash = stroked(
+        "trash", 1.8f,
+        "M4 7h16",
+        "M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2",
+        "M6 7l1 13h10l1-13",
+        "M10 11v5", "M14 11v5",
+    )
+
     val Ethernet = stroked(
         "ethernet", 1.6f,
         // The jack, landscape — a port really is wider than tall, and the latch slot on top
