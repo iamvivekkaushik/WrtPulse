@@ -1,8 +1,11 @@
 package com.vivekkaushik.wrtpulse.data
 
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import com.vivekkaushik.wrtpulse.net.RouterSession
 import com.vivekkaushik.wrtpulse.net.SshException
 import com.vivekkaushik.wrtpulse.ops.BoardInfo
@@ -50,6 +53,30 @@ class FirmwareStore(private val session: RouterSession) {
     /** Set once sysupgrade has been launched; the session is expected to die after this. */
     var flashing by mutableStateOf(false); private set
 
+    /**
+     * Packages the user installed that the default image does not carry — what a plain
+     * flash loses. Read alongside the upgrade check, because owut is what knows.
+     */
+    var userPackages by mutableStateOf<List<String>>(emptyList()); private set
+
+    // ---- the reboot watch: screen 42 ----
+
+    /** What was running when the flash was sent, for the before → after line. */
+    var beforeBoard by mutableStateOf<BoardInfo?>(null); private set
+
+    /** What answered when the router came back; null until it has. */
+    var afterBoard by mutableStateOf<BoardInfo?>(null); private set
+
+    /** One line per connection attempt, oldest first, the way screen 42 draws the log. */
+    val watchLog = mutableStateListOf<String>()
+    var watchElapsedS by mutableIntStateOf(0); private set
+
+    /** How the watch ended: null while running, else one of the [WatchEnd] states. */
+    var watchEnd by mutableStateOf<WatchEnd?>(null); private set
+
+    /** Result of the post-flash reinstall, when one was run. */
+    var reinstallOutput by mutableStateOf<String?>(null); private set
+
     val backupDone: Boolean get() = backupFile != null
 
     suspend fun load() {
@@ -86,6 +113,11 @@ class FirmwareStore(private val session: RouterSession) {
             val out = session.exec(Commands.UPGRADE_CHECK, timeoutMs = 180_000)
             val parsed = Parsers.upgradeCheck(out.stdout + "\n" + out.stderr)
             check = parsed
+            // The names behind "N modified default packages": what a plain flash would lose.
+            progress = "Listing your packages…"
+            userPackages = runCatching {
+                Parsers.userPackages(session.exec(Commands.USER_PACKAGES, timeoutMs = 120_000).stdout)
+            }.getOrDefault(emptyList())
             checkDetail = if (!parsed.safe) {
                 progress = "Asking why…"
                 runCatching {
@@ -115,7 +147,7 @@ class FirmwareStore(private val session: RouterSession) {
     suspend fun backUp(directory: File): String {
         busy = true
         return try {
-            when (val pulled = ConfigArchive.pull(session, directory) { progress = it }) {
+            when (val pulled = ConfigArchive.pull(session, directory, board?.release) { progress = it }) {
                 is ConfigArchive.Pull.Done -> {
                     backupFile = pulled.file
                     backupWaived = false
@@ -213,6 +245,45 @@ class FirmwareStore(private val session: RouterSession) {
         }
     }
 
+    /**
+     * An image picked on the phone, pushed to the router over stdin the way a restore
+     * archive is. Judged by size before it goes — /tmp is RAM — and by `sysupgrade -T`
+     * after, which is the check that knows whether it belongs on this board.
+     */
+    suspend fun uploadLocalImage(name: String, bytes: ByteArray): String {
+        if (!looksLikeImage(name)) {
+            return "Failed: $name is not a sysupgrade image (.bin, .itb, .img or .img.gz)."
+        }
+        if (bytes.isEmpty()) return "Failed: the file is empty."
+        tooSmallToHold(bytes.size.toLong())?.let { return "Failed: $it" }
+        busy = true
+        progress = "Sending ${bytes.size / 1024 / 1024} MB to the router's RAM…"
+        return try {
+            val got = session.execWithInput(Commands.LOCAL_IMAGE_RECEIVE, bytes, timeoutMs = 600_000)
+            val size = Parsers.byteCount(got.stdout)
+            if (!got.ok || size != bytes.size.toLong()) {
+                runCatching { session.exec(Commands.discardImage(Commands.MANUAL_IMAGE), timeoutMs = 15_000) }
+                return "Failed: the router received ${size ?: 0} of ${bytes.size} bytes."
+            }
+            progress = "Hashing…"
+            val sha = Parsers.sha256(
+                session.exec(Commands.imageSha256(Commands.MANUAL_IMAGE), timeoutMs = 120_000).stdout
+            )
+            if (sha != BackupStore.sha256(bytes)) {
+                runCatching { session.exec(Commands.discardImage(Commands.MANUAL_IMAGE), timeoutMs = 15_000) }
+                return "Failed: the router's hash of the file does not match the phone's."
+            }
+            image = ImageCheck(Commands.MANUAL_IMAGE, bytes.size.toLong(), sha)
+            load()
+            "Uploaded $name · ${bytes.size / 1024 / 1024} MB · hash verified"
+        } catch (e: SshException) {
+            "Failed: ${e.message}"
+        } finally {
+            busy = false
+            progress = null
+        }
+    }
+
     /** Removes the downloaded image from the router's RAM. */
     suspend fun discardImage(): String {
         val target = image ?: return "Nothing to discard."
@@ -263,6 +334,10 @@ class FirmwareStore(private val session: RouterSession) {
         val target = image ?: return "Failed: nothing downloaded yet."
         flashBlock(backupDone, backupWaived, image, check?.safe)?.let { return "Failed: $it" }
         busy = true
+        beforeBoard = board
+        watchLog.clear()
+        watchEnd = null
+        afterBoard = null
         return try {
             session.exec(Commands.flash(target.path, keepSettings), timeoutMs = 20_000)
             flashing = true
@@ -276,6 +351,76 @@ class FirmwareStore(private val session: RouterSession) {
             }
         } finally {
             busy = false
+        }
+    }
+
+    /**
+     * Waits for the router to come back, then says what came back.
+     *
+     * Retries the connection until [BoardInfo] answers, logging each attempt with the
+     * elapsed time, and gives up after [WATCH_LIMIT_S] without calling that a failure — the
+     * router may still be flashing, and the one thing never to do then is power it off.
+     * A changed or unknown host key ends the watch: that is the wiped-settings case, and the
+     * router-list first-contact flow is where it continues.
+     */
+    suspend fun watchReboot() {
+        if (watchEnd != null || !flashing) return
+        val started = System.currentTimeMillis()
+        // Nothing answers for the first while — sysupgrade is writing flash — so the first
+        // attempt waits rather than burning a connect timeout on a router mid-write.
+        delay(WATCH_FIRST_WAIT_MS)
+        while (watchEnd == null) {
+            val elapsed = ((System.currentTimeMillis() - started) / 1000).toInt()
+            watchElapsedS = elapsed
+            val host = session.target.host
+            try {
+                val out = session.exec(Commands.BOARD, timeoutMs = 8_000)
+                val came = Parsers.board(out.stdout)
+                afterBoard = came
+                watchLog += watchLine(System.currentTimeMillis() / 1000, host, elapsed, answered = true)
+                watchEnd = if (came.revision.isNotEmpty() && came.revision == beforeBoard?.revision) {
+                    WatchEnd.Unchanged
+                } else {
+                    WatchEnd.Back
+                }
+                runCatching { load() }
+                return
+            } catch (e: SshException.HostKeyChanged) {
+                watchLog += watchLine(System.currentTimeMillis() / 1000, host, elapsed, answered = true)
+                watchEnd = WatchEnd.NewKey
+                return
+            } catch (e: SshException.UnknownHostKey) {
+                watchLog += watchLine(System.currentTimeMillis() / 1000, host, elapsed, answered = true)
+                watchEnd = WatchEnd.NewKey
+                return
+            } catch (e: SshException) {
+                watchLog += watchLine(System.currentTimeMillis() / 1000, host, elapsed, answered = false)
+                if (watchLog.size > WATCH_LOG_LINES) watchLog.removeAt(0)
+            }
+            if ((System.currentTimeMillis() - started) / 1000 >= WATCH_LIMIT_S) {
+                watchEnd = WatchEnd.GaveUp
+                return
+            }
+            delay(WATCH_INTERVAL_MS)
+        }
+    }
+
+    /** Puts the user's packages back on the new image. Only offered once the router is back. */
+    suspend fun reinstallPackages(): String {
+        if (userPackages.isEmpty()) return "Nothing to reinstall."
+        busy = true
+        progress = "Reinstalling ${userPackages.size} package(s)…"
+        return try {
+            val out = session.exec(Commands.reinstall(userPackages), timeoutMs = 600_000)
+            val text = (out.stdout.trim() + "\n" + out.stderr.trim()).trim()
+            reinstallOutput = text.ifBlank { null }
+            if (out.ok) "Reinstalled ${userPackages.joinToString(", ")}"
+            else "Failed: the package manager exited ${out.exitCode}"
+        } catch (e: SshException) {
+            "Failed: ${e.message}"
+        } finally {
+            busy = false
+            progress = null
         }
     }
 
@@ -298,6 +443,30 @@ class FirmwareStore(private val session: RouterSession) {
 
         const val FLASHING_MESSAGE =
             "Flashing. Do not power the router off — it will reboot on its own."
+
+        /** How long to keep trying before saying "still no answer" — not "failed". */
+        const val WATCH_LIMIT_S = 600
+        const val WATCH_INTERVAL_MS = 10_000L
+        const val WATCH_FIRST_WAIT_MS = 20_000L
+        const val WATCH_LOG_LINES = 40
+
+        /** "14:22:31 connecting to 192.168.0.1 — no answer · 23 s", the log line screen 42 draws. */
+        fun watchLine(nowEpochS: Long, host: String, elapsedS: Int, answered: Boolean): String {
+            val t = java.time.Instant.ofEpochSecond(nowEpochS).atZone(java.time.ZoneId.systemDefault())
+            val clock = "%02d:%02d:%02d".format(t.hour, t.minute, t.second)
+            return if (answered) "$clock $host answered · $elapsedS s"
+            else "$clock connecting to $host — no answer · $elapsedS s"
+        }
+
+        /** "0:43", the elapsed counter. */
+        fun elapsedLabel(seconds: Int): String = "%d:%02d".format(seconds / 60, seconds % 60)
+
+        /** The file types sysupgrade takes. Anything else is refused before it is even sent. */
+        fun looksLikeImage(name: String): Boolean {
+            val lower = name.lowercase()
+            return lower.endsWith(".bin") || lower.endsWith(".itb") ||
+                lower.endsWith(".img") || lower.endsWith(".img.gz")
+        }
 
         /**
          * The first gate that is not met, or null when the flash may be offered.
@@ -363,4 +532,16 @@ class FirmwareStore(private val session: RouterSession) {
                 )
             }
     }
+}
+
+/** How the reboot watch finished. */
+enum class WatchEnd {
+    /** The router answered with a different revision — the upgrade landed. */
+    Back,
+    /** The router answered with the SAME revision. Said in red, not as success. */
+    Unchanged,
+    /** It answered with a key the app does not know: settings were wiped; continue from the router list. */
+    NewKey,
+    /** Nothing answered inside the limit. The router may still be flashing. */
+    GaveUp,
 }

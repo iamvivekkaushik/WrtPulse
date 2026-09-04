@@ -37,6 +37,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import com.vivekkaushik.wrtpulse.data.BackupStore
 import com.vivekkaushik.wrtpulse.data.LocalBackup
@@ -45,7 +46,9 @@ import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.GhostButton
 import com.vivekkaushik.wrtpulse.ui.MonoTag
 import com.vivekkaushik.wrtpulse.ui.PrimaryButton
+import com.vivekkaushik.wrtpulse.ui.RevealAction
 import com.vivekkaushik.wrtpulse.ui.SectionLabel
+import com.vivekkaushik.wrtpulse.ui.SwipeToReveal
 import com.vivekkaushik.wrtpulse.ui.WrtIcons
 import com.vivekkaushik.wrtpulse.ui.mono
 import com.vivekkaushik.wrtpulse.ui.sans
@@ -69,12 +72,16 @@ fun BackupScreen(
     store: BackupStore?,
     latencyMs: Int,
     onBack: () -> Unit,
+    /** The "snapshot before every Apply" switch — persisted by the app, not the store. */
+    onAutoBackup: (Boolean) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     // Keyed by section: a result belongs next to the button that caused it.
     var result by remember { mutableStateOf<Pair<Int, String>?>(null) }
     var showFiles by remember { mutableStateOf(false) }
+    var addingPath by remember { mutableStateOf(false) }
+    var showCommand by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf<LocalBackup?>(null) }
 
@@ -119,6 +126,7 @@ fun BackupScreen(
                     .padding(horizontal = 8.dp, vertical = 3.dp),
             )
         }
+
         if (store == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("Connect to a router to manage backups.", style = sans(12f, 500, Wrt.TextDim))
@@ -137,53 +145,116 @@ fun BackupScreen(
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            RouterCard(store, showFiles) { showFiles = !showFiles }
-
-            SectionLabel("BACK UP", tracking = 0.14)
+            // The design assumes one router; this app has several, so the identity gets a line
+            // of its own above the card, which stays exactly as drawn.
+            Text(
+                listOfNotNull(
+                    store.board?.hostname?.ifBlank { null } ?: store.host,
+                    store.board?.release?.ifBlank { null },
+                    store.lastBackup?.let { "last backup ${BackupStore.ageLabel(it.createdEpoch)}" },
+                ).joinToString(" · "),
+                style = mono(9.5f, 500, Wrt.TextDim),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            // Design 38's order: back up, what it holds, what is already here, the switch.
             Card {
-                Text(
-                    "sysupgrade writes the archive to the router's RAM; the app reads it back and " +
-                        "keeps it here, in its private storage. It holds the router's passwords and " +
-                        "SSH host keys, so it only leaves this phone when you share it.",
-                    style = sans(11f, 500, Wrt.TextSecondary),
-                )
-                Spacer(Modifier.height(8.dp))
-                CodeLine("sysupgrade -b ${Commands.BACKUP_FILE}")
-                Spacer(Modifier.height(10.dp))
-                PrimaryButton(if (store.busy) "Working…" else "Back up now") {
-                    if (!store.busy) scope.launch { result = 1 to store.backUp() }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Back up now", style = sans(13.5f, 650))
+                        Text(
+                            "Pulled to this phone over SSH, then removed from the router",
+                            style = sans(10.5f, 400, Wrt.TextSecondary, lineHeight = 15.sp),
+                            modifier = Modifier.padding(top = 3.dp),
+                        )
+                    }
+                    AccentChip(
+                        text = if (store.busy) "Working…" else "Create",
+                        busy = store.busy,
+                    ) { if (!store.busy) scope.launch { result = 1 to store.backUp() } }
                 }
+                Spacer(Modifier.height(10.dp))
+                CodeLine("sysupgrade -b ${Commands.BACKUP_FILE}") { showCommand = true }
                 ResultLine(result?.takeIf { it.first == 1 }?.second)
             }
+            // Screen 38 corrected: a backup CONTAINS the host keys — it does not exclude them.
+            NoteCard(
+                "Contains this router's SSH host keys. Kept in app-private storage; leaves the " +
+                    "phone only through a share sheet you tap."
+            )
 
-            SectionLabel("ON THIS PHONE", tracking = 0.14)
-            if (store.local.isEmpty()) {
-                Card {
+            SectionLabel("WHAT'S INCLUDED — SYSUPGRADE -L", tracking = 0.14)
+            IncludeCard(
+                store = store,
+                showFiles = showFiles,
+                onToggleFiles = { showFiles = !showFiles },
+                onAdd = { addingPath = true },
+                onRemove = { path -> scope.launch { result = 4 to store.removeIncludePath(path) } },
+                message = result?.takeIf { it.first == 4 }?.second,
+            )
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SectionLabel("ON THIS PHONE — ALL ROUTERS", tracking = 0.14)
+                FlexSpacer()
+                DashedChip("Import file") { picker.launch(arrayOf("*/*")) }
+            }
+            // The design wraps the whole list in one card: rows divided inside it, not a
+            // card each and not floating on the page.
+            Card {
+                store.refusedImport?.let { (name, why) ->
+                    Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+                        Text(name, style = mono(11.5f, 500, Wrt.Red), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            "refused — $why",
+                            style = sans(10f, 400, Wrt.Red, lineHeight = 15.sp),
+                            modifier = Modifier.padding(top = 3.dp),
+                        )
+                    }
+                    if (store.local.isNotEmpty()) com.vivekkaushik.wrtpulse.ui.HorizontalHairline(Wrt.BorderRow)
+                }
+                if (store.local.isEmpty() && store.refusedImport == null) {
                     Text(
                         "No backups yet. The first one appears here as soon as it is taken.",
-                        style = sans(11f, 500, Wrt.TextDim),
+                        style = sans(10.5f, 500, Wrt.TextDim),
+                        modifier = Modifier.padding(vertical = 8.dp),
                     )
                 }
-            }
-            store.local.forEach { backup ->
-                BackupRow(
-                    backup = backup,
-                    otherRouter = backup.host != store.safeHost,
-                    confirmDelete = confirmDelete == backup.name,
-                    onShare = { shareBackup(context, backup.file) },
-                    onSave = { saving = backup; saver.launch(backup.name) },
-                    onRestore = { result = 3 to store.stageLocal(backup) },
-                    onDelete = {
-                        if (confirmDelete == backup.name) {
-                            result = 2 to store.delete(backup)
-                            confirmDelete = null
-                        } else {
-                            confirmDelete = backup.name
-                        }
-                    },
-                )
+                store.local.forEachIndexed { index, backup ->
+                    BackupRow(
+                        backup = backup,
+                        otherRouter = backup.host != store.safeHost,
+                        confirmDelete = confirmDelete == backup.name,
+                        onShare = { shareBackup(context, backup.file) },
+                        onSave = { saving = backup; saver.launch(backup.name) },
+                        onRestore = { result = 3 to store.stageLocal(backup) },
+                        onDelete = {
+                            if (confirmDelete == backup.name) {
+                                result = 2 to store.delete(backup)
+                                confirmDelete = null
+                            } else {
+                                confirmDelete = backup.name
+                            }
+                        },
+                    )
+                    if (index < store.local.lastIndex) {
+                        com.vivekkaushik.wrtpulse.ui.HorizontalHairline(Wrt.BorderRow)
+                    }
+                }
             }
             ResultLine(result?.takeIf { it.first == 2 }?.second)
+
+            ToggleCard {
+                ToggleRow(
+                    title = "Auto-backup before changes",
+                    body = "Snapshot to this phone before every Apply · keeps the last " +
+                        "${BackupStore.AUTO_KEEP}, oldest deleted",
+                    checked = store.autoBackup,
+                    divider = false,
+                ) { onAutoBackup(!store.autoBackup) }
+            }
 
             SectionLabel("RESTORE", color = Wrt.Red, tracking = 0.14)
             RestoreCard(
@@ -202,32 +273,104 @@ fun BackupScreen(
             Spacer(Modifier.height(12.dp))
         }
     }
+
+    // "view command": the one line on the card is a summary — this is the whole sequence.
+    SheetHost(visible = showCommand, onDismiss = { showCommand = false }) {
+        Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 22.dp)) {
+            Text("What a backup runs", style = sans(16f, 650), modifier = Modifier.padding(top = 14.dp))
+            Text(
+                "Three commands on the router, in this order. The archive is read back over the " +
+                    "same SSH channel — there is no second connection and nothing is installed.",
+                style = sans(12f, 400, Wrt.TextSecondary),
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            Spacer(Modifier.height(12.dp))
+            OutputBox(
+                listOf(
+                    "# 1. write the archive to the router's RAM",
+                    Commands.BACKUP_CREATE,
+                    "",
+                    "# 2. encode and read it back (base64, else hexdump — whichever exists)",
+                    Commands.BACKUP_READ,
+                    "",
+                    "# 3. take the router's copy away again",
+                    Commands.BACKUP_CLEANUP,
+                ).joinToString("\n"),
+                problem = false,
+            )
+            Spacer(Modifier.height(14.dp))
+            GhostButton("Close") { showCommand = false }
+        }
+    }
+
+    if (addingPath && store != null) {
+        TextEntryDialog(
+            title = "Add a path to every backup",
+            hint = "/root/scripts",
+            validate = { Commands.safeBackupPath(it) },
+            error = "An absolute path, no '..', nothing a shell would read.",
+            onDismiss = { addingPath = false },
+            onDone = { path ->
+                addingPath = false
+                scope.launch { result = 4 to store.addIncludePath(path) }
+            },
+        )
+    }
 }
 
-/** What this router is and what `sysupgrade -l` says would go into its backup. */
+/**
+ * Design 38's "what's included": sysupgrade's own list, with the user's extra paths from
+ * /etc/sysupgrade.conf editable in place. Default rows are read-only — they are what
+ * sysupgrade carries regardless — and only custom rows get the ×.
+ */
 @Composable
-private fun RouterCard(store: BackupStore, showFiles: Boolean, onToggleFiles: () -> Unit) {
+private fun IncludeCard(
+    store: BackupStore,
+    showFiles: Boolean,
+    onToggleFiles: () -> Unit,
+    onAdd: () -> Unit,
+    onRemove: (String) -> Unit,
+    message: String?,
+) {
     Card {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionLabel("THIS ROUTER", size = 9.5f, tracking = 0.14)
-            FlexSpacer()
-            MonoTag(
-                if (store.files.isEmpty()) "—" else "${store.files.size} FILES",
-                color = Wrt.TextTertiary,
-            )
-        }
-        Text(
-            listOfNotNull(store.board?.hostname?.ifBlank { null } ?: store.host, store.board?.summary?.ifBlank { null })
-                .joinToString(" · "),
-            style = sans(12.5f, 600),
-            modifier = Modifier.padding(top = 8.dp),
-        )
         Text(
             if (store.files.isEmpty() && !store.loaded) "reading…"
-            else "${store.files.size} files go into a backup: /etc/config and everything sysupgrade.conf names",
-            style = mono(10f, 500, Wrt.TextDim),
-            modifier = Modifier.padding(top = 4.dp),
+            else "${store.files.size} files · /etc/config and everything sysupgrade.conf names",
+            style = sans(11f, 600),
         )
+        Row(
+            Modifier.padding(top = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("/etc/config/*", style = mono(10.5f, 500), modifier = Modifier.weight(1f))
+            Text("default, read-only", style = mono(9.5f, 500, Wrt.TextDim))
+        }
+        store.includeList.forEach { path ->
+            Row(
+                Modifier.padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(path, style = mono(10.5f, 500), modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("custom", style = mono(9.5f, 500, Wrt.TextDim))
+                Icon(
+                    WrtIcons.Close, "remove",
+                    Modifier.size(12.dp).clickable { onRemove(path) },
+                    tint = Wrt.TextDim,
+                )
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            DashedChip("Add path", onClick = onAdd)
+            FlexSpacer()
+            Text(
+                "$ cat >> ${Commands.SYSUPGRADE_CONF}",
+                style = mono(9.5f, 500, Wrt.TextDim),
+                maxLines = 1,
+            )
+        }
         if (store.files.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
             Row(
@@ -239,7 +382,10 @@ private fun RouterCard(store: BackupStore, showFiles: Boolean, onToggleFiles: ()
                     if (showFiles) WrtIcons.ChevronUp else WrtIcons.ChevronDown,
                     null, Modifier.size(12.dp), tint = Wrt.TextTertiary,
                 )
-                Text(if (showFiles) "Hide the list" else "Show the list", style = sans(11f, 600, Wrt.TextTertiary))
+                Text(
+                    if (showFiles) "Hide the full list" else "Show the full list",
+                    style = sans(11f, 600, Wrt.TextTertiary),
+                )
                 FlexSpacer()
                 Text(Commands.BACKUP_LIST.substringBefore(" 2>"), style = mono(9.5f, 500, Wrt.TextDim))
             }
@@ -248,10 +394,15 @@ private fun RouterCard(store: BackupStore, showFiles: Boolean, onToggleFiles: ()
                 OutputBox(store.files.joinToString("\n"), problem = false)
             }
         }
+        ResultLine(message)
     }
 }
 
-/** One archive on the phone and the four things that can be done with it. */
+/**
+ * One archive on the phone, as design 38 draws it: a plain row with a divider, the name in
+ * mono and one action on the right. Share, Save copy and Delete live behind the swipe — the
+ * same place every other list in the app keeps its secondary actions.
+ */
 @Composable
 private fun BackupRow(
     backup: LocalBackup,
@@ -262,29 +413,66 @@ private fun BackupRow(
     onRestore: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Card {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Icon(WrtIcons.Backup, null, Modifier.size(18.dp), tint = Wrt.TextTertiary)
+    SwipeToReveal(
+        actions = listOf(
+            RevealAction("Share", WrtIcons.ShareUp, Wrt.TextTertiary, onShare),
+            RevealAction("Save", WrtIcons.Backup, Wrt.TextTertiary, onSave),
+            RevealAction("Delete", WrtIcons.Trash, Wrt.Red, onDelete),
+        ),
+        resetKey = backup.name,
+        revealWidth = 64.dp,
+        // The row is inside a card, so the ground it composites over is the card's.
+        base = Wrt.BgCard,
+    ) { swipe ->
+        Row(
+            swipe.fillMaxWidth().padding(vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
             Column(Modifier.weight(1f)) {
-                Text(stamp(backup.createdEpoch), style = sans(12.5f, 600))
                 Text(
-                    "${backup.name} · ${preciseBytes(backup.bytes)}",
-                    style = mono(9.5f, 500, Wrt.TextDim),
+                    backup.name,
+                    style = mono(11.5f, 500),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 2.dp),
+                )
+                Text(
+                    listOfNotNull(
+                        stamp(backup.createdEpoch),
+                        preciseBytes(backup.bytes),
+                        backup.release,
+                        backup.hostname?.let { if (otherRouter) "from $it" else it },
+                    ).joinToString(" · "),
+                    style = sans(10f, 400, if (otherRouter) Wrt.Amber else Wrt.TextDim),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 3.dp),
                 )
             }
-            if (otherRouter) MonoTag(backup.host, color = Wrt.Amber, border = Wrt.Amber.copy(alpha = 0.5f))
+            if (confirmDelete) {
+                ActionChip("Tap again to delete", color = Wrt.Red, onClick = onDelete)
+            } else {
+                ActionChip("Restore", color = Wrt.Accent, onClick = onRestore)
+            }
         }
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            ActionChip("Share", onClick = onShare)
-            ActionChip("Save copy", onClick = onSave)
-            ActionChip("Restore", color = Wrt.Accent, onClick = onRestore)
-            FlexSpacer()
-            ActionChip(if (confirmDelete) "Tap again to delete" else "Delete", color = Wrt.Red, onClick = onDelete)
-        }
+    }
+    com.vivekkaushik.wrtpulse.ui.HorizontalHairline(Wrt.BorderRow)
+}
+
+/** The design's filled action: a chip, not a full-width button. */
+@Composable
+private fun AccentChip(text: String, busy: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .background(if (busy) Wrt.BgDeep else Wrt.Accent, RoundedCornerShape(9.dp))
+            .border(1.dp, if (busy) Wrt.BorderInput else Color.Transparent, RoundedCornerShape(9.dp))
+            .clickable(enabled = !busy, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        if (busy) com.vivekkaushik.wrtpulse.ui.StatusDot(Wrt.Accent, 8.dp, pulse = true)
+        Text(text, style = sans(11.5f, 650, if (busy) Wrt.TextSecondary else Wrt.OnAccent))
     }
 }
 
@@ -292,7 +480,7 @@ private fun BackupRow(
 private fun ActionChip(text: String, color: Color = Wrt.TextSecondary, onClick: () -> Unit) {
     Text(
         text,
-        style = sans(11f, 600, color),
+        style = sans(10.5f, 600, color),
         modifier = Modifier
             .border(1.dp, color.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
             .clickable(onClick = onClick)
@@ -326,22 +514,30 @@ private fun RestoreCard(store: BackupStore, message: String?, onPick: () -> Unit
                 onClick = onPick,
             )
         } else {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Column(Modifier.weight(1f)) {
-                    Text(candidate.source, style = sans(12.5f, 600), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(
-                        "${candidate.fileCount} files · ${preciseBytes(candidate.bytes.size.toLong())} · " +
-                            "sha256 ${candidate.sha256.take(12)}…",
-                        style = mono(9.5f, 500, Wrt.DangerMono),
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                }
-                MonoTag(
-                    if (candidate.onRouter) "ON ROUTER" else "ON PHONE",
-                    color = if (candidate.onRouter) Wrt.Amber else Wrt.TextTertiary,
-                    border = if (candidate.onRouter) Wrt.Amber.copy(alpha = 0.5f) else Wrt.BorderInput,
-                )
-            }
+            Text("Restore ${candidate.source}?", style = sans(13.5f, 650), maxLines = 2, overflow = TextOverflow.Ellipsis)
+            // Design 39: the three gates as a checklist that fills in. Each is a real step with
+            // a real router answer, not a progress bar.
+            Spacer(Modifier.height(10.dp))
+            GateLine(
+                done = true,
+                text = "Phone read the archive · ${candidate.fileCount} files" +
+                    (candidate.hostname?.let { " · $it" } ?: ""),
+            )
+            GateLine(
+                done = candidate.onRouter,
+                text = if (candidate.onRouter) "Router received it · sha256 ${candidate.sha256.take(4)}…${candidate.sha256.takeLast(4)} matches"
+                else "Router received it · not yet sent",
+            )
+            GateLine(
+                done = candidate.routerListing != null,
+                failed = candidate.routerRefusal != null,
+                text = when {
+                    candidate.routerRefusal != null -> "Router listed it · tar refused: ${candidate.routerRefusal}"
+                    candidate.routerListing != null ->
+                        "Router listed it · tar -tzf · ${candidate.routerListing.firstOrNull() ?: ""}… · ${candidate.routerListing.size} paths"
+                    else -> "Router listed it · waits for the upload"
+                },
+            )
             val inside = listOfNotNull(
                 candidate.hostname?.let { "hostname $it" },
                 candidate.lanAddress?.let { "lan $it" },
@@ -385,13 +581,20 @@ private fun RestoreCard(store: BackupStore, message: String?, onPick: () -> Unit
             if (block != null) {
                 Text(block, style = sans(11.5f, 500, Wrt.DangerSub))
             } else {
+                // Design 39: the current config goes to the phone before anything is overwritten.
+                Text(
+                    "Current config is saved to this phone first · " +
+                        com.vivekkaushik.wrtpulse.data.ConfigArchive.fileName(store.host).substringBeforeLast('-') + "-<now>.tar.gz",
+                    style = sans(10.5f, 500, Wrt.AmberText),
+                )
+                Spacer(Modifier.height(10.dp))
                 CodeLine("${Commands.RESTORE_APPLY.substringBefore(" 2>")} && reboot")
                 Spacer(Modifier.height(10.dp))
-                HoldToConfirm("Hold to restore and reboot") {
+                HoldToConfirm("Hold to restore & reboot") {
                     scope.launch { onResult(store.restore()) }
                 }
                 Text(
-                    "Hold 3 s to confirm",
+                    "Hold 3 s to confirm · release to cancel",
                     style = sans(10f, 500, Wrt.DangerSub),
                     modifier = Modifier.padding(top = 8.dp),
                 )
@@ -444,6 +647,37 @@ private fun RestoringPanel(store: BackupStore) {
                 modifier = Modifier.padding(top = 14.dp),
             )
         }
+        store.restoreSnapshot?.let {
+            Text(
+                "The config it replaced is on this phone as ${it.name}",
+                style = mono(10f, 500, Wrt.TextDim),
+                modifier = Modifier.padding(top = 14.dp),
+            )
+        }
+    }
+}
+
+/** One gate of the restore checklist: a tick, a cross, or an empty ring. */
+@Composable
+private fun GateLine(done: Boolean, text: String, failed: Boolean = false) {
+    Row(
+        Modifier.padding(top = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        val tone = when {
+            failed -> Wrt.Red
+            done -> Wrt.Green
+            else -> Wrt.TextDim
+        }
+        Box(
+            Modifier.size(14.dp).border(1.5.dp, tone, RoundedCornerShape(50)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (done && !failed) Icon(WrtIcons.Check, null, Modifier.size(9.dp), tint = tone)
+            if (failed) Icon(WrtIcons.Close, null, Modifier.size(8.dp), tint = tone)
+        }
+        Text(text, style = mono(10f, 500, if (failed) Wrt.Red else if (done) Wrt.TextSecondary else Wrt.TextDim), maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 

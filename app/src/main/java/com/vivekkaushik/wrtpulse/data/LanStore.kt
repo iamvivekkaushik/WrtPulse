@@ -107,6 +107,13 @@ class LanStore(private val session: RouterSession) {
         get() = staged.size + stagedLists.size + deletions.size + resvDrafts.size +
             vlanDrafts.size + swVlanDrafts.size
 
+    /**
+     * Runs before the batch — the auto-backup hook. Set by the app when "snapshot before
+     * every Apply" is on; the store itself knows nothing about backups. A failure here
+     * aborts the apply, because a snapshot that silently didn't happen is not a snapshot.
+     */
+    var beforeApply: (suspend () -> Unit)? = null
+
     // -----------------------------------------------------------------------
     // Reading
     // -----------------------------------------------------------------------
@@ -1177,6 +1184,13 @@ class LanStore(private val session: RouterSession) {
         error = null
         val packages = packages()
         val moves = movesAddress
+        try {
+            beforeApply?.invoke()
+        } catch (e: SshException) {
+            error = "Snapshot before apply failed: ${e.message}"
+            applying = false
+            return false
+        }
         val target = routerIp
         val script = Commands.uciBatch(
             ops(),

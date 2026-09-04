@@ -1436,6 +1436,30 @@ object Parsers {
 
     // ── Backup & restore ──────────────────────────────────────────────────────
 
+    /**
+     * `owut list -f fs-user` → the packages the user installed beyond the default image.
+     *
+     * One name per line, sometimes with a version after whitespace; header or status lines
+     * carry a colon and are skipped. Anything that is not a package name is dropped rather
+     * than risked on a command line later.
+     */
+    fun userPackages(text: String): List<String> = text.lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && !it.startsWith("#") && !it.contains(':') }
+        // A line is "name" or "name version" and nothing else. One with anything a shell
+        // would read is not a package line, whatever its first word looks like.
+        .filter { line -> line.all { it.isLetterOrDigit() || it in "._+- ~" } && line.split(' ').size <= 2 }
+        .map { it.substringBefore(' ') }
+        .filter { Commands.safePackageName(it) }
+        .distinct()
+        .toList()
+
+    /** `/etc/sysupgrade.conf` → the extra paths, comments and blanks dropped. */
+    fun sysupgradeConf(text: String): List<String> = text.lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && !it.startsWith("#") }
+        .toList()
+
     /** `sysupgrade -l`: the absolute paths a backup would carry, one per line, sorted. */
     fun backupFileList(text: String): List<String> = text.lineSequence()
         .map { it.trim() }

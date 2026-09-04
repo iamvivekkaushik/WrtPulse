@@ -108,6 +108,13 @@ class WanStore(private val session: RouterSession) {
     val pendingCount: Int
         get() = staged.size + stagedLists.size + deviceDrafts.size + sectionDrafts.size
 
+    /**
+     * Runs before the batch — the auto-backup hook. Set by the app when "snapshot before
+     * every Apply" is on; the store itself knows nothing about backups. A failure here
+     * aborts the apply, because a snapshot that silently didn't happen is not a snapshot.
+     */
+    var beforeApply: (suspend () -> Unit)? = null
+
     // -----------------------------------------------------------------------
     // Reading
     // -----------------------------------------------------------------------
@@ -857,6 +864,7 @@ class WanStore(private val session: RouterSession) {
         rolledBack = false
         val script = Commands.wanApply(ops(), reloadCommand(), seconds)
         return try {
+            beforeApply?.invoke()
             session.exec(script, timeoutMs = 60_000).requireOk("uci batch")
             // Re-reading is the confirmation. If the link went with the change, this throws,
             // and the router puts the old config back on its own.

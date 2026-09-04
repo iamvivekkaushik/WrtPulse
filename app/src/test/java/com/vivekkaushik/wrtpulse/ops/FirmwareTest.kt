@@ -443,3 +443,97 @@ class FirmwareCommandTest {
         assertTrue(Commands.BACKUP_CLEANUP.contains("rm -f"))
     }
 }
+
+/** The pieces design screens 38-42 added: packages by name, the local image, the reboot watch. */
+class Turn7Test {
+
+    @Test
+    fun `owut's user package list is names only`() {
+        val out = """
+            Packages installed by user (fs-user):
+            wireguard-tools 1.0.20210914-1
+            map
+            vnstat 2.10-1
+            # comment
+            bad name; rm -rf /
+        """.trimIndent()
+        assertEquals(listOf("wireguard-tools", "map", "vnstat"), Parsers.userPackages(out))
+        assertEquals(emptyList<String>(), Parsers.userPackages(""))
+    }
+
+    @Test
+    fun `sysupgrade conf keeps paths and drops noise`() {
+        assertEquals(
+            listOf("/root/scripts", "/etc/firewall.user"),
+            Parsers.sysupgradeConf("# extra paths\n/root/scripts\n\n/etc/firewall.user\n"),
+        )
+    }
+
+    @Test
+    fun `reinstall uses apk where it exists and opkg otherwise, with only safe names`() {
+        val cmd = Commands.reinstall(listOf("wireguard-tools", "map", "bad;name"))
+        assertTrue(cmd.contains("apk add wireguard-tools map "))
+        assertTrue(cmd.contains("opkg install wireguard-tools map "))
+        assertFalse(cmd.contains("bad;name"))
+    }
+
+    /** The local image lands where the URL path does, so sysupgrade -T and the RAM gate cover it. */
+    @Test
+    fun `a local image is received under the manual image path`() {
+        assertTrue(Commands.LOCAL_IMAGE_RECEIVE.contains("cat > ${Commands.MANUAL_IMAGE}"))
+        assertTrue(Commands.LOCAL_IMAGE_RECEIVE.endsWith("wc -c < ${Commands.MANUAL_IMAGE}"))
+        assertTrue(Commands.safeImagePath(Commands.MANUAL_IMAGE))
+    }
+
+    @Test
+    fun `only sysupgrade image types are accepted from the phone`() {
+        assertTrue(FirmwareStore.looksLikeImage("openwrt-23.05.4-sysupgrade.bin"))
+        assertTrue(FirmwareStore.looksLikeImage("image.itb"))
+        assertTrue(FirmwareStore.looksLikeImage("disk.img.gz"))
+        assertFalse(FirmwareStore.looksLikeImage("backup.tar.gz"))
+        assertFalse(FirmwareStore.looksLikeImage("notes.txt"))
+    }
+
+    /** The include list is a quoted heredoc, so a path is never expanded, and unsafe ones never go. */
+    @Test
+    fun `writing the include list is a quoted heredoc that re-lists afterwards`() {
+        val cmd = Commands.writeSysupgradeConf(listOf("/root/scripts", "/etc/../etc/passwd", "/ok/path;rm"))
+        assertTrue(cmd.startsWith("cat > /etc/sysupgrade.conf <<'WRTPULSE_EOF'\n/root/scripts\nWRTPULSE_EOF"))
+        assertFalse(cmd.contains(".."))
+        assertFalse(cmd.contains(";rm"))
+        assertTrue(cmd.endsWith(Commands.BACKUP_LIST))
+    }
+
+    @Test
+    fun `a backup path is absolute and cannot climb`() {
+        assertTrue(Commands.safeBackupPath("/root/scripts"))
+        assertTrue(Commands.safeBackupPath("/etc/firewall.user"))
+        assertFalse(Commands.safeBackupPath("root/scripts"))
+        assertFalse(Commands.safeBackupPath("/root/../etc"))
+        assertFalse(Commands.safeBackupPath("/root/x y"))
+        assertFalse(Commands.safeBackupPath("/root/\$(id)"))
+    }
+
+    /** The log line screen 42 draws, and the elapsed counter beside it. */
+    @Test
+    fun `watch lines read as attempts with the elapsed time`() {
+        val line = FirmwareStore.watchLine(0, "192.168.0.1", 23, answered = false)
+        assertTrue(line.endsWith("connecting to 192.168.0.1 — no answer · 23 s"))
+        val back = FirmwareStore.watchLine(0, "192.168.0.1", 143, answered = true)
+        assertTrue(back.endsWith("192.168.0.1 answered · 143 s"))
+        assertEquals("0:43", FirmwareStore.elapsedLabel(43))
+        assertEquals("2:05", FirmwareStore.elapsedLabel(125))
+    }
+
+    /** Keeping the newest five: decided by the time in the name, not the filesystem. */
+    @Test
+    fun `pruning keeps the newest and ignores files that are not backups`() {
+        val dir = java.io.File(System.getProperty("java.io.tmpdir"), "wrtpulse-prune-${System.nanoTime()}")
+        val files = (1..7).map { java.io.File(dir, com.vivekkaushik.wrtpulse.data.ConfigArchive.fileName("h", 1_700_000_000L + it)) } +
+            java.io.File(dir, "notes.txt")
+        val gone = com.vivekkaushik.wrtpulse.data.BackupStore.prune(files, 5)
+        assertEquals(2, gone.size)
+        assertTrue(gone.all { it.name.endsWith("1.tar.gz") || it.name.endsWith("2.tar.gz") })
+        assertTrue(gone.none { it.name == "notes.txt" })
+    }
+}

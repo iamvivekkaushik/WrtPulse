@@ -1653,11 +1653,14 @@ internal fun NoteCard(text: String) {
             .fillMaxWidth()
             .border(1.dp, Wrt.Amber.copy(alpha = 0.4f), RoundedCornerShape(11.dp))
             .background(Wrt.Amber.copy(alpha = 0.06f), RoundedCornerShape(11.dp))
-            .padding(horizontal = 13.dp, vertical = 11.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        // Centred on the card: hanging off the first line looks like a mistake once the note
+        // runs to three or four lines, which most of them do.
+        verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Icon(WrtIcons.Warning, null, Modifier.padding(top = 1.dp).size(15.dp), tint = Wrt.Amber)
-        Text(text, style = sans(11.5f, 400, Wrt.AmberText, lineHeight = 18.sp))
+        Icon(WrtIcons.Warning, null, Modifier.size(15.dp), tint = Wrt.Amber)
+        Text(text, style = sans(11f, 400, Wrt.AmberText, lineHeight = 17.sp))
     }
 }
 
@@ -1669,11 +1672,12 @@ internal fun ProblemCard(text: String, top: androidx.compose.ui.unit.Dp = 0.dp) 
             .padding(top = top)
             .border(1.dp, Wrt.Red.copy(alpha = 0.4f), RoundedCornerShape(11.dp))
             .background(Wrt.Red.copy(alpha = 0.06f), RoundedCornerShape(11.dp))
-            .padding(horizontal = 13.dp, vertical = 11.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Icon(WrtIcons.Warning, null, Modifier.padding(top = 1.dp).size(15.dp), tint = Wrt.Red)
-        Text(text, style = sans(11.5f, 500, Wrt.Red, lineHeight = 18.sp))
+        Icon(WrtIcons.Warning, null, Modifier.size(15.dp), tint = Wrt.Red)
+        Text(text, style = sans(11f, 500, Wrt.Red, lineHeight = 17.sp))
     }
 }
 

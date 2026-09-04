@@ -369,3 +369,49 @@ class BackupAgeTest {
         )
     }
 }
+
+/**
+ * A sysupgrade backup carries /etc/config and /etc/dropbear — it does NOT carry
+ * /etc/openwrt_release, so the version an archive came from cannot be read back out of it.
+ * The app knows it at capture time and writes it alongside.
+ */
+class ArchiveReleaseTest {
+
+    private fun tempDir(): java.io.File =
+        java.io.File(System.getProperty("java.io.tmpdir"), "wrtpulse-rel-${System.nanoTime()}").apply { mkdirs() }
+
+    @Test
+    fun `the release is written beside the archive and read back`() {
+        val dir = tempDir()
+        val archive = java.io.File(dir, ConfigArchive.fileName("192.168.0.1", 1_788_542_312))
+        archive.writeBytes(byteArrayOf(1, 2, 3))
+        assertNull(ConfigArchive.releaseOf(archive))
+
+        ConfigArchive.releaseFile(archive).writeText("OpenWrt 25.12.5")
+        assertEquals("OpenWrt 25.12.5", ConfigArchive.releaseOf(archive))
+        assertEquals(archive.name + ".release", ConfigArchive.releaseFile(archive).name)
+        dir.deleteRecursively()
+    }
+
+    /** An archive from before this existed simply has no version, which is the truth. */
+    @Test
+    fun `a blank or missing sidecar is no version at all`() {
+        val dir = tempDir()
+        val archive = java.io.File(dir, ConfigArchive.fileName("h", 1_788_542_312))
+        archive.writeBytes(byteArrayOf(1))
+        ConfigArchive.releaseFile(archive).writeText("   ")
+        assertNull(ConfigArchive.releaseOf(archive))
+        dir.deleteRecursively()
+    }
+
+    /** The sidecar is not a backup, so the pruner must never count or delete it as one. */
+    @Test
+    fun `the sidecar is not mistaken for an archive`() {
+        val dir = tempDir()
+        val files = (1..3).map { java.io.File(dir, ConfigArchive.fileName("h", 1_700_000_000L + it)) }
+        val sidecars = files.map { ConfigArchive.releaseFile(it) }
+        assertNull(ConfigArchive.parseName(sidecars.first().name))
+        assertEquals(1, BackupStore.prune(files + sidecars, 2).size)
+        dir.deleteRecursively()
+    }
+}

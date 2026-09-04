@@ -27,7 +27,27 @@ object ConfigArchive {
 
     private val NAME = Regex("^wrtpulse-(.+)-(\\d{9,11})\\.tar\\.gz$")
 
-    suspend fun pull(session: RouterSession, directory: File, onProgress: (String) -> Unit = {}): Pull = try {
+    /**
+     * The OpenWrt version an archive was taken from, alongside it.
+     *
+     * A sysupgrade backup carries `/etc/config`, `/etc/dropbear` and friends — it does NOT
+     * carry `/etc/openwrt_release`, so the version cannot be read back out of the file. The
+     * app knows it at capture time, so it writes it down then; archives taken before this
+     * simply have none, which is the truth about them.
+     */
+    fun releaseFile(archive: File): File = File(archive.parentFile, archive.name + ".release")
+
+    fun releaseOf(archive: File): String? =
+        releaseFile(archive).takeIf { it.isFile }?.let { runCatching { it.readText().trim() }.getOrNull() }
+            ?.ifBlank { null }
+
+    suspend fun pull(
+        session: RouterSession,
+        directory: File,
+        /** What `ubus call system board` said when this was taken, if the caller knows. */
+        release: String? = null,
+        onProgress: (String) -> Unit = {},
+    ): Pull = try {
         onProgress("Writing the config archive…")
         val made = session.exec(Commands.BACKUP_CREATE, timeoutMs = 120_000)
         val size = Parsers.byteCount(made.stdout)
@@ -57,6 +77,8 @@ object ConfigArchive {
                     directory.mkdirs()
                     val file = File(directory, fileName(session.target.host))
                     file.writeBytes(bytes)
+                    release?.takeIf { it.isNotBlank() }
+                        ?.let { runCatching { releaseFile(file).writeText(it) } }
                     runCatching { session.exec(Commands.BACKUP_CLEANUP, timeoutMs = 15_000) }
                     Pull.Done(file)
                 }

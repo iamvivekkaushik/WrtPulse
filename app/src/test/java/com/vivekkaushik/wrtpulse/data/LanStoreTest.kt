@@ -1005,3 +1005,62 @@ class LanStoreTest {
         assertEquals(100, s.poolStart)
     }
 }
+
+/**
+ * "Snapshot before every Apply": the hook runs first, and a snapshot that fails stops the
+ * apply — a snapshot that silently didn't happen is not a snapshot.
+ */
+class BeforeApplyHookTest {
+
+    private val unusedClient = object : com.vivekkaushik.wrtpulse.net.SshClient {
+        override suspend fun probeHostKey(target: SshTarget) = error("unused")
+        override suspend fun connect(target: SshTarget, auth: com.vivekkaushik.wrtpulse.net.SshAuth, connectTimeoutMs: Long): com.vivekkaushik.wrtpulse.net.SshConnection =
+            error("unused")
+    }
+
+    @Test
+    fun `a failed snapshot refuses the lan apply before anything reaches the router`() = kotlinx.coroutines.runBlocking {
+        val s = LanStore(RouterSession(SshTarget("192.168.1.1"), unusedClient, { error("unused") }))
+        s.ingest(
+            mapOf(
+                "net" to com.vivekkaushik.wrtpulse.ops.NETWORK_UCI,
+                "dhcp" to com.vivekkaushik.wrtpulse.ops.DHCP_UCI,
+                "live" to com.vivekkaushik.wrtpulse.ops.LAN_STATUS,
+                "leases" to "", "neigh" to "",
+                "links" to com.vivekkaushik.wrtpulse.ops.NETDEV_LINES,
+                "dnsmasq" to "running",
+            )
+        )
+        s.stagePoolLimit("120")
+        var ran = false
+        s.beforeApply = {
+            ran = true
+            throw com.vivekkaushik.wrtpulse.net.SshException.CommandFailed("sysupgrade -b", 1, "no space")
+        }
+        assertFalse(s.apply())
+        assertTrue(ran)
+        assertTrue(s.error!!.contains("Snapshot before apply failed"))
+        // The change is still staged: nothing was applied, nothing was lost.
+        assertEquals(1, s.pendingCount)
+    }
+
+    @Test
+    fun `a failed snapshot refuses the wan apply too`() = kotlinx.coroutines.runBlocking {
+        val s = WanStore(RouterSession(SshTarget("192.168.1.1"), unusedClient, { error("unused") }))
+        s.ingest(
+            mapOf(
+                "net" to com.vivekkaushik.wrtpulse.ops.WAN_NETWORK_UCI,
+                "fw" to com.vivekkaushik.wrtpulse.ops.WAN_FIREWALL_UCI,
+                "dhcp" to "",
+                "dump" to com.vivekkaushik.wrtpulse.ops.WAN_DUMP,
+                "links" to com.vivekkaushik.wrtpulse.ops.NETDEV_LINES,
+                "protos" to com.vivekkaushik.wrtpulse.ops.PROTO_LS,
+            )
+        )
+        s.stageMetric("wwan", "5")
+        s.beforeApply = { throw com.vivekkaushik.wrtpulse.net.SshException.CommandFailed("sysupgrade -b", 1, "no space") }
+        assertFalse(s.apply())
+        assertTrue(s.error!!.contains("sysupgrade -b"))
+        assertEquals(1, s.pendingCount)
+    }
+}

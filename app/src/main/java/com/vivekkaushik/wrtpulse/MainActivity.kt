@@ -160,7 +160,17 @@ private fun WrtPulseApp() {
     // Backups live in app-private storage. The store lists them on creation so the System
     // row can say when the last one was taken without the screen being opened.
     val backupStore = remember(session) { session?.let { BackupStore(it, File(context.filesDir, "backups")) } }
-    LaunchedEffect(backupStore) { backupStore?.refreshLocal() }
+    LaunchedEffect(backupStore) {
+        backupStore?.refreshLocal()
+        // "Snapshot before every Apply" (design screen 38). The preference outlives the
+        // store, which is rebuilt on every router switch; the hook is what the three staging
+        // stores call before their batch, and a failed snapshot stops the apply.
+        backupStore?.autoBackup = prefs.getBoolean("auto_backup", false)
+        val hook: (suspend () -> Unit)? = backupStore?.let { b -> { b.autoSnapshot() } }
+        wifiStore?.beforeApply = hook
+        lanStore?.beforeApply = hook
+        wanStore?.beforeApply = hook
+    }
     // The app's own public key, so the keys screen can recognise the entry it is signed in
     // with and refuse to delete it. Derived from the sealed private key, keyed on the saved
     // row so a routine lastSeen touch does not re-open the Keystore.
@@ -454,6 +464,10 @@ private fun WrtPulseApp() {
                                         store = backupStore,
                                         latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
                                         onBack = { backupOpen = false },
+                                        onAutoBackup = { on ->
+                                            backupStore?.autoBackup = on
+                                            prefs.edit().putBoolean("auto_backup", on).apply()
+                                        },
                                     )
                                 } else if (countryOpen) {
                                     CountryScreen(

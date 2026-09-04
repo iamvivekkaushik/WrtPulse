@@ -129,6 +129,13 @@ class WifiStore(private val session: RouterSession) {
 
     val pendingCount: Int get() = staged.size + drafts.size + deletions.size
 
+    /**
+     * Runs before the batch — the auto-backup hook. Set by the app when "snapshot before
+     * every Apply" is on; the store itself knows nothing about backups. A failure here
+     * aborts the apply, because a snapshot that silently didn't happen is not a snapshot.
+     */
+    var beforeApply: (suspend () -> Unit)? = null
+
     /** Every uci op an apply would run — what the review sheet counts. */
     val opCount: Int get() = ops().size + networkOps().size
 
@@ -565,6 +572,7 @@ class WifiStore(private val session: RouterSession) {
         applying = true
         error = null
         return try {
+            beforeApply?.invoke()
             val netOps = networkOps()
             val packages = listOf("wireless") + if (netOps.isEmpty()) emptyList() else listOf("network")
             val script = Commands.uciBatch(ops() + netOps, packages, reload = reload())

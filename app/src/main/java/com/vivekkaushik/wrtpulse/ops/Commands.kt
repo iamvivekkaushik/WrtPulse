@@ -518,6 +518,23 @@ object Commands {
      */
     const val UPGRADE_DOWNLOAD = "owut download 2>&1"
 
+    /**
+     * Packages the user installed that are not in the default image, by name — what a plain
+     * flash loses and what screen 42 offers to put back. owut knows because it diffs the
+     * installed set against the profile's defaults.
+     */
+    const val USER_PACKAGES = "owut list -f fs-user 2>/dev/null"
+
+    /**
+     * Puts the user's packages back after a flash. apk on 24.10+, opkg before it — same
+     * split the packages screen uses. Names are validated by [safePackageName] first.
+     */
+    fun reinstall(packages: List<String>): String {
+        val names = packages.filter { safePackageName(it) }.joinToString(" ")
+        return "if command -v apk >/dev/null 2>&1; then apk add $names 2>&1; " +
+            "else opkg update >/dev/null 2>&1; opkg install $names 2>&1; fi"
+    }
+
     /** The config archive sysupgrade itself would carry across, written where it can be read. */
     const val BACKUP_FILE = "/tmp/wrtpulse-backup.tar.gz"
 
@@ -568,12 +585,37 @@ object Commands {
     /** What goes into a backup — sysupgrade's own list, one absolute path per line. */
     const val BACKUP_LIST = "sysupgrade -l 2>/dev/null"
 
+    /**
+     * The extra paths a backup carries beyond /etc/config — the user's own additions, one
+     * per line. This is the file "Edit list" writes.
+     */
+    const val SYSUPGRADE_CONF = "/etc/sysupgrade.conf"
+    const val READ_SYSUPGRADE_CONF = "cat $SYSUPGRADE_CONF 2>/dev/null"
+
+    /**
+     * Rewrites the extra-paths list wholesale. Each line is validated by [safeBackupPath]
+     * before it gets here; the heredoc is quoted so nothing in it is expanded.
+     */
+    fun writeSysupgradeConf(paths: List<String>): String = buildString {
+        append("cat > $SYSUPGRADE_CONF <<'WRTPULSE_EOF'\n")
+        paths.filter { safeBackupPath(it) }.forEach { append(it).append('\n') }
+        append("WRTPULSE_EOF\n")
+        append("echo written; ").append(BACKUP_LIST)
+    }
+
+    /** An absolute path with no shell in it and no way to climb out of /. */
+    fun safeBackupPath(path: String): Boolean =
+        path.startsWith("/") && !path.contains("..") &&
+            Regex("^[A-Za-z0-9/._@+-]{2,200}$").matches(path)
+
     /** Everything the backup screen reads on entry, in one round trip. */
     val BACKUP_INFO: String = listOf(
         "echo $SECTION board",
         BOARD,
         "echo $SECTION files",
         BACKUP_LIST,
+        "echo $SECTION conf",
+        READ_SYSUPGRADE_CONF,
         // The archive being restored has to fit in RAM alongside everything else there.
         "echo $SECTION tmp",
         "df -k /tmp | tail -n1",
@@ -601,6 +643,14 @@ object Commands {
 
     /** Where a manually supplied image is put, so it lands under [safeImagePath] too. */
     const val MANUAL_IMAGE = "/tmp/wrtpulse-sysupgrade.bin"
+
+    /**
+     * A sysupgrade image pushed from the phone over stdin, the way a restore archive is.
+     * Lands under [MANUAL_IMAGE] so [safeImagePath] covers it and `sysupgrade -T` judges it
+     * before anything else does.
+     */
+    const val LOCAL_IMAGE_RECEIVE =
+        "rm -f $MANUAL_IMAGE; cat > $MANUAL_IMAGE && wc -c < $MANUAL_IMAGE"
 
     /** Fetches a user-supplied image and answers with the byte count actually written. */
     fun downloadImage(url: String, dest: String = MANUAL_IMAGE): String =

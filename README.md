@@ -81,15 +81,23 @@ does not configure.
 - **Services** — every init script, with whether it is running, whether it starts at boot, and
   its PID. Start, stop, restart, reload, enable, disable — each showing the exact command
   before it runs.
-- **Firmware** — attended sysupgrade through `owut`, gated: back up the config to the phone,
-  ask the upgrade server, build and download the image, let `sysupgrade -T` check it, and only
-  then offer the flash behind a three-second hold.
+- **Firmware** — attended sysupgrade through `owut`, five gates on one screen, each showing
+  its state: back up the config to the phone, ask the upgrade server (which also names the
+  packages a plain flash would lose), build and download the image — or fetch a URL, or push a
+  `.bin` from the phone — let `sysupgrade -T` check it, and only then offer the flash behind a
+  three-second hold. After the flash the screen watches for the router to come back, logging
+  every attempt, then re-reads the version and says outright if it did not change, and offers
+  to reinstall the packages it named.
 - **Backup & restore** — `sysupgrade -b` pulled onto the phone, kept in app-private storage,
-  shared or saved from there. Restore goes the other way through three gates: the phone reads
-  the archive (a real tar reader — it refuses anything that is not an OpenWrt config or that
-  climbs out of `/`), the router hashes what arrived, and the router's own `tar -t` lists it.
-  Only then is `sysupgrade -r` offered, behind a three-second hold, with the reboot after it.
-  Archives from another router are flagged by hostname and LAN address before the hold.
+  shared or saved from there; every archive on the phone is listed with the hostname inside it,
+  and ones from another router are marked. The paths a backup carries beyond `/etc/config` are
+  editable in place (`/etc/sysupgrade.conf`), and a switch takes a snapshot before every Apply
+  on the Network screens, keeping the last five. Restore goes the other way through three
+  gates drawn as a checklist: the phone reads the archive (a real tar reader — it refuses
+  anything that is not an OpenWrt config or that climbs out of `/`), the router hashes what
+  arrived, and the router's own `tar -t` lists it. The current config is saved to the phone
+  first, and only then is `sysupgrade -r` offered, behind a three-second hold, with the reboot
+  after it. Archives from another router are flagged by hostname and LAN address before the hold.
 - **Country** — the Wi-Fi regulatory domain, set across every radio at once.
 - **SSH keys** — the router's `authorized_keys` with SHA256 fingerprints, marking the entry the
   app itself is signed in with.
@@ -159,7 +167,7 @@ Run the unit tests:
 ./gradlew testDebugUnitTest
 ```
 
-661 JVM tests, mostly over `ops/` — real command output captured from a router, parsed and
+672 JVM tests, mostly over `ops/` — real command output captured from a router, parsed and
 pinned. Where an outside authority exists it is used: key fingerprints are checked against
 `ssh-keygen -lf` rather than against the app's own maths.
 
@@ -176,7 +184,8 @@ live hardware, and swconfig boards are read-only by design. On the WAN screens t
 the connection test are verified against a real router; the editors and the rollback apply are
 unit-tested but have not been run against a live uplink. The
 restore has been built and gated but not yet run end to end on a live router — everything up
-to and including the router's `tar -tzf` listing has. The firmware flash itself has been built and gated but not yet run end to end
-on a live router — everything up to and including `sysupgrade -T` has.
+to and including the router's `tar -tzf` listing has. The firmware flash itself, and the reboot
+watch after it, have been built and gated but not yet run end to end on a live router —
+everything up to and including `sysupgrade -T` has.
 
 There is no license file yet, so default copyright applies.

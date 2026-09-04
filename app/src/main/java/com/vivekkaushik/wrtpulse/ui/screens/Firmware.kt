@@ -33,7 +33,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import com.vivekkaushik.wrtpulse.data.FirmwareStore
+import com.vivekkaushik.wrtpulse.data.WatchEnd
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.vivekkaushik.wrtpulse.ops.Commands
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.GhostButton
@@ -68,9 +74,28 @@ fun FirmwareScreen(
     var sha by remember { mutableStateOf("") }
 
     LaunchedEffect(store) { if (store != null && !store.loaded) store.load() }
+    // Screen 42: once the flash is away, the screen watches for the router to come back.
+    LaunchedEffect(store?.flashing) { if (store?.flashing == true) store.watchReboot() }
+
+    // Design 40's "Flash a local file": the bytes are read off the main thread and pushed
+    // over stdin; sysupgrade -T then judges them like any other image.
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null && store != null) {
+            scope.launch {
+                val picked = withContext(Dispatchers.IO) {
+                    readDocumentBytes(context, uri, MAX_LOCAL_IMAGE_BYTES + 1)
+                }
+                result = 3 to when {
+                    picked == null -> "Failed: couldn't read that file."
+                    picked.second.size > MAX_LOCAL_IMAGE_BYTES -> "Failed: over ${MAX_LOCAL_IMAGE_BYTES / 1024 / 1024} MB — not a sysupgrade image."
+                    else -> store.uploadLocalImage(picked.first, picked.second)
+                }
+            }
+        }
+    }
 
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
-        FormTopBar("Firmware", onBack) {
+        FormTopBar("Firmware upgrade", onBack) {
             Text(
                 "$latencyMs ms",
                 style = mono(10.5f, 500, Wrt.TextTertiary),
@@ -100,12 +125,13 @@ fun FirmwareScreen(
             RunningCard(store)
             store.check?.let { CheckCard(it, store.checkDetail) }
 
-            SectionLabel("BEFORE FLASHING", tracking = 0.14)
+            SectionLabel("FIVE GATES, ONE SCREEN", tracking = 0.14)
 
             GateCard(
                 index = 1,
                 title = "Back up the configuration",
                 done = store.backupDone,
+                running = store.busy && store.progress?.contains("archive", true) == true,
                 detail = when {
                     store.backupFile != null -> store.backupFile!!.name
                     store.backupWaived -> "skipped — nothing to restore from"
@@ -132,6 +158,7 @@ fun FirmwareScreen(
                 index = 2,
                 title = "Ask the upgrade server",
                 done = store.check != null,
+                running = store.busy && store.progress?.contains("server", true) == true,
                 detail = when {
                     store.status.tool == "owut" -> "owut check"
                     store.status.hasTool -> "${store.status.tool} — not driven by this app yet"
@@ -140,6 +167,17 @@ fun FirmwareScreen(
                 warn = store.check?.safe == false,
                 message = result?.takeIf { it.first == 2 }?.second,
             ) {
+                // Design 40: the packages a plain flash would lose, by name.
+                if (store.userPackages.isNotEmpty()) {
+                    Text(
+                        "${store.userPackages.size} package${if (store.userPackages.size == 1) "" else "s"} " +
+                            "you installed are not in the default image: " +
+                            store.userPackages.joinToString(", ") +
+                            ". owut carries them into the build; reinstall after a plain flash.",
+                        style = sans(10.5f, 500, Wrt.AmberText, lineHeight = 16.sp),
+                        modifier = Modifier.padding(bottom = 10.dp),
+                    )
+                }
                 if (store.status.tool == "owut") {
                     GhostButton(if (store.check == null) "Check" else "Check again") {
                         scope.launch { result = 2 to store.runCheck() }
@@ -149,8 +187,10 @@ fun FirmwareScreen(
 
             GateCard(
                 index = 3,
-                title = "Download the image",
+                title = "Build and download",
                 done = store.image != null,
+                running = store.busy && (store.progress?.contains("ownload", true) == true ||
+                    store.progress?.contains("Sending", true) == true),
                 detail = store.image?.let { img ->
                     listOfNotNull(
                         img.path.substringAfterLast('/'),
@@ -160,14 +200,27 @@ fun FirmwareScreen(
                 } ?: "built by the server with your installed packages",
                 message = result?.takeIf { it.first == 3 }?.second,
             ) {
+                // Design 40: RAM is the gate, and the numbers are the router's.
+                store.status.tmpFreeKb?.let { free ->
+                    Text(
+                        "/tmp free ${preciseBytes(free * 1024)}" +
+                            (store.image?.sizeBytes?.let { " · image needs ${preciseBytes(it)}" } ?: ""),
+                        style = mono(9.5f, 500, Wrt.TextDim),
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
                 if (store.status.tool == "owut") {
                     PrimaryButton(if (store.image == null) "Build and download" else "Download again") {
                         scope.launch { result = 3 to store.downloadWithTool() }
                     }
                     Spacer(Modifier.height(6.dp))
                 }
+                GhostButton("Flash a local file", textColor = Wrt.TextSecondary) {
+                    picker.launch(arrayOf("*/*"))
+                }
+                Spacer(Modifier.height(6.dp))
                 if (store.image != null) {
-                    GhostButton("Discard it and free the RAM", textColor = Wrt.TextSecondary) {
+                    GhostButton("Discard image", textColor = Wrt.TextSecondary) {
                         scope.launch { result = 3 to store.discardImage() }
                     }
                     Spacer(Modifier.height(6.dp))
@@ -189,10 +242,12 @@ fun FirmwareScreen(
                 index = 4,
                 title = "Let sysupgrade check the image",
                 done = store.image?.testPassed == true,
+                running = store.busy && store.progress?.contains("sysupgrade", true) == true,
+                locked = store.image == null,
                 detail = when (store.image?.testPassed) {
                     true -> "accepted for this device"
                     false -> "refused — see below"
-                    null -> "sysupgrade -T reads the image's metadata"
+                    null -> if (store.image == null) "runs when the image lands" else "sysupgrade -T reads the image's metadata"
                 },
                 warn = store.image?.testPassed == false,
                 message = result?.takeIf { it.first == 4 }?.second,
@@ -208,7 +263,7 @@ fun FirmwareScreen(
                 }
             }
 
-            SectionLabel("FLASH", color = Wrt.Red, tracking = 0.14)
+            SectionLabel("GATE 5 · POINT OF NO RETURN", color = Wrt.Red, tracking = 0.14)
             FlashCard(store, message = result?.takeIf { it.first == 5 }?.second) {
                 result = 5 to it
             }
@@ -292,13 +347,24 @@ private fun GateCard(
     done: Boolean,
     detail: String,
     warn: Boolean = false,
+    running: Boolean = false,
+    locked: Boolean = false,
     message: String? = null,
     content: @Composable () -> Unit,
 ) {
     val accent = when {
         warn -> Wrt.Red
+        running -> Wrt.Amber
         done -> Wrt.Accent
         else -> Wrt.TextDim
+    }
+    // Design 40's state badge: every gate visible at once, each saying where it is.
+    val badge = when {
+        warn -> "BLOCKED"
+        running -> "RUNNING"
+        done -> "DONE"
+        locked -> "LOCKED"
+        else -> "WAITING"
     }
     Card {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -322,6 +388,7 @@ private fun GateCard(
                     modifier = Modifier.padding(top = 2.dp),
                 )
             }
+            MonoTag(badge, color = accent, border = accent.copy(alpha = 0.5f), size = 8f)
         }
         Spacer(Modifier.height(10.dp))
         content()
@@ -425,16 +492,35 @@ private fun FlashCard(store: FirmwareStore, message: String?, onResult: (String)
 
         Spacer(Modifier.height(12.dp))
         if (block != null) {
-            Text(block, style = sans(11.5f, 500, Wrt.DangerSub))
+            MonoTag("LOCKED", color = Wrt.DangerSub, border = Wrt.DangerSub.copy(alpha = 0.5f), size = 8f)
+            Text(block, style = sans(11.5f, 500, Wrt.DangerSub), modifier = Modifier.padding(top = 8.dp))
         } else {
+            // Design 41: the consequences, then the command, then the hold.
+            Text(
+                "Flash ${store.check?.versionTo ?: "this image"} to ${store.board?.hostname?.ifBlank { null } ?: "this router"}?",
+                style = sans(13.5f, 650),
+            )
+            listOf(
+                "Router offline about 4 minutes — every client drops.",
+                "Power loss while flashing can brick the device. Don't unplug it.",
+                if (store.keepSettings) {
+                    "Settings kept" + (store.backupFile?.let { " · backup saved to this phone as ${it.name}" } ?: "")
+                } else {
+                    "Settings wiped · router comes back at 192.168.1.1 with a new SSH key."
+                },
+            ).forEach {
+                Text(it, style = sans(11f, 500, Wrt.DangerBody), modifier = Modifier.padding(top = 7.dp))
+            }
+            Spacer(Modifier.height(10.dp))
+            Text("# runs on hold", style = mono(9.5f, 500, Wrt.DangerSub))
             val image = store.image
             if (image != null) CodeLine(Commands.flash(image.path, store.keepSettings))
             Spacer(Modifier.height(10.dp))
-            HoldToConfirm("Hold to flash") {
+            HoldToConfirm("Hold to flash firmware") {
                 scope.launch { onResult(store.flash()) }
             }
             Text(
-                "Hold 3 s to confirm",
+                "Hold 3 s to confirm · release to cancel",
                 style = sans(10f, 500, Wrt.DangerSub),
                 modifier = Modifier.padding(top = 8.dp),
             )
@@ -449,43 +535,160 @@ private fun FlashCard(store: FirmwareStore, message: String?, onResult: (String)
     }
 }
 
-/** After the command is away there is nothing to do but say so plainly. */
+/**
+ * Screen 42 — the reboot watch. The command is away and the link is gone; the panel says so,
+ * then shows every reconnection attempt until the router answers, and what it answered with.
+ */
 @Composable
 private fun FlashingPanel(store: FirmwareStore) {
+    val scope = rememberCoroutineScope()
+    var reinstall by remember { mutableStateOf<String?>(null) }
+    val end = store.watchEnd
     Column(
-        Modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Icon(WrtIcons.Firmware, null, Modifier.size(40.dp), tint = Wrt.Amber)
-        Text(
-            "Do not power the router off",
-            style = sans(16f, 700, Wrt.Amber),
-            modifier = Modifier.padding(top = 16.dp),
-        )
-        Text(
-            "sysupgrade is writing the image and will reboot on its own. This usually takes a " +
-                "few minutes. The connection has already dropped — that is expected.",
-            style = sans(12f, 500, Wrt.TextSecondary),
-            modifier = Modifier.padding(top = 10.dp),
-        )
-        store.backupFile?.let {
-            Text(
-                "Your backup is on this phone as ${it.name}",
-                style = mono(10f, 500, Wrt.TextDim),
-                modifier = Modifier.padding(top = 14.dp),
-            )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Icon(WrtIcons.Firmware, null, Modifier.size(26.dp), tint = Wrt.Amber)
+            Column {
+                Text("FLASHING — DON'T POWER OFF", style = mono(11f, 700, Wrt.Amber))
+                Text(
+                    "Writing ${store.check?.versionTo ?: "the image"}…",
+                    style = sans(15f, 650),
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
         }
-        if (!store.keepSettings) {
-            Text(
-                "Settings were discarded, so the router comes back on 192.168.1.1 with a new " +
-                    "SSH host key. Add it again from the router list.",
-                style = sans(11f, 500, Wrt.Amber),
-                modifier = Modifier.padding(top = 14.dp),
+        Text(
+            "The command is sent and the link is gone — that is expected. WrtPulse retries SSH " +
+                "every ${FirmwareStore.WATCH_INTERVAL_MS / 1000} s until " +
+                "${store.board?.hostname?.ifBlank { null } ?: "the router"} answers.",
+            style = sans(12f, 500, Wrt.TextSecondary, lineHeight = 18.sp),
+        )
+        Card {
+            val image = store.image
+            WatchStep(true, "Image on the router" + (image?.let { " · ${it.path} · ${it.sizeBytes?.let(::preciseBytes) ?: ""}" } ?: ""))
+            WatchStep(true, "sysupgrade started · SSH session closed · that is normal")
+            WatchStep(
+                done = end != null && end != WatchEnd.GaveUp,
+                text = when (end) {
+                    null -> "Waiting for the router — retrying every ${FirmwareStore.WATCH_INTERVAL_MS / 1000} s"
+                    WatchEnd.GaveUp -> "No answer after ${FirmwareStore.WATCH_LIMIT_S / 60} minutes"
+                    else -> "The router answered"
+                },
+                failed = end == WatchEnd.GaveUp,
             )
+            val before = store.beforeBoard?.let { listOf(it.release, it.revision).filter { s -> s.isNotBlank() }.joinToString(" ") } ?: "?"
+            val after = store.afterBoard?.let { listOf(it.release, it.revision).filter { s -> s.isNotBlank() }.joinToString(" ") }
+            WatchStep(
+                done = end == WatchEnd.Back,
+                failed = end == WatchEnd.Unchanged,
+                text = "Back — re-read version: $before → ${after ?: "?"}" +
+                    if (end == WatchEnd.Unchanged) " · UNCHANGED — the flash did not take" else "",
+            )
+            if (store.userPackages.isNotEmpty()) {
+                WatchStep(
+                    done = store.reinstallOutput != null,
+                    text = "Reinstall ${store.userPackages.size} packages · ${Commands.reinstall(store.userPackages).substringAfter("then ").substringBefore(" 2>&1")}",
+                )
+            }
         }
+        if (store.watchLog.isNotEmpty()) {
+            OutputBox(store.watchLog.joinToString("\n"), problem = end == WatchEnd.GaveUp)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Typical: 2–4 minutes", style = mono(10f, 500, Wrt.TextDim))
+            FlexSpacer()
+            Text("elapsed ${FirmwareStore.elapsedLabel(store.watchElapsedS)}", style = mono(10f, 600, Wrt.TextSecondary))
+        }
+        when (end) {
+            WatchEnd.Back -> {
+                NoteCard(
+                    "Back on ${store.afterBoard?.release ?: "the new image"}." +
+                        (store.backupFile?.let { " Your backup is on this phone as ${it.name}." } ?: "")
+                )
+                if (store.userPackages.isNotEmpty() && store.reinstallOutput == null) {
+                    PrimaryButton(if (store.busy) "Reinstalling…" else "Reinstall ${store.userPackages.size} packages") {
+                        if (!store.busy) scope.launch { reinstall = store.reinstallPackages() }
+                    }
+                }
+                reinstall?.let { Text(it, style = mono(10f, 500, if (it.startsWith("Failed")) Wrt.Red else Wrt.Accent)) }
+                store.reinstallOutput?.let { OutputBox(it, problem = reinstall?.startsWith("Failed") == true) }
+            }
+            WatchEnd.Unchanged -> ProblemCard(
+                "The router answered with the same version it had before. The flash did not take — " +
+                    "check the image and sysupgrade's output before trying again."
+            )
+            WatchEnd.NewKey -> NoteCard(
+                "The router is back with an SSH key this phone does not know" +
+                    (if (!store.keepSettings) " — settings were wiped, so it is at 192.168.1.1" else "") +
+                    ". Reconnect from the router list; its fingerprint is shown for you to accept."
+            )
+            WatchEnd.GaveUp -> NoteCard(
+                "No answer after ${FirmwareStore.WATCH_LIMIT_S / 60} minutes. The router may still be " +
+                    "flashing — don't power it off. Check its lights, then reconnect from the router list."
+            )
+            null -> if (!store.keepSettings) {
+                NoteCard(
+                    "Settings were discarded, so the router comes back on 192.168.1.1 with a new " +
+                        "SSH host key. The watch will stop when it sees that key."
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
     }
 }
+
+@Composable
+private fun WatchStep(done: Boolean, text: String, failed: Boolean = false) {
+    Row(
+        Modifier.padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        val tone = when {
+            failed -> Wrt.Red
+            done -> Wrt.Green
+            else -> Wrt.Amber
+        }
+        Box(
+            Modifier.size(14.dp).border(1.5.dp, tone, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (done && !failed) Icon(WrtIcons.Check, null, Modifier.size(9.dp), tint = tone)
+            if (failed) Icon(WrtIcons.Close, null, Modifier.size(8.dp), tint = tone)
+        }
+        Text(
+            text,
+            style = mono(10f, 500, if (failed) Wrt.Red else if (done) Wrt.TextSecondary else Wrt.Amber),
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** An image a phone can hold in memory; anything bigger is not a sysupgrade image. */
+private const val MAX_LOCAL_IMAGE_BYTES = 256L * 1024 * 1024
+
+/** Name and bytes of a picked document, or null. Reads at most [limit] bytes. */
+private fun readDocumentBytes(context: android.content.Context, uri: android.net.Uri, limit: Long): Pair<String, ByteArray>? =
+    runCatching {
+        val resolver = context.contentResolver
+        val name = resolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        } ?: uri.lastPathSegment ?: "image.bin"
+        val bytes = resolver.openInputStream(uri)?.use { input ->
+            val out = java.io.ByteArrayOutputStream()
+            val buffer = ByteArray(64 * 1024)
+            while (out.size() <= limit) {
+                val n = input.read(buffer)
+                if (n < 0) break
+                out.write(buffer, 0, n)
+            }
+            out.toByteArray()
+        } ?: return null
+        name to bytes
+    }.getOrNull()
 
 @Composable
 internal fun Card(border: Color = Wrt.BorderCard, content: @Composable () -> Unit) {
@@ -498,17 +701,36 @@ internal fun Card(border: Color = Wrt.BorderCard, content: @Composable () -> Uni
     ) { content() }
 }
 
-/** The app's standing promise: the command is visible before it runs. */
+/**
+ * The app's standing promise: the command is visible before it runs.
+ *
+ * The `$` is part of it — this is a shell line, and the design's screen 38 is named for the
+ * habit. [onView] adds "· view command" for the cases where the single line shown is a
+ * summary of a longer sequence.
+ */
 @Composable
-internal fun CodeLine(command: String) {
-    Box(
+internal fun CodeLine(command: String, onView: (() -> Unit)? = null) {
+    Row(
         Modifier
             .fillMaxWidth()
             .border(1.dp, Wrt.BorderHair, RoundedCornerShape(9.dp))
             .background(Wrt.BgCode, RoundedCornerShape(9.dp))
-            .padding(horizontal = 11.dp, vertical = 9.dp)
+            .padding(horizontal = 11.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(command, style = mono(9.5f, 500, Wrt.TextSecondary))
+        Text(
+            "$ " + command,
+            style = mono(9.5f, 500, Wrt.TextSecondary),
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        if (onView != null) {
+            Text(
+                "· view command",
+                style = mono(9.5f, 600, Wrt.Accent),
+                modifier = Modifier.clickable(onClick = onView),
+            )
+        }
     }
 }
 

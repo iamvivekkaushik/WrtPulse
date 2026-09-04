@@ -14,7 +14,17 @@ import java.io.File
 import java.security.MessageDigest
 
 /** A config archive kept on the phone, in the app's private storage. */
-data class LocalBackup(val file: File, val host: String, val createdEpoch: Long, val bytes: Long) {
+data class LocalBackup(
+    val file: File,
+    /** The address it was pulled from, as the filename carries it. */
+    val host: String,
+    val createdEpoch: Long,
+    val bytes: Long,
+    /** `option hostname` inside the archive — what the row shows, since addresses move. */
+    val hostname: String? = null,
+    /** `DISTRIB_RELEASE` inside the archive: which OpenWrt wrote it. */
+    val release: String? = null,
+) {
     val name: String get() = file.name
 }
 
@@ -68,6 +78,18 @@ class BackupStore(private val session: RouterSession, private val directory: Fil
     /** What `sysupgrade -l` says a backup carries. */
     var files by mutableStateOf<List<String>>(emptyList()); private set
 
+    /** The user's extra paths — `/etc/sysupgrade.conf`, which "Edit list" writes. */
+    var includeList by mutableStateOf<List<String>>(emptyList()); private set
+
+    /**
+     * Snapshot before every Apply. Held here so the stores' hook can read it; persisted by
+     * the app in its preferences, because a store is rebuilt on every router switch.
+     */
+    var autoBackup by mutableStateOf(false)
+
+    /** The safety snapshot taken just before a restore, when one was. */
+    var restoreSnapshot by mutableStateOf<File?>(null); private set
+
     /** Free RAM in /tmp, which is where a restore archive has to sit. */
     var tmpFreeKb by mutableStateOf<Long?>(null); private set
 
@@ -100,10 +122,32 @@ class BackupStore(private val session: RouterSession, private val directory: Fil
     fun refreshLocal() {
         local = (directory.listFiles() ?: emptyArray())
             .mapNotNull { f ->
-                ConfigArchive.parseName(f.name)?.let { (h, t) -> LocalBackup(f, h, t, f.length()) }
+                ConfigArchive.parseName(f.name)?.let { (h, t) ->
+                    LocalBackup(
+                        file = f,
+                        host = h,
+                        createdEpoch = t,
+                        bytes = f.length(),
+                        hostname = hostnameIn(f),
+                        // Not in the archive — written beside it when the backup was taken.
+                        release = ConfigArchive.releaseOf(f),
+                    )
+                }
             }
             .sortedByDescending { it.createdEpoch }
     }
+
+    /**
+     * The archive's own hostname and release — what each row names it by, since the address
+     * it was taken from can move. A few tens of kB to unpack, so it is read on the spot.
+     */
+    private fun hostnameIn(file: File): String? = runCatching {
+        TarArchive.open(file.readBytes())?.readText("etc/config/system")
+            ?.let { Parsers.uciFileOption(it, "system", null, "hostname") }
+    }.getOrNull()
+
+    /** The last import this screen refused, shown as a row the way design 38 draws it. */
+    var refusedImport by mutableStateOf<Pair<String, String>?>(null); private set
 
     suspend fun load() {
         refreshLocal()
@@ -113,6 +157,7 @@ class BackupStore(private val session: RouterSession, private val directory: Fil
             val sections = Parsers.sections(out.stdout)
             board = runCatching { Parsers.board(sections["board"].orEmpty()) }.getOrNull()
             files = Parsers.backupFileList(sections["files"].orEmpty())
+            includeList = Parsers.sysupgradeConf(sections["conf"].orEmpty())
             tmpFreeKb = Parsers.overlayAvailKb(sections["tmp"].orEmpty())
             error = null
             loaded = true
@@ -126,7 +171,7 @@ class BackupStore(private val session: RouterSession, private val directory: Fil
     suspend fun backUp(): String {
         busy = true
         return try {
-            when (val pulled = ConfigArchive.pull(session, directory) { progress = it }) {
+            when (val pulled = ConfigArchive.pull(session, directory, board?.release) { progress = it }) {
                 is ConfigArchive.Pull.Done -> {
                     refreshLocal()
                     "Backed up ${pulled.file.length() / 1024} kB to ${pulled.file.name}"
@@ -139,7 +184,68 @@ class BackupStore(private val session: RouterSession, private val directory: Fil
         }
     }
 
+    /**
+     * Adds a path to what a backup carries. Written on the spot — it is a text file with no
+     * service behind it — with the command shown on screen, and `sysupgrade -l` re-read so
+     * the file count is the router's answer, not an assumption.
+     */
+    suspend fun addIncludePath(path: String): String {
+        val clean = path.trim()
+        if (!Commands.safeBackupPath(clean)) {
+            return "Failed: a path has to be absolute, with no '..' and nothing a shell would read."
+        }
+        if (clean in includeList) return "Already in the list."
+        return writeIncludes(includeList + clean, "Added $clean")
+    }
+
+    suspend fun removeIncludePath(path: String): String =
+        writeIncludes(includeList - path, "Removed $path")
+
+    private suspend fun writeIncludes(paths: List<String>, done: String): String {
+        busy = true
+        return try {
+            val out = session.exec(Commands.writeSysupgradeConf(paths), timeoutMs = 30_000)
+            if (!out.ok || !out.stdout.contains("written")) {
+                "Failed: could not write ${Commands.SYSUPGRADE_CONF}."
+            } else {
+                includeList = paths
+                files = Parsers.backupFileList(out.stdout.substringAfter("written").trim())
+                done
+            }
+        } catch (e: SshException) {
+            "Failed: ${e.message}"
+        } finally {
+            busy = false
+        }
+    }
+
+    /**
+     * The before-Apply hook. Pulls a fresh archive, then keeps only the newest
+     * [AUTO_KEEP] for this router so the phone does not fill up. Throws on failure —
+     * the stores treat that as "do not apply", which is the point.
+     */
+    suspend fun autoSnapshot() {
+        if (!autoBackup) return
+        when (val pulled = ConfigArchive.pull(session, directory, board?.release) { progress = it }) {
+            is ConfigArchive.Pull.Done -> {
+                refreshLocal()
+                prune(local.filter { it.host == safeHost }.map { it.file }, AUTO_KEEP).forEach {
+                    runCatching { ConfigArchive.releaseFile(it).delete() }
+                    it.delete()
+                }
+                refreshLocal()
+                progress = null
+            }
+            is ConfigArchive.Pull.Failed -> {
+                progress = null
+                // The stores catch SshException and refuse to apply; the message is the why.
+                throw SshException.CommandFailed("sysupgrade -b", 1, pulled.why)
+            }
+        }
+    }
+
     fun delete(backup: LocalBackup): String {
+        runCatching { ConfigArchive.releaseFile(backup.file).delete() }
         val gone = backup.file.delete()
         refreshLocal()
         return if (gone) "Deleted ${backup.name}" else "Failed: couldn't delete ${backup.name}"
@@ -148,9 +254,14 @@ class BackupStore(private val session: RouterSession, private val directory: Fil
     /** Judges bytes from anywhere on the phone. Nothing here touches the router. */
     fun stage(source: String, bytes: ByteArray): String {
         val tar = when (val verdict = judge(bytes)) {
-            is Judgement.Refused -> return "Failed: ${verdict.why}"
+            is Judgement.Refused -> {
+                // Design 38 shows a refused import as a row in the list, with the reason.
+                refusedImport = source to verdict.why
+                return "Failed: ${verdict.why}"
+            }
             is Judgement.Ok -> verdict.tar
         }
+        refusedImport = null
         candidate = RestoreCandidate(
             source = source,
             bytes = bytes,
@@ -225,6 +336,18 @@ class BackupStore(private val session: RouterSession, private val directory: Fil
         val c = candidate ?: return "Failed: nothing staged."
         restoreBlock(c)?.let { return "Failed: $it" }
         busy = true
+        // Screen 39: the current config goes to the phone BEFORE anything is overwritten.
+        // If that cannot be done, the restore does not run — a restore with no way back is
+        // the one thing this screen promises never to do.
+        progress = "Saving the current config to this phone first…"
+        when (val snap = ConfigArchive.pull(session, directory, board?.release) { progress = it }) {
+            is ConfigArchive.Pull.Done -> { restoreSnapshot = snap.file; refreshLocal() }
+            is ConfigArchive.Pull.Failed -> {
+                busy = false
+                progress = null
+                return "Failed: couldn't save the current config first — ${snap.why} Nothing was restored."
+            }
+        }
         progress = "Unpacking the archive over /…"
         return try {
             val out = try {
@@ -254,6 +377,20 @@ class BackupStore(private val session: RouterSession, private val directory: Fil
 
         /** Big enough for any config backup, small enough to hold in memory twice over. */
         const val MAX_RESTORE_BYTES = 8L * 1024 * 1024
+
+        /** Auto-snapshots kept per router; older ones go so the phone does not fill up. */
+        const val AUTO_KEEP = 5
+
+        /**
+         * The files to delete so that only the newest [keep] remain. Sorted by the time in
+         * the name, not the filesystem's — the filesystem's can be wrong after a restore of
+         * the phone.
+         */
+        fun prune(files: List<File>, keep: Int): List<File> = files
+            .mapNotNull { f -> ConfigArchive.parseName(f.name)?.let { (_, t) -> t to f } }
+            .sortedByDescending { it.first }
+            .drop(keep)
+            .map { it.second }
 
         const val RESTORING_MESSAGE =
             "Restored. The router is rebooting — the connection drops now and comes back on its own."
