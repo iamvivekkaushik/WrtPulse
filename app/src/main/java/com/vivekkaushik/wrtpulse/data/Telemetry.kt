@@ -27,7 +27,18 @@ class Telemetry(private val session: RouterSession) {
     val ramSpark = mutableStateListOf<Float>().apply { repeat(SPARK) { add(0f) } }
 
     /** Round trip of the whole tick command — what the latency chip honestly measures. */
+    /**
+     * Round-trip time to the router, measured with a no-op command.
+     *
+     * This used to be the wall time of the whole batched tick, which is a different thing
+     * entirely: on a single-core router the script itself costs 450-1300 ms, so the chip read
+     * ~13x the real latency and looked like a network problem. Measured on the reference
+     * repeater: tick 520 ms median against an RTT of 40 ms.
+     */
     var latencyMs by mutableIntStateOf(0); private set
+
+    /** How long the batched tick took the router to run. Not latency — see [latencyMs]. */
+    var tickMs by mutableIntStateOf(0); private set
     var cpuPct by mutableIntStateOf(0); private set
     var ramPct by mutableIntStateOf(0); private set
     var flashPct by mutableIntStateOf(0); private set
@@ -61,20 +72,28 @@ class Telemetry(private val session: RouterSession) {
     private val prevCounters = mutableMapOf<String, Pair<Long, Long>>()
     private var prevAtNanos = 0L
 
-    suspend fun run(tickMs: Long = 1_000L) {
+    suspend fun run(intervalMs: Long = 1_000L) {
+        var ticks = 0
         while (true) {
             val started = System.nanoTime()
             try {
                 val result = session.exec(Commands.DASHBOARD_TICK, timeoutMs = 8_000)
-                latencyMs = ((System.nanoTime() - started) / 1_000_000L).toInt()
+                tickMs = ((System.nanoTime() - started) / 1_000_000L).toInt()
                 ingest(Parsers.sections(result.stdout), System.nanoTime())
                 stale = false
+                // One extra round trip, and not on every tick: this codebase batches
+                // precisely to avoid paying per round trip, and a latency chip does not need
+                // to update at 1 Hz.
+                if (ticks % PING_EVERY_TICKS == 0) {
+                    session.refreshLatency()?.let { latencyMs = it.toInt() }
+                }
             } catch (e: SshException) {
                 stale = true
                 // A key mismatch is a hard stop — session state is Blocked, nothing to poll.
                 if (e is SshException.HostKeyChanged) return
             }
-            delay(tickMs)
+            ticks++
+            delay(nextDelayMs(tickMs, intervalMs))
         }
     }
 
@@ -149,6 +168,25 @@ class Telemetry(private val session: RouterSession) {
     companion object {
         const val WINDOW = 60
         const val SPARK = 12
+
+        /** Latency is measured every Nth tick; the chip does not need it at 1 Hz. */
+        const val PING_EVERY_TICKS = 4
+
+        /** However slow the router, the dashboard still updates at least this often. */
+        const val MAX_GAP_MS = 5_000L
+
+        /**
+         * How long to wait before the next tick.
+         *
+         * A fixed 1 s cadence assumes the poll is cheap. It is not on a single-core router:
+         * the batched script measured 450-1300 ms on the reference repeater, so a flat 1 s
+         * delay had the app polling almost back to back, making it a measurable part of the
+         * 73% CPU it was reporting. Waiting at least as long as the last tick took holds the
+         * duty cycle at or below half, and changes nothing on a fast router where the tick
+         * is a few tens of milliseconds.
+         */
+        fun nextDelayMs(lastTickMs: Int, base: Long, cap: Long = MAX_GAP_MS): Long =
+            lastTickMs.toLong().coerceIn(base, cap)
 
         fun mbps(deltaBytes: Long, dtSeconds: Double): Float =
             if (dtSeconds <= 0 || deltaBytes < 0) 0f

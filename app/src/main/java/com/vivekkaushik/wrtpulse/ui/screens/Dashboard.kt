@@ -87,6 +87,7 @@ fun DashboardScreen(
         ConnectionTopBar(
             routerName = routerName,
             latencyMs = live?.latencyMs ?: ticker.latencyMs,
+            pollMs = live?.tickMs,
             onRouterTap = onRouterTap,
         )
         Column(

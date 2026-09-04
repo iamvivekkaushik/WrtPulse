@@ -111,16 +111,22 @@ class RouterSession(
     suspend fun streamLines(command: String): kotlinx.coroutines.flow.Flow<String> =
         (connection?.takeIf { it.isConnected } ?: ensureConnected()).stream(command)
 
-    /** Measures RTT and publishes it, so the latency chip stays honest about the live link. */
-    suspend fun refreshLatency() {
-        val live = connection?.takeIf { it.isConnected } ?: return
-        try {
-            _state.value = ConnectionState.Connected(live.ping())
+    /**
+     * Measures RTT, publishes it, and returns it — so the latency chip stays honest about
+     * the live link. Returns null when there is no live connection to measure.
+     */
+    suspend fun refreshLatency(): Long? {
+        val live = connection?.takeIf { it.isConnected } ?: return null
+        return try {
+            val rtt = live.ping()
+            _state.value = ConnectionState.Connected(rtt)
+            rtt
         } catch (e: CancellationException) {
             throw e
         } catch (_: SshException) {
             connection = null
             _state.value = ConnectionState.Reconnecting(1, maxAttempts)
+            null
         }
     }
 

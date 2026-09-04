@@ -186,3 +186,45 @@ class TelemetryTest {
         assertTrue(t.deviceTotals["phy0-sta0"]!!.startsWith("since boot"))
     }
 }
+
+/**
+ * The dashboard's cadence. The chip that read "433 ms" was the cost of this poll, not the
+ * round trip — and on a router where the poll costs more than the interval, a flat delay
+ * means the app polls back to back and adds to the load it is reporting.
+ */
+class TickPacingTest {
+
+    @Test
+    fun `a cheap tick keeps the base interval`() {
+        assertEquals(1_000L, Telemetry.nextDelayMs(lastTickMs = 60, base = 1_000L))
+        assertEquals(1_000L, Telemetry.nextDelayMs(lastTickMs = 0, base = 1_000L))
+    }
+
+    /** Measured on the reference repeater: 450-1300 ms per tick on a 1 s interval. */
+    @Test
+    fun `an expensive tick waits at least as long as it took`() {
+        assertEquals(1_327L, Telemetry.nextDelayMs(lastTickMs = 1327, base = 1_000L))
+        assertEquals(1_000L, Telemetry.nextDelayMs(lastTickMs = 520, base = 1_000L))
+    }
+
+    /** Period = tick + delay, so waiting the tick's own cost holds the duty cycle at <= 50%. */
+    @Test
+    fun `the duty cycle never exceeds half`() {
+        listOf(60, 520, 900, 1327, 2500).forEach { tick ->
+            val period = tick + Telemetry.nextDelayMs(tick, base = 1_000L)
+            assertTrue("tick=$tick", tick.toDouble() / period <= 0.5)
+        }
+    }
+
+    @Test
+    fun `a pathologically slow router still updates within the cap`() {
+        assertEquals(Telemetry.MAX_GAP_MS, Telemetry.nextDelayMs(lastTickMs = 30_000, base = 1_000L))
+    }
+
+    @Test
+    fun `latency is sampled every few ticks rather than every one`() {
+        assertTrue(Telemetry.PING_EVERY_TICKS > 1)
+        val pinged = (0 until 12).count { it % Telemetry.PING_EVERY_TICKS == 0 }
+        assertEquals(3, pinged)
+    }
+}

@@ -363,10 +363,20 @@ fun GhostButton(
 // ---------- app chrome ----------
 
 /** Connected-router top bar: pulsing dot, router name, chevron, live latency chip, trailing icon. */
+/** Above this, the poll is worth showing next to the latency it was being mistaken for. */
+const val SLOW_POLL_MS = 250
+
 @Composable
 fun ConnectionTopBar(
     routerName: String,
     latencyMs: Int,
+    /**
+     * What the batched poll costs the router. Shown beside the latency only when it is slow
+     * enough to matter, because that is the number people were reading AS latency — on a
+     * single-core router it runs 10-20x the round trip, and seeing both makes it obvious
+     * that the router is busy rather than far away.
+     */
+    pollMs: Int? = null,
     pulse: Boolean = true,
     trailing: (@Composable () -> Unit)? = null,
     onRouterTap: (() -> Unit)? = null,
@@ -402,6 +412,15 @@ fun ConnectionTopBar(
                 .padding(horizontal = 8.dp, vertical = 3.dp)
         ) {
             Text("$latencyMs ms", style = mono(10.5f, 500, Wrt.TextTertiary))
+        }
+        pollMs?.takeIf { it >= SLOW_POLL_MS }?.let {
+            Box(
+                Modifier
+                    .border(1.dp, Wrt.Amber.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 8.dp, vertical = 3.dp)
+            ) {
+                Text("poll $it ms", style = mono(10.5f, 500, Wrt.Amber))
+            }
         }
         trailing?.invoke()
     }
