@@ -1,12 +1,14 @@
 name: CI
 
-# Every push and pull request: unit tests + lint through the same fastlane lanes a
-# workstation runs, then a debug APK as an artifact. Replaces the old dispatch-only
+# Every push, pull request and v* tag: unit tests + lint through the same fastlane lanes a
+# workstation runs, then a debug APK as an artifact. On a tag this runs alongside Release,
+# so a shipped build always has a green check next to it. Replaces the old dispatch-only
 # debug-apk workflow (run it by hand from the Actions tab if you just want an APK).
 
 on:
   push:
     branches: [master]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
