@@ -1,0 +1,76 @@
+# WrtPulse — one definition of "check", "build" and "release", used the same way on a
+# workstation and in GitHub Actions. The workflows call these lanes rather than Gradle
+# directly, so there is a single place that says what a release is.
+#
+#   bundle exec fastlane android check     # unit tests + lint (what CI gates on)
+#   bundle exec fastlane android debug     # debug APK
+#   bundle exec fastlane android release   # signed AAB + APK — needs the signing env below
+#   bundle exec fastlane android beta      # release, then Play internal track
+
+default_platform(:android)
+
+# Release signing. Read by app/build.gradle.kts from the environment (CI) or from an
+# untracked keystore.properties (workstation). Missing → the release build is unsigned and
+# the `release` lane refuses, rather than quietly producing something that cannot ship.
+SIGNING_ENV = %w[RELEASE_STORE_FILE RELEASE_STORE_PASSWORD RELEASE_KEY_ALIAS RELEASE_KEY_PASSWORD].freeze
+
+platform :android do
+  desc "Unit tests — 770 JVM tests over the parsers and stores"
+  lane :test do
+    gradle(task: "testDebugUnitTest")
+  end
+
+  desc "Android lint, errors fatal"
+  lane :lint do
+    gradle(task: ":app:lintDebug")
+  end
+
+  desc "Everything CI gates a merge on"
+  lane :check do
+    test
+    lint
+  end
+
+  desc "Debug APK"
+  lane :debug do
+    gradle(task: "assembleDebug")
+  end
+
+  desc "Signed release AAB and APK. VERSION_NAME / VERSION_CODE override the Gradle defaults."
+  lane :release do
+    missing = SIGNING_ENV.reject { |k| ENV[k].to_s.strip != "" }
+    unless missing.empty?
+      UI.user_error!(
+        "Release signing is not configured: #{missing.join(', ')} unset. " \
+        "Export them (or write keystore.properties) — see README › Releasing."
+      )
+    end
+    UI.user_error!("RELEASE_STORE_FILE does not exist: #{ENV['RELEASE_STORE_FILE']}") \
+      unless File.exist?(ENV["RELEASE_STORE_FILE"])
+
+    props = {}
+    props["versionName"] = ENV["VERSION_NAME"] if ENV["VERSION_NAME"].to_s != ""
+    props["versionCode"] = ENV["VERSION_CODE"] if ENV["VERSION_CODE"].to_s != ""
+
+    gradle(task: "bundleRelease", properties: props)
+    aab = lane_context[SharedValues::GRADLE_AAB_OUTPUT_PATH]
+    gradle(task: "assembleRelease", properties: props)
+    apk = lane_context[SharedValues::GRADLE_APK_OUTPUT_PATH]
+
+    UI.success("AAB: #{aab}")
+    UI.success("APK: #{apk}")
+  end
+
+  desc "Release, then upload the AAB to the Play internal track"
+  lane :beta do
+    release
+    upload_to_play_store(
+      track: "internal",
+      aab: lane_context[SharedValues::GRADLE_AAB_OUTPUT_PATH],
+      json_key_data: ENV["PLAY_JSON_KEY"],
+      skip_upload_metadata: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true,
+    )
+  end
+end

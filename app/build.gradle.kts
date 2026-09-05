@@ -1,8 +1,19 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
 }
+
+// Release signing comes from the environment (CI) or an untracked keystore.properties on a
+// workstation. With neither, the release build is simply unsigned — fine for a compile check —
+// and `fastlane android release` refuses up front instead of producing something unshippable.
+val keystoreProps = Properties().apply {
+    rootProject.file("keystore.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+}
+fun secret(name: String): String? = System.getenv(name)?.takeIf { it.isNotBlank() } ?: keystoreProps.getProperty(name)
+val releaseStoreFile = secret("RELEASE_STORE_FILE")
 
 android {
     namespace = "com.vivekkaushik.wrtpulse"
@@ -16,14 +27,27 @@ android {
         applicationId = "com.vivekkaushik.wrtpulse"
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        // Overridable so CI can stamp a release: -PversionCode=<run number> -PversionName=<tag>.
+        versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
+        versionName = (project.findProperty("versionName") as String?) ?: "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (releaseStoreFile != null) {
+            create("release") {
+                storeFile = rootProject.file(releaseStoreFile)
+                storePassword = secret("RELEASE_STORE_PASSWORD")
+                keyAlias = secret("RELEASE_KEY_ALIAS")
+                keyPassword = secret("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

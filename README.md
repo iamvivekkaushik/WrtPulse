@@ -170,12 +170,49 @@ Run the unit tests:
 ./gradlew testDebugUnitTest
 ```
 
-672 JVM tests, mostly over `ops/` — real command output captured from a router, parsed and
+770 JVM tests, mostly over `ops/` — real command output captured from a router, parsed and
 pinned. Where an outside authority exists it is used: key fingerprints are checked against
 `ssh-keygen -lf` rather than against the app's own maths.
 
-Kotlin 2.2.10 · AGP 9.2.1 · Compose BOM 2026.02.01 · Room 2.8.4 · minSdk 28 · targetSdk 36.
+Kotlin 2.2.10 · AGP 9.4.0 · Compose BOM 2026.02.01 · Room 2.8.4 · minSdk 28 · targetSdk 36.
 SSH is JSch with BouncyCastle, which Android needs for ed25519.
+
+## Releasing
+
+Builds, tests and releases go through fastlane, and GitHub Actions calls the same lanes, so
+what CI runs is exactly what runs on a workstation. Needs Ruby 3.1+ (macOS's system Ruby is
+too old — `brew install ruby` or rbenv), then:
+
+```bash
+bundle install
+bundle exec fastlane android check      # unit tests + lint — what CI gates on
+bundle exec fastlane android debug      # debug APK
+bundle exec fastlane android release    # signed AAB + APK
+```
+
+`release` signs with the upload keystore, read from the environment or from an untracked
+`keystore.properties` in the repo root:
+
+```properties
+RELEASE_STORE_FILE=/absolute/path/to/release.jks
+RELEASE_STORE_PASSWORD=…
+RELEASE_KEY_ALIAS=…
+RELEASE_KEY_PASSWORD=…
+```
+
+With none of these set the release build is unsigned and the lane refuses — it never quietly
+produces something that cannot ship. `VERSION_NAME` and `VERSION_CODE` in the environment
+override the Gradle defaults.
+
+**CI.** `.github/workflows/ci.yml` runs `check` and uploads a debug APK on every push and pull
+request. `.github/workflows/release.yml` fires on a `v*` tag: it restores the keystore from
+`RELEASE_KEYSTORE_BASE64` (`base64 -i release.jks`), stamps `versionName` from the tag and
+`versionCode` from the run number, builds the signed AAB and APK, and attaches both to a GitHub
+Release. If a `PLAY_JSON_KEY` secret (the Play Console service-account JSON) is present it also
+uploads the AAB to the internal track; without it that step is skipped, so the pipeline is
+useful before Play is set up. Secrets to add under Settings › Secrets and variables › Actions:
+`RELEASE_KEYSTORE_BASE64`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`,
+`RELEASE_KEY_PASSWORD`, and optionally `PLAY_JSON_KEY`.
 
 ## Not done yet
 

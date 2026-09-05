@@ -14,3 +14,17 @@
 .cxx
 local.properties
 .kotlin/
+
+# Release signing — never in the repo. CI decodes the keystore from a secret.
+keystore.properties
+*.jks
+*.keystore
+
+# fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+fastlane/README.md
+.bundle/
+vendor/bundle/

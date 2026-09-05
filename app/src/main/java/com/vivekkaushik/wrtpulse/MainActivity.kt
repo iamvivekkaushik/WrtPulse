@@ -27,6 +27,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.activity.compose.LocalActivity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.core.content.ContextCompat
@@ -235,7 +236,7 @@ private fun WrtPulseApp() {
     val termLines = remember { mutableStateListOf<TermLine>().apply { addAll(initialTerminalLines()) } }
     var termPending by remember { mutableStateOf("") }
 
-    val activity = LocalContext.current as FragmentActivity
+    val activity = LocalActivity.current as FragmentActivity
 
     fun doConnect(entity: RouterEntity) {
         val keyPem = runCatching { entity.privateKey?.let { WrtRuntime.vault.open(it) } }.getOrNull()
