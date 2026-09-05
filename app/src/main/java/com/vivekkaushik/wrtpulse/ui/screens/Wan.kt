@@ -191,7 +191,7 @@ private fun WanHub(
         }
         selected?.let { row ->
             LiveCard(row, live)
-            TestCard(store, onTest)
+            TestCard(store, row, onTest)
             Column(
                 Modifier
                     .fillMaxWidth()
@@ -398,7 +398,9 @@ private fun LiveCard(row: WanRow, live: Telemetry?) {
         }
         if (live != null) {
             Box(Modifier.fillMaxWidth().height(46.dp).padding(top = 10.dp)) {
-                ThroughputChart(live.down.toList(), live.up.toList(), Modifier.fillMaxSize())
+                // This uplink's own window. The shared live.down/up follow the primary, and
+                // drawing them here put the primary's spikes under a WAN that was down.
+                ThroughputChart(live.downFor(row.device), live.upFor(row.device), Modifier.fillMaxSize())
             }
         }
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -414,7 +416,7 @@ private fun LiveCard(row: WanRow, live: Telemetry?) {
 }
 
 @Composable
-private fun TestCard(store: WanStore, onTest: () -> Unit) {
+private fun TestCard(store: WanStore, row: WanRow, onTest: () -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -425,8 +427,11 @@ private fun TestCard(store: WanStore, onTest: () -> Unit) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Test connection", style = sans(13f, 600))
+                // Naming the bound device is the point: the result belongs to this uplink,
+                // not to whichever one happens to hold the default route.
                 Text(
-                    "gateway, two resolvers and a name — icmp ping",
+                    "gateway, two resolvers and a name — icmp ping" +
+                        row.device.takeIf { it.isNotEmpty() }?.let { " via $it" }.orEmpty(),
                     style = mono(10f, 500, Wrt.TextDim),
                     modifier = Modifier.padding(top = 3.dp),
                 )

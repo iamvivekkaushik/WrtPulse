@@ -79,12 +79,21 @@ class WanStore(private val session: RouterSession) : Refreshable {
 
     override var loaded by mutableStateOf(false); private set
     override var applying by mutableStateOf(false); private set
-    var testing by mutableStateOf(false); private set
+    /** Which interface is being tested, so only that one's card says so. */
+    var testingSection by mutableStateOf<String?>(null); private set
     var error by mutableStateOf<String?>(null)
     var notice by mutableStateOf<String?>(null)
 
-    /** The last connection test, newest run replacing the previous one. */
-    val pings = mutableStateListOf<PingResult>()
+    /**
+     * The last connection test per interface. A test is about one uplink, so its result
+     * belongs to that uplink — one shared list meant every chip showed the primary's run.
+     */
+    val pingsBySection = mutableStateMapOf<String, List<PingResult>>()
+
+    /** The selected interface's last test, empty until it has been tested itself. */
+    val pings: List<PingResult> get() = pingsBySection[selected].orEmpty()
+
+    val testing: Boolean get() = testingSection == selected && selected.isNotEmpty()
 
     /** Set when the router put the old config back because the app never came back. */
     var rolledBack by mutableStateOf(false); private set
@@ -603,23 +612,31 @@ class WanStore(private val session: RouterSession) : Refreshable {
      * Pings the gateway, two public resolvers and a name — four answers that separate "the
      * line is down" from "DNS is broken", which look identical from a browser.
      */
-    suspend fun runTest() {
-        if (testing) return
-        testing = true
+    /**
+     * Tests one uplink — by default the selected one, not whichever holds the default route.
+     *
+     * The pings are bound to that interface's device, so a standby WAN is measured over its
+     * own link instead of following the default route out of the primary.
+     */
+    suspend fun runTest(section: String = selected) {
+        if (testingSection != null || section.isEmpty()) return
+        testingSection = section
         error = null
         try {
-            val gateway = links.firstOrNull { it.hasDefaultRoute }?.gateway.orEmpty()
-            val out = session.exec(Commands.pingTest(gateway), timeoutMs = 40_000).stdout
-            val parts = Parsers.sections(out)
-            pings.clear()
-            pings += Parsers.pingResult(parts["gw"].orEmpty(), "gateway", gateway.ifBlank { "—" })
-            pings += Parsers.pingResult(parts["dns1"].orEmpty(), "1.1.1.1", "1.1.1.1")
-            pings += Parsers.pingResult(parts["dns2"].orEmpty(), "8.8.8.8", "8.8.8.8")
-            pings += Parsers.pingResult(parts["name"].orEmpty(), "dns name", "openwrt.org")
+            val link = links.firstOrNull { it.name == section }
+            val device = link?.device.orEmpty()
+            if (device.isBlank()) {
+                // Nothing to bind to, and an unbound ping would measure the default route instead.
+                pingsBySection[section] = listOf(downTile(section))
+                return
+            }
+            val gateway = link?.gateway.orEmpty()
+            val out = session.exec(Commands.pingTest(gateway, device), timeoutMs = 40_000).stdout
+            pingsBySection[section] = pingTiles(Parsers.sections(out), gateway)
         } catch (e: SshException) {
             error = "Test failed: ${e.message}"
         } finally {
-            testing = false
+            testingSection = null
         }
     }
 
@@ -900,6 +917,26 @@ class WanStore(private val session: RouterSession) : Refreshable {
     }
 
     companion object {
+
+        /**
+         * The tiles a test produces, from the sections the script echoed.
+         *
+         * A standby uplink usually holds no default route and so has no gateway to ping;
+         * that is reported as such rather than by pinging loopback and labelling the
+         * result "gateway".
+         */
+        fun pingTiles(parts: Map<String, String>, gateway: String): List<PingResult> = listOf(
+            if (gateway.isBlank()) PingResult("gateway", "—", 100, null, "no gateway")
+            else Parsers.pingResult(parts["gw"].orEmpty(), "gateway", gateway),
+            Parsers.pingResult(parts["dns1"].orEmpty(), "1.1.1.1", "1.1.1.1"),
+            Parsers.pingResult(parts["dns2"].orEmpty(), "8.8.8.8", "8.8.8.8"),
+            Parsers.pingResult(parts["name"].orEmpty(), "dns name", "openwrt.org"),
+        )
+
+        /** An interface with no device carries nothing, so there is nothing to measure. */
+        fun downTile(section: String): PingResult =
+            PingResult("interface", section, 100, null, "down — no device")
+
         const val ROLLBACK_SECONDS = 30
 
         /** The design's protocol row, in its order. */

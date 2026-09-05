@@ -267,17 +267,23 @@ class WanCommandTest {
 
     @Test
     fun `the test pings the gateway, two resolvers and a name`() {
-        val script = Commands.pingTest("10.64.64.64")
-        assertTrue(script.contains("ping -c 3 -W 2 -q '10.64.64.64'"))
+        val script = Commands.pingTest("10.64.64.64", "eth1")
+        assertTrue(script.contains("ping -c 3 -W 2 -q -I 'eth1' '10.64.64.64'"))
         assertTrue(script.contains("'1.1.1.1'"))
         assertTrue(script.contains("'8.8.8.8'"))
         assertTrue(script.contains("'openwrt.org'"))
     }
 
-    /** With no gateway known, the test must not ping an empty string. */
+    /**
+     * A standby uplink holds no default route. This used to ping loopback and label the
+     * reply "gateway", which reported a healthy gateway for a link that has none.
+     */
     @Test
-    fun `a missing gateway falls back to a harmless target`() {
-        assertTrue(Commands.pingTest("").contains("'127.0.0.1'"))
+    fun `a missing gateway is left out rather than faked with loopback`() {
+        val script = Commands.pingTest("", "eth1")
+        assertFalse(script.contains("127.0.0.1"))
+        assertFalse(script.contains("${Commands.SECTION} gw"))
+        assertTrue(script.contains("'1.1.1.1'"))
     }
 
     /**

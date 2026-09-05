@@ -961,15 +961,27 @@ object Commands {
      * different fault from the gateway itself being unreachable, and the screen can only say
      * which if it measures both.
      */
-    fun pingTest(gateway: String): String = buildList {
-        add("echo $SECTION gw" to pingOne(gateway.ifBlank { "127.0.0.1" }))
-        add("echo $SECTION dns1" to pingOne("1.1.1.1"))
-        add("echo $SECTION dns2" to pingOne("8.8.8.8"))
+    fun pingTest(gateway: String, device: String): String = buildList {
+        // A standby uplink holds no default route and so has no gateway to ping. Pinging
+        // loopback instead — what this used to do — reports a healthy "gateway" for a link
+        // that has none, so the section is simply left out and the store says so.
+        if (gateway.isNotBlank()) add("echo $SECTION gw" to pingOne(gateway, device))
+        add("echo $SECTION dns1" to pingOne("1.1.1.1", device))
+        add("echo $SECTION dns2" to pingOne("8.8.8.8", device))
         // Name resolution is a separate failure from reachability, and the one people meet.
-        add("echo $SECTION name" to pingOne("openwrt.org"))
+        add("echo $SECTION name" to pingOne("openwrt.org", device))
     }.joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
-    private fun pingOne(target: String) = "ping -c 3 -W 2 -q '$target' 2>&1 || true"
+    /**
+     * `-I <device>` is what makes this a test of one uplink rather than of the router.
+     *
+     * Without it every packet follows the default route, so testing a standby WAN silently
+     * measured the primary and reported it as the standby's own result.
+     */
+    private fun pingOne(target: String, device: String) =
+        "ping -c 3 -W 2 -q " +
+            (if (device.isBlank()) "" else "-I '${escapeValue(device)}' ") +
+            "'$target' 2>&1 || true"
 
     /**
      * Arms the rollback, then applies. The router keeps a copy of `/etc/config/network` and

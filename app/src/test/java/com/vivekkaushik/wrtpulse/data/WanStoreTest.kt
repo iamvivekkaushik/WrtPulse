@@ -592,3 +592,77 @@ class WanStoreTest {
         assertEquals(emptyList<String>(), s.ops())
     }
 }
+
+/**
+ * The connection test is about ONE uplink. It used to ping over whatever held the default
+ * route and store a single shared result, so every chip showed the primary's run.
+ */
+class WanConnectionTestTest {
+
+    @Test
+    fun `every ping is bound to the interface, or it measures the default route`() {
+        val cmd = com.vivekkaushik.wrtpulse.ops.Commands.pingTest("192.168.1.1", "phy1-sta0")
+        // Four pings, every one of them bound.
+        assertEquals(4, Regex("ping -c 3").findAll(cmd).count())
+        assertEquals(4, Regex("-I 'phy1-sta0'").findAll(cmd).count())
+        assertTrue(cmd.contains("'192.168.1.1'"))
+        assertTrue(cmd.contains("'1.1.1.1'"))
+        assertTrue(cmd.contains("'openwrt.org'"))
+    }
+
+    @Test
+    fun `a standby uplink with no gateway pings the resolvers but not loopback`() {
+        val cmd = com.vivekkaushik.wrtpulse.ops.Commands.pingTest("", "eth1")
+        assertFalse(cmd.contains("127.0.0.1"))
+        assertFalse(cmd.contains("gw"))
+        assertEquals(3, Regex("ping -c 3").findAll(cmd).count())
+    }
+
+    @Test
+    fun `a device name cannot break out of the bound ping`() {
+        val cmd = com.vivekkaushik.wrtpulse.ops.Commands.pingTest("10.0.0.1", "eth0'; reboot #")
+        // The quote is neutralised, so the payload stays one shell word and never runs.
+        assertTrue(cmd.contains("""-I 'eth0'\''; reboot #'"""))
+        assertFalse(cmd.contains("""-I 'eth0'; reboot"""))
+    }
+
+    @Test
+    fun `no gateway is reported as such, never as a healthy loopback reply`() {
+        val tiles = WanStore.pingTiles(emptyMap(), gateway = "")
+        assertEquals("gateway", tiles.first().label)
+        assertEquals("no gateway", tiles.first().error)
+        assertFalse(tiles.first().ok)
+    }
+
+    @Test
+    fun `a real gateway reply is parsed into the gateway tile`() {
+        val reply = "3 packets transmitted, 3 received, 0% packet loss\n" +
+            "round-trip min/avg/max = 1.1/2.5/3.9 ms"
+        val tiles = WanStore.pingTiles(mapOf("gw" to reply), gateway = "192.168.1.1")
+        assertEquals("192.168.1.1", tiles.first().target)
+        assertTrue(tiles.first().ok)
+        assertEquals(0, tiles.first().lossPct)
+    }
+
+    @Test
+    fun `an interface with no device is called down rather than silently tested`() {
+        val tile = WanStore.downTile("wwan_2")
+        assertFalse(tile.ok)
+        assertTrue(tile.error!!.contains("down"))
+    }
+
+    @Test
+    fun `results are held per interface, so one uplink's test is not shown under another`() {
+        val s = WanStore(
+            RouterSession(SshTarget("192.168.1.1"), object : SshClient {
+                override suspend fun probeHostKey(target: SshTarget) = error("unused")
+                override suspend fun connect(target: SshTarget, auth: SshAuth, connectTimeoutMs: Long): SshConnection =
+                    error("unused")
+            }, { error("unused") })
+        )
+        s.pingsBySection["wan"] = WanStore.pingTiles(emptyMap(), gateway = "192.168.1.1")
+        // Nothing was ever run against this one, so it has nothing to show.
+        assertTrue(s.pingsBySection["wwan_2"].orEmpty().isEmpty())
+        assertEquals(4, s.pingsBySection["wan"]!!.size)
+    }
+}

@@ -184,6 +184,29 @@ class TelemetryTest {
         assertEquals("eth1", t.wanDevice)
         assertEquals(10f, t.down.last(), 0.1f)
         assertTrue(t.deviceTotals["phy0-sta0"]!!.startsWith("since boot"))
+
+        // Each uplink also keeps its OWN window. The WAN screen draws one interface at a
+        // time, and drawing the shared `down` under every chip put the primary's spikes on
+        // a standby WAN that was carrying nothing.
+        assertEquals(10f, t.downFor("eth1").last(), 0.1f)
+        assertEquals(5f, t.downFor("phy0-sta0").last(), 0.1f)
+        assertEquals(Telemetry.WINDOW, t.downFor("phy0-sta0").size)
+    }
+
+    /** A device that never held a default route has nothing to draw — a flat line, never the primary's. */
+    @Test
+    fun `an unseen device draws flat, not the primary's history`() {
+        val t = telemetry()
+        t.ingest(Parsers.sections(tickOutput(cpuIdle = 1000, cpuTotalBusy = 1000, rxBytes = 0, txBytes = 0)), 0L)
+        t.ingest(
+            Parsers.sections(tickOutput(cpuIdle = 1100, cpuTotalBusy = 1100, rxBytes = 1_250_000, txBytes = 250_000)),
+            1_000_000_000L,
+        )
+        assertEquals(10f, t.down.last(), 0.01f)                 // the primary really did move
+        val flat = t.downFor("phy1-sta9")
+        assertEquals(Telemetry.WINDOW, flat.size)
+        assertTrue(flat.all { it == 0f })                        // ...but this one did not
+        assertTrue(t.upFor("phy1-sta9").all { it == 0f })
     }
 }
 

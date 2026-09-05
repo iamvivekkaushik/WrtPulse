@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -20,9 +21,21 @@ import kotlinx.coroutines.delay
  */
 class Telemetry(private val session: RouterSession) {
 
-    /** WAN throughput, Mbps, sliding window — newest point last. */
+    /** The primary upstream's throughput, Mbps, sliding window — newest point last. */
     val down = mutableStateListOf<Float>().apply { repeat(WINDOW) { add(0f) } }
     val up = mutableStateListOf<Float>().apply { repeat(WINDOW) { add(0f) } }
+
+    /**
+     * The same window per device, for a screen that shows one uplink at a time. [down]/[up]
+     * only ever followed the primary, so every interface's card drew the primary's graph —
+     * a standby WAN that was down showed traffic spikes it could not have carried.
+     */
+    private val downBy = mutableStateMapOf<String, SnapshotStateList<Float>>()
+    private val upBy = mutableStateMapOf<String, SnapshotStateList<Float>>()
+
+    /** A device's own history; flat when it has never carried a default route here. */
+    fun downFor(device: String): List<Float> = downBy[device] ?: FLAT
+    fun upFor(device: String): List<Float> = upBy[device] ?: FLAT
     val cpuSpark = mutableStateListOf<Float>().apply { repeat(SPARK) { add(0f) } }
     val ramSpark = mutableStateListOf<Float>().apply { repeat(SPARK) { add(0f) } }
 
@@ -145,6 +158,8 @@ class Telemetry(private val session: RouterSession) {
                     val rate = mbps(now.rxBytes - previous.first, dt) to
                         mbps(now.txBytes - previous.second, dt)
                     rates[link.device] = rate
+                    shift(downBy.getOrPut(link.device, ::window), rate.first)
+                    shift(upBy.getOrPut(link.device, ::window), rate.second)
                     if (link == upstreams.first()) {
                         shift(down, rate.first)
                         shift(up, rate.second)
@@ -160,6 +175,9 @@ class Telemetry(private val session: RouterSession) {
         }
     }
 
+    private fun window(): SnapshotStateList<Float> =
+        mutableStateListOf<Float>().apply { repeat(WINDOW) { add(0f) } }
+
     private fun shift(list: MutableList<Float>, v: Float) {
         list.removeAt(0)
         list.add(v)
@@ -167,6 +185,9 @@ class Telemetry(private val session: RouterSession) {
 
     companion object {
         const val WINDOW = 60
+
+        /** What a device with no history draws: a flat line, not the primary's graph. */
+        private val FLAT: List<Float> = List(WINDOW) { 0f }
         const val SPARK = 12
 
         /** Latency is measured every Nth tick; the chip does not need it at 1 Hz. */
