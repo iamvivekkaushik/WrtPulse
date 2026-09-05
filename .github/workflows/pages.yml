@@ -1,0 +1,73 @@
+name: Pages
+
+# Publishes site/ to GitHub Pages: the landing page and the privacy policy Play links to.
+# The store assets (icon, feature graphic, screenshots) are copied in from the fastlane
+# listing at deploy time, so the site and the store never disagree and the repo holds the
+# images once. Pages must be set to "GitHub Actions" as its source, once, in repo settings.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "site/**"
+      - "fastlane/metadata/android/en-US/images/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Assemble site
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Copy store assets into the site
+        run: |
+          set -e
+          M=fastlane/metadata/android/en-US/images
+          mkdir -p site/assets
+          cp "$M/icon.png" "$M/featureGraphic.png" site/assets/
+          cp "$M"/phoneScreenshots/*.png site/assets/
+          ls -la site/assets
+
+      - name: Check every local link resolves
+        run: |
+          python3 - <<'PY'
+          import re, os, sys
+          bad = []
+          for page in ("site/index.html", "site/privacy.html"):
+              html = open(page).read()
+              for ref in re.findall(r'(?:src|href)="([^"#]+)"', html):
+                  if ref.startswith(("http://", "https://", "mailto:")): continue
+                  if not os.path.exists(os.path.join("site", ref)): bad.append(f"{page}: {ref}")
+          if bad: print("\n".join(bad)); sys.exit(1)
+          print("all local links resolve")
+          PY
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

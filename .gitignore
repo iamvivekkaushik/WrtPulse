@@ -28,3 +28,6 @@ fastlane/test_output
 fastlane/README.md
 .bundle/
 vendor/bundle/
+
+# Site images are copied in from the fastlane listing at deploy time — one source of truth.
+site/assets/

@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WrtPulse — OpenWrt, over SSH</title>
+<meta name="description" content="An Android app for managing OpenWrt routers over SSH. No agent on the router, no cloud in the middle — the app runs the same commands you would type yourself.">
+<meta property="og:title" content="WrtPulse — OpenWrt, over SSH">
+<meta property="og:description" content="Manage OpenWrt routers over SSH — Wi-Fi, clients, WAN, firewall, firmware. Nothing installed on the router, no cloud, no account.">
+<meta property="og:image" content="assets/featureGraphic.png">
+<meta property="og:type" content="website">
+<link rel="icon" type="image/png" href="assets/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Red+Hat+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0E1413; --bg-deep: #0B100F; --card: #131B19; --border: #20302B; --hair: #1B2622;
+    --text: #E8F4EF; --text-2: #93A8A0; --dim: #5C7169; --accent: #2EE5C8; --on-accent: #06231D;
+    --green: #46D97E; --amber: #F2B24C; --red: #F26D5E;
+    --sans: 'Instrument Sans', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    --mono: 'Red Hat Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); -webkit-font-smoothing: antialiased; line-height: 1.5; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { color: #7FF0DC; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 22px; }
+  .mono { font-family: var(--mono); }
+
+  /* nav */
+  nav { display: flex; align-items: center; gap: 14px; padding: 18px 0; flex-wrap: wrap; }
+  nav img { width: 34px; height: 34px; border-radius: 9px; }
+  nav .name { font-weight: 700; font-size: 17px; letter-spacing: -0.01em; }
+  nav .links { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 14px; color: var(--text-2); }
+  /* a link never breaks inside itself; on a narrow screen the whole row drops under the logo */
+  nav .links a { color: var(--text-2); white-space: nowrap; }
+  nav .links a:hover { color: var(--text); }
+
+  /* hero */
+  .hero { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 40px; align-items: center; padding: 56px 0 40px; }
+  .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: .16em; color: var(--dim); text-transform: uppercase; }
+  h1 { font-size: clamp(38px, 6vw, 62px); line-height: 1.05; letter-spacing: -0.025em; margin: 14px 0 18px; font-weight: 700; }
+  h1 .thin { color: var(--text-2); font-weight: 500; }
+  .lede { font-size: 17.5px; color: var(--text-2); max-width: 520px; margin: 0 0 28px; }
+  .cta { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .btn { display: inline-flex; align-items: center; gap: 9px; padding: 13px 20px; border-radius: 12px; font-weight: 650; font-size: 14.5px; border: 1px solid var(--border); background: var(--card); color: var(--text); transition: transform .12s ease, border-color .12s ease; }
+  .btn:hover { transform: translateY(-1px); border-color: #2A3B35; color: var(--text); }
+  .btn.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+  .btn.primary:hover { color: var(--on-accent); }
+  .btn.soon { color: var(--dim); }
+  .btn.soon small { font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; border: 1px solid var(--border); border-radius: 5px; padding: 2px 6px; }
+  .hero-shot { position: relative; justify-self: end; }
+  .hero-shot img { width: 100%; max-width: 380px; border-radius: 22px; border: 1px solid var(--border); box-shadow: 0 30px 80px rgba(0,0,0,.55); display: block; }
+  .cmd { font-family: var(--mono); font-size: 12.5px; color: var(--dim); margin-top: 22px; }
+  .cmd b { color: var(--accent); font-weight: 600; }
+
+  /* sections */
+  section { padding: 56px 0; border-top: 1px solid var(--hair); }
+  h2 { font-size: 28px; letter-spacing: -0.02em; margin: 0 0 8px; }
+  .sub { color: var(--text-2); margin: 0 0 30px; max-width: 640px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 18px 18px 16px; }
+  .card h3 { margin: 0 0 6px; font-size: 15.5px; }
+  .card p { margin: 0; color: var(--text-2); font-size: 14px; }
+  .card .k { font-family: var(--mono); font-size: 10px; letter-spacing: .14em; color: var(--dim); text-transform: uppercase; display: block; margin-bottom: 10px; }
+
+  /* rules */
+  .rules { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); counter-reset: r; }
+  .rule { background: var(--bg-deep); border: 1px solid var(--hair); border-radius: 14px; padding: 18px; }
+  .rule::before { counter-increment: r; content: "0" counter(r); font-family: var(--mono); color: var(--accent); font-size: 12px; letter-spacing: .12em; display: block; margin-bottom: 8px; }
+  .rule h3 { margin: 0 0 6px; font-size: 15px; }
+  .rule p { margin: 0; color: var(--text-2); font-size: 13.5px; }
+  .rule code { font-family: var(--mono); font-size: 12px; color: var(--text); background: #0A0F0E; border: 1px solid var(--hair); border-radius: 5px; padding: 1px 6px; }
+
+  /* gallery */
+  .gallery { display: flex; gap: 14px; overflow-x: auto; padding: 6px 0 18px; scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; }
+  .gallery img { flex: 0 0 auto; width: 250px; border-radius: 16px; border: 1px solid var(--border); scroll-snap-align: start; }
+  .gallery::-webkit-scrollbar { height: 8px; } .gallery::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+
+  /* security */
+  .sec li { color: var(--text-2); margin: 8px 0; }
+  .sec li b { color: var(--text); font-weight: 600; }
+
+  footer { border-top: 1px solid var(--hair); padding: 28px 0 44px; color: var(--dim); font-size: 13px; display: flex; gap: 20px; flex-wrap: wrap; align-items: center; }
+  footer a { color: var(--text-2); } footer a:hover { color: var(--text); }
+  footer .sp { flex: 1; }
+
+  @media (max-width: 820px) {
+    .hero { grid-template-columns: 1fr; padding-top: 30px; }
+    .hero-shot { justify-self: center; }
+    nav .links { gap: 6px 16px; }
+  }
+  @media (max-width: 560px) {
+    /* phone: links take their own full row below the name */
+    nav .links { flex-basis: 100%; margin-left: 0; }
+    .gallery img { width: 210px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <img src="assets/icon.png" alt="">
+    <span class="name">WrtPulse</span>
+    <div class="links">
+      <a href="#features">Features</a>
+      <a href="#rules">How it works</a>
+      <a href="#screens">Screens</a>
+      <a href="privacy.html">Privacy</a>
+      <a href="https://github.com/iamvivekkaushik/WrtPulse">GitHub</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div>
+      <div class="eyebrow">Android · OpenWrt · SSH</div>
+      <h1>Your OpenWrt router,<br><span class="thin">over SSH.</span></h1>
+      <p class="lede">No agent on the router. No cloud in the middle. Nothing scraped out of LuCI. WrtPulse opens an SSH session and runs the same commands you would type yourself — then shows you the answer.</p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/iamvivekkaushik/WrtPulse/releases/latest">Download APK</a>
+        <a class="btn soon" href="https://play.google.com/store/apps/details?id=com.vivekkaushik.wrtpulse">Google Play <small>soon</small></a>
+      </div>
+      <div class="cmd"><b>$</b> ubus · uci · iwinfo · logread · apk · sysupgrade</div>
+    </div>
+    <div class="hero-shot">
+      <img src="assets/01_gr.png" alt="WrtPulse dashboard showing live CPU, RAM, flash, the upstream link and throughput">
+    </div>
+  </header>
+
+  <section id="features">
+    <h2>Everything the router can do from a shell</h2>
+    <p class="sub">If OpenWrt can do it at the prompt, the app can do it. If it cannot, the app does not pretend otherwise.</p>
+    <div class="grid">
+      <div class="card"><span class="k">Dashboard</span><h3>Live, one command a second</h3><p>CPU, RAM, flash, load, uptime and throughput from one batched SSH call. The upstream card follows whichever interface actually holds the default route — cable or Wi-Fi client. Reboot, speed test and a one-tap isolated guest network.</p></div>
+      <div class="card"><span class="k">Clients</span><h3>Every device, named</h3><p>Wireless and wired, with signal, lease and per-client usage when <span class="mono">nlbwmon</span> is installed. Rename, block, wake-on-LAN, and DHCP reservations from the row.</p></div>
+      <div class="card"><span class="k">Network</span><h3>LAN, WAN, wireless, firewall</h3><p>Subnet, DHCP and static leases, switch VLANs. Every uplink with its port, VLAN tag, protocol and IPv6 — and a connection test bound to the uplink you are looking at. APs and station links, channel scans. Port forwards, scheduled rules, the zone matrix, DMZ, DoS defaults.</p></div>
+      <div class="card"><span class="k">Terminal</span><h3>A real shell</h3><p>A VT screen model with cursor addressing, scrollback, selection and paste. Multiple tabs on one connection.</p></div>
+      <div class="card"><span class="k">System</span><h3>The dangerous parts, done carefully</h3><p>Live logs, packages (<span class="mono">apk</span> and <span class="mono">opkg</span>), services, firmware upgrades through five gates, backup &amp; restore, regulatory domain, SSH keys, factory reset.</p></div>
+      <div class="card"><span class="k">Changes</span><h3>Staged, diffed, applied once</h3><p>Every edit is staged and shown as a diff before it lands in one <span class="mono">uci batch</span>. A change that carries the connection itself is applied with the router's own rollback armed, so a mistake undoes itself.</p></div>
+    </div>
+  </section>
+
+  <section id="rules">
+    <h2>Four rules, everywhere</h2>
+    <p class="sub">The same discipline on every screen, because a router is the one device you cannot walk over and reboot from your phone if you get it wrong.</p>
+    <div class="rules">
+      <div class="rule"><h3>Show the command</h3><p>Every action shows the exact shell command it is about to run. No hidden magic.</p></div>
+      <div class="rule"><h3>Dry-run first</h3><p>Where the router offers one — <code>apk add --simulate</code>, <code>opkg --noaction</code>, <code>sysupgrade -T</code>, a uci diff — the app runs it and shows the answer before anything changes.</p></div>
+      <div class="rule"><h3>Refuse what cannot be undone from a row</h3><p>Flashing firmware, restoring a backup, a factory reset: each gets its own screen that names exactly what it will cost, and a three-second hold.</p></div>
+      <div class="rule"><h3>Trust the router over the app</h3><p>Exit code 0 is not success. The app re-reads the router to confirm what actually happened.</p></div>
+    </div>
+  </section>
+
+  <section id="screens">
+    <h2>Screens</h2>
+    <p class="sub">Taken on a real router, not a mock.</p>
+    <div class="gallery">
+      <img src="assets/01_gr.png" alt="Dashboard">
+      <img src="assets/02_fw_hub.png" alt="Network hub">
+      <img src="assets/03_fw_Forwards.png" alt="WAN with connection test">
+      <img src="assets/04_fw1.png" alt="Firewall zone matrix">
+      <img src="assets/05_fw_Defaults.png" alt="Firewall defaults and DoS defense">
+      <img src="assets/06_s3.png" alt="Firmware: five gates">
+      <img src="assets/07_n4.png" alt="Flash confirmation red zone">
+      <img src="assets/08_g1.png" alt="Guest Wi-Fi">
+    </div>
+  </section>
+
+  <section id="security" class="sec">
+    <h2>Security</h2>
+    <p class="sub">The app talks to your router and to nothing else. There is no account, no server of ours, no analytics, no ads.</p>
+    <ul>
+      <li><b>Credentials never leave the phone.</b> Passwords and private keys are sealed with an Android Keystore key and stored in app-private storage.</li>
+      <li><b>Host keys are pinned</b> on first contact. A changed key stops the connection until you say otherwise — the app shows both fingerprints and lets you decide.</li>
+      <li><b>Bring your own key, or let the app make one.</b> It can generate an ed25519 key, install it on the router, and prove it works before you rely on it.</li>
+      <li><b>Optional lock.</b> Gate the app behind your device's screen lock or biometrics. The app never sees biometric data — Android does that part.</li>
+    </ul>
+    <p style="color:var(--text-2)">Full details in the <a href="privacy.html">privacy policy</a>.</p>
+  </section>
+
+  <footer>
+    <span>WrtPulse</span>
+    <a href="privacy.html">Privacy policy</a>
+    <a href="https://github.com/iamvivekkaushik/WrtPulse">Source</a>
+    <a href="https://github.com/iamvivekkaushik/WrtPulse/releases">Releases</a>
+    <a href="https://github.com/iamvivekkaushik/WrtPulse/issues">Issues</a>
+    <span class="sp"></span>
+    <span>Not affiliated with the OpenWrt project.</span>
+  </footer>
+</div>
+</body>
+</html>

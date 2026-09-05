@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — WrtPulse</title>
+<meta name="description" content="WrtPulse privacy policy. The app talks only to routers you add, over SSH. No accounts, no analytics, no ads, no servers of ours.">
+<link rel="icon" type="image/png" href="assets/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Red+Hat+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#0E1413; --card:#131B19; --border:#20302B; --hair:#1B2622; --text:#E8F4EF; --text-2:#93A8A0; --dim:#5C7169; --accent:#2EE5C8;
+          --sans:'Instrument Sans',system-ui,-apple-system,Segoe UI,Roboto,sans-serif; --mono:'Red Hat Mono',ui-monospace,Menlo,monospace; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:var(--sans); line-height:1.6; -webkit-font-smoothing:antialiased; }
+  a { color:var(--accent); text-decoration:none; } a:hover { color:#7FF0DC; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 22px 60px; }
+  nav { display:flex; align-items:center; gap:14px; padding:18px 0 36px; }
+  nav img { width:30px; height:30px; border-radius:8px; }
+  nav a.home { color:var(--text-2); font-size:14px; margin-left:auto; }
+  .eyebrow { font-family:var(--mono); font-size:11px; letter-spacing:.16em; color:var(--dim); text-transform:uppercase; }
+  h1 { font-size: clamp(30px, 5vw, 42px); letter-spacing:-0.02em; margin: 10px 0 8px; }
+  .date { color:var(--dim); font-family:var(--mono); font-size:12.5px; margin-bottom: 30px; }
+  .summary { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:18px 20px; margin-bottom: 36px; }
+  .summary p { margin: 0; color: var(--text); }
+  h2 { font-size:20px; margin: 36px 0 10px; letter-spacing:-0.01em; }
+  p, li { color: var(--text-2); }
+  li { margin: 6px 0; }
+  b { color: var(--text); font-weight: 600; }
+  code { font-family:var(--mono); font-size:13px; color:var(--text); background:#0A0F0E; border:1px solid var(--hair); border-radius:5px; padding:1px 6px; }
+  table { width:100%; border-collapse: collapse; font-size: 14.5px; margin: 10px 0 4px; }
+  th, td { text-align:left; padding: 10px 10px; border-bottom: 1px solid var(--hair); vertical-align: top; }
+  th { color: var(--dim); font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; font-weight: 500; }
+  td { color: var(--text-2); } td:first-child { color: var(--text); }
+  footer { border-top:1px solid var(--hair); margin-top: 48px; padding-top: 22px; color: var(--dim); font-size: 13px; display:flex; gap: 18px; flex-wrap: wrap; }
+  footer a { color: var(--text-2); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <img src="assets/icon.png" alt="">
+    <strong>WrtPulse</strong>
+    <a class="home" href="index.html">← wrtpulse home</a>
+  </nav>
+
+  <div class="eyebrow">Privacy policy</div>
+  <h1>WrtPulse collects nothing.</h1>
+  <div class="date">Effective 5 September 2026 · applies to the WrtPulse Android app, package <code>com.vivekkaushik.wrtpulse</code></div>
+
+  <div class="summary">
+    <p>WrtPulse is a tool that manages OpenWrt routers <b>you</b> own, over SSH, from your phone. It has no account system, no analytics, no advertising, no crash reporting, and no server of ours anywhere in the path. The app's only network traffic is the SSH session between your phone and the router you add. Everything it stores lives in the app's private storage on your device and is deleted when you delete the router or uninstall the app.</p>
+  </div>
+
+  <h2>What the app stores on your device</h2>
+  <p>To connect to a router and to remember what it has learned about it, WrtPulse keeps the following in app-private storage on your phone. None of it is transmitted to us or to any third party.</p>
+  <table>
+    <tr><th>Data</th><th>Why</th><th>How it is protected</th></tr>
+    <tr><td>Router address, port, username, a name you give it</td><td>To open the SSH session and label the router in the list</td><td>App-private database</td></tr>
+    <tr><td>Router password and/or SSH private key</td><td>To authenticate to the router</td><td>Encrypted with a key held in the Android Keystore before being stored. The plaintext exists only in memory while a session is open.</td></tr>
+    <tr><td>The router's SSH host key fingerprint</td><td>To detect a changed or impersonated router on later connections</td><td>App-private database</td></tr>
+    <tr><td>Client nicknames you assign</td><td>So a device keeps its name across sessions</td><td>App-private database</td></tr>
+    <tr><td>Configuration backups you create</td><td>So you can restore a router</td><td>App-private files. <b>Note:</b> an OpenWrt backup contains the router's full configuration, including its Wi-Fi passwords and the router's own private SSH host keys. Treat a backup you export as sensitive.</td></tr>
+    <tr><td>Preferences, such as whether the app is locked behind your screen lock</td><td>Your settings</td><td>App-private preferences</td></tr>
+  </table>
+
+  <h2>What leaves your phone</h2>
+  <p><b>Only SSH traffic to routers you have added.</b> The app requests the <code>INTERNET</code> permission for that session and <code>ACCESS_NETWORK_STATE</code> to notice when the phone's network changes. It requests nothing else — no location, no contacts, no camera, no storage access beyond its own directory.</p>
+  <p>WrtPulse does not contact any server operated by us. There is none. It does not send usage data, device identifiers, crash reports or diagnostics anywhere.</p>
+
+  <h2>What your router may contact, on your instruction</h2>
+  <p>Some features ask the <b>router</b> to reach out to the internet. These connections are made by the router, from the router, only when you trigger them, and are governed by those services' own policies rather than this one:</p>
+  <ul>
+    <li><b>Speed test</b> — the router downloads and uploads test data from <code>speed.cloudflare.com</code>. Cloudflare sees your router's public IP address.</li>
+    <li><b>Firmware check and upgrade</b> — OpenWrt's <code>owut</code> tool on the router contacts <code>sysupgrade.openwrt.org</code> and <code>downloads.openwrt.org</code>, sending the router's model, current version and installed package list so a matching image can be built.</li>
+    <li><b>Package installs and updates</b> — the router's package manager (<code>apk</code> or <code>opkg</code>) fetches from the OpenWrt package feeds configured on the router.</li>
+  </ul>
+  <p>The app shows you the exact command before each of these runs.</p>
+
+  <h2>Biometrics and screen lock</h2>
+  <p>You can choose to lock WrtPulse behind your device's screen lock or biometrics. This uses Android's own prompt. The app only learns whether the unlock succeeded; it never receives, stores or processes fingerprint, face or any other biometric data.</p>
+
+  <h2>Sharing</h2>
+  <p>The app never shares anything on its own. When you choose to export a backup or a public key, it hands the file to Android's share sheet and you pick the destination. What happens to the file after that is between you and the app you sent it to.</p>
+
+  <h2>Deleting your data</h2>
+  <ul>
+    <li><b>One router</b> — delete it from the router list. Its address, credentials, host key and nicknames are removed.</li>
+    <li><b>Everything</b> — uninstall the app. All of the app's private storage, including backups, is removed by Android.</li>
+  </ul>
+  <p>Because nothing is stored anywhere but your device, there is nothing for us to delete on your behalf and no request you need to make.</p>
+
+  <h2>Children</h2>
+  <p>WrtPulse is a network administration tool and is not directed at children under 13. It collects no personal information from anyone, of any age.</p>
+
+  <h2>Changes to this policy</h2>
+  <p>If the app ever changes in a way that affects what is stored or transmitted, this page will be updated and the effective date above will change. The policy history is visible in the project's <a href="https://github.com/iamvivekkaushik/WrtPulse/commits/master/site/privacy.html">source repository</a>.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy or the app: open an issue at <a href="https://github.com/iamvivekkaushik/WrtPulse/issues">github.com/iamvivekkaushik/WrtPulse/issues</a>.</p>
+
+  <footer>
+    <a href="index.html">Home</a>
+    <a href="https://github.com/iamvivekkaushik/WrtPulse">Source</a>
+    <span>WrtPulse is not affiliated with the OpenWrt project.</span>
+  </footer>
+</div>
+</body>
+</html>

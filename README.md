@@ -214,6 +214,21 @@ useful before Play is set up. Secrets to add under Settings › Secrets and vari
 `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`,
 `KEY_PASSWORD`, and optionally `PLAY_JSON_KEY_BASE64`.
 
+## Website & privacy policy
+
+`site/` is the landing page and the privacy policy, published to GitHub Pages by
+`.github/workflows/pages.yml` on every push that touches it — at
+<https://iamvivekkaushik.github.io/WrtPulse/> and
+<https://iamvivekkaushik.github.io/WrtPulse/privacy.html>, which is the URL the Play listing
+needs. The store images are copied in from `fastlane/metadata/android/en-US/images` at deploy
+time rather than committed twice; to preview locally, run the same copy:
+
+```bash
+mkdir -p site/assets && cp fastlane/metadata/android/en-US/images/{icon,featureGraphic}.png fastlane/metadata/android/en-US/images/phoneScreenshots/*.png site/assets/
+```
+
+Pages has to be set to **GitHub Actions** as its source once, under Settings › Pages.
+
 ## Not done yet
 
 Scheduled tasks is a placeholder on the System screen. Factory reset is drawn but inert. On
