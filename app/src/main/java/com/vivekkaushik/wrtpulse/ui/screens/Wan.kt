@@ -75,7 +75,7 @@ fun WanSection(
     var page by remember(store) { mutableStateOf(WanPage.Hub) }
     var reviewOpen by remember { mutableStateOf(false) }
 
-    LaunchedEffect(store) { if (store != null && !store.loaded) store.load() }
+    com.vivekkaushik.wrtpulse.ui.LiveRefresh(store, WAN_REFRESH_MS)
     LaunchedEffect(page) { onFullScreen(page != WanPage.Hub) }
     androidx.activity.compose.BackHandler(enabled = page != WanPage.Hub) { page = WanPage.Hub }
 

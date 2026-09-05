@@ -1449,8 +1449,10 @@ fun NetworkHomeScreen(
 ) {
     // The LAN card's chips are read state, so the tab's landing page is what pays for the
     // round trip — by the time the LAN screen opens, its data is already there.
-    androidx.compose.runtime.LaunchedEffect(lan) { if (lan != null && !lan.loaded) lan.load() }
-    androidx.compose.runtime.LaunchedEffect(wan) { if (wan != null && !wan.loaded) wan.load() }
+    // Kept live, not read once: the WAN chip here is the first thing that lies when an
+    // uplink drops, and it used to keep lying until the app was restarted.
+    com.vivekkaushik.wrtpulse.ui.LiveRefresh(wan, WAN_REFRESH_MS)
+    com.vivekkaushik.wrtpulse.ui.LiveRefresh(lan, LAN_REFRESH_MS)
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         com.vivekkaushik.wrtpulse.ui.ConnectionTopBar(
             routerName = routerName,
@@ -1725,6 +1727,15 @@ private fun RadioRow(store: WifiStore, radio: WifiRadio, onClick: () -> Unit) {
 // The Network tab: radio view, interface list, and the add / edit flow
 // ---------------------------------------------------------------------------
 
+/** Link state is what people watch: an unplugged WAN should read as down within seconds. */
+const val WAN_REFRESH_MS = 5_000L
+
+/** Leases and neighbours move slowly, and the LAN read is the heavier batch. */
+const val LAN_REFRESH_MS = 10_000L
+
+/** On-air status and client counts, so a radio going quiet shows up. */
+const val WIFI_REFRESH_MS = 8_000L
+
 private sealed interface WifiRoute {
     /** The Network tab itself — a list of what the tab covers, nothing wireless inline. */
     data object Home : WifiRoute
@@ -1851,6 +1862,8 @@ fun WifiSection(
             if (radio != null) RadioScreen(store, radio) { pop() } else pop()
         }
         is WifiRoute.Interfaces -> Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
+            // On-air status and client counts go stale the same way the WAN chip did.
+            com.vivekkaushik.wrtpulse.ui.LiveRefresh(store, WIFI_REFRESH_MS)
             FormTopBar("Wireless", { pop() }) { MonoTag(routerName, size = 10.5f) }
             if (store != null) {
                 Box(Modifier.weight(1f)) {

@@ -58,7 +58,7 @@ data class WanRow(
  * reappears and confirms — and the confirmation is the app having actually re-read the
  * router, not the command having returned 0.
  */
-class WanStore(private val session: RouterSession) {
+class WanStore(private val session: RouterSession) : Refreshable {
 
     val links = mutableStateListOf<WanLink>()
     val zones = mutableStateListOf<FirewallZone>()
@@ -77,8 +77,8 @@ class WanStore(private val session: RouterSession) {
     /** The LAN's own subnet, for working out whether this session comes in over the WAN. */
     private var lanCidr by mutableStateOf<Pair<Long, Int>?>(null)
 
-    var loaded by mutableStateOf(false); private set
-    var applying by mutableStateOf(false); private set
+    override var loaded by mutableStateOf(false); private set
+    override var applying by mutableStateOf(false); private set
     var testing by mutableStateOf(false); private set
     var error by mutableStateOf<String?>(null)
     var notice by mutableStateOf<String?>(null)
@@ -119,7 +119,7 @@ class WanStore(private val session: RouterSession) {
     // Reading
     // -----------------------------------------------------------------------
 
-    suspend fun load() {
+    override suspend fun load() {
         try {
             val out = session.exec(Commands.WAN_STATE, timeoutMs = 20_000)
                 .requireOk("read wan").stdout

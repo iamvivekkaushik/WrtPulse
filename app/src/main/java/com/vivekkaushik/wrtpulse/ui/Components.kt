@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,6 +39,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.TextUnit.Companion.Unspecified
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import com.vivekkaushik.wrtpulse.data.Refreshable
+import kotlinx.coroutines.delay
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
@@ -610,3 +616,29 @@ fun WrtBottomNav(current: MainTab, onSelect: (MainTab) -> Unit) {
 /** Convenience row spacer. */
 @Composable
 fun RowScope.FlexSpacer() = Box(Modifier.weight(1f))
+
+
+/**
+ * Keeps a store current for as long as the caller is on screen and the app is in the
+ * foreground: one read on arrival, then another every [intervalMs].
+ *
+ * Reading on arrival rather than only when `!loaded` is deliberate — a page left open while
+ * the phone slept should not spend a whole interval showing the past when it wakes. The loop
+ * stays out of the way of a write in flight (that has its own re-read) and of anything the
+ * store says should pause it. Lifecycle-scoped the same way Telemetry is, so a backgrounded
+ * app polls nothing.
+ */
+@Composable
+fun LiveRefresh(store: Refreshable?, intervalMs: Long) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(store) {
+        if (store == null) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            if (!store.applying && !store.refreshPaused) store.load()
+            while (true) {
+                delay(intervalMs)
+                if (!store.applying && !store.refreshPaused) store.load()
+            }
+        }
+    }
+}

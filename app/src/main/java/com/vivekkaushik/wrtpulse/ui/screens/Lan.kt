@@ -87,7 +87,7 @@ fun LanScreen(
     var uciPath by remember { mutableStateOf<String?>(null) }
     var uciText by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(store) { if (store != null && !store.loaded) store.load() }
+    com.vivekkaushik.wrtpulse.ui.LiveRefresh(store, LAN_REFRESH_MS)
     LaunchedEffect(uciPath) {
         val path = uciPath
         uciText = null

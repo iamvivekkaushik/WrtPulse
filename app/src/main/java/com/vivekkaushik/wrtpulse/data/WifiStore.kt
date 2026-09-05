@@ -82,7 +82,7 @@ data class InterfaceRow(
  * edits accumulate here, the diff sheet shows the exact uci ops, and NOTHING reaches the
  * router until the user applies.
  */
-class WifiStore(private val session: RouterSession) {
+class WifiStore(private val session: RouterSession) : Refreshable {
 
     val radios = mutableStateListOf<WifiRadio>()
     val networks = mutableStateListOf<WifiNetwork>()
@@ -123,8 +123,11 @@ class WifiStore(private val session: RouterSession) {
     val scans = mutableStateMapOf<String, List<ScanCell>>()
     var scanning by mutableStateOf(false); private set
 
-    var loaded by mutableStateOf(false); private set
-    var applying by mutableStateOf(false); private set
+    override var loaded by mutableStateOf(false); private set
+    override var applying by mutableStateOf(false); private set
+
+    /** A scan may add a temporary station interface; a refresh mid-scan would list it. */
+    override val refreshPaused: Boolean get() = scanning
     var error by mutableStateOf<String?>(null)
 
     val pendingCount: Int get() = staged.size + drafts.size + deletions.size
@@ -139,7 +142,7 @@ class WifiStore(private val session: RouterSession) {
     /** Every uci op an apply would run — what the review sheet counts. */
     val opCount: Int get() = ops().size + networkOps().size
 
-    suspend fun load() {
+    override suspend fun load() {
         try {
             // One round trip: config, running state, and the live radio facts behind it.
             val batch = listOf(

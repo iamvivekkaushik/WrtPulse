@@ -52,7 +52,7 @@ enum class PortState { Off, Untagged, Tagged }
  * (`network` and `dhcp`) and they are committed together, because a subnet that moves
  * without its DHCP pool leaves every client asking the wrong router for an address.
  */
-class LanStore(private val session: RouterSession) {
+class LanStore(private val session: RouterSession) : Refreshable {
 
     /** The interface this screen is about. Every OpenWrt install calls it `lan`. */
     val section = "lan"
@@ -79,8 +79,8 @@ class LanStore(private val session: RouterSession) {
     /** dnsmasq's process, not its config: `ignore '0'` with nothing running serves nobody. */
     var dnsmasqRunning by mutableStateOf(false); private set
 
-    var loaded by mutableStateOf(false); private set
-    var applying by mutableStateOf(false); private set
+    override var loaded by mutableStateOf(false); private set
+    override var applying by mutableStateOf(false); private set
     var error by mutableStateOf<String?>(null)
 
     /**
@@ -118,7 +118,7 @@ class LanStore(private val session: RouterSession) {
     // Reading
     // -----------------------------------------------------------------------
 
-    suspend fun load() {
+    override suspend fun load() {
         if (movedTo != null) return
         try {
             val out = session.exec(Commands.lanState(section), timeoutMs = 20_000)
