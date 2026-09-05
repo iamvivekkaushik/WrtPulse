@@ -45,6 +45,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -580,6 +581,12 @@ fun FormTextField(
     value: String,
     onChange: (String) -> Unit,
     password: Boolean = false,
+    /**
+     * Shows bullets instead of the characters. The field still holds — and still takes —
+     * the real value: masking by rewriting it into bullets makes every keystroke while
+     * hidden either a no-op or corruption, which is not what an eye icon promises.
+     */
+    masked: Boolean = false,
     trailing: @Composable () -> Unit = {},
 ) {
     Row(
@@ -604,7 +611,8 @@ fun FormTextField(
                     keyboardType = if (password) KeyboardType.Password else KeyboardType.Ascii,
                     autoCorrectEnabled = false,
                 ),
-                visualTransformation = VisualTransformation.None,
+                visualTransformation =
+                    if (masked) PasswordVisualTransformation('\u2022') else VisualTransformation.None,
                 // An empty field measures to its text without this, leaving most of the box
                 // it sits in unable to take a tap.
                 modifier = Modifier.fillMaxWidth(),
@@ -889,8 +897,10 @@ fun ApFormScreen(
                 Column {
                     FieldLabel("PASSWORD")
                     FormTextField(
-                        value = if (reveal) password else "•".repeat(password.length),
-                        onChange = { if (reveal) password = it },
+                        value = password,
+                        onChange = { password = it },
+                        password = true,
+                        masked = !reveal,
                     ) {
                         Icon(
                             WrtIcons.Eye,
@@ -1189,8 +1199,10 @@ fun ClientJoinScreen(
                 Column {
                     FieldLabel("PASSWORD")
                     FormTextField(
-                        value = if (reveal) password else "•".repeat(password.length),
-                        onChange = { if (reveal) password = it },
+                        value = password,
+                        onChange = { password = it },
+                        password = true,
+                        masked = !reveal,
                     ) {
                         Icon(
                             WrtIcons.Eye,
@@ -1198,9 +1210,6 @@ fun ClientJoinScreen(
                             Modifier.size(17.dp).clickable { reveal = !reveal },
                             tint = if (reveal) Wrt.Accent else Wrt.TextTertiary,
                         )
-                    }
-                    if (!reveal && password.isNotEmpty()) {
-                        Text("Reveal to edit.", style = sans(10.5f, 400, Wrt.TextDim), modifier = Modifier.padding(top = 5.dp))
                     }
                 }
             }
