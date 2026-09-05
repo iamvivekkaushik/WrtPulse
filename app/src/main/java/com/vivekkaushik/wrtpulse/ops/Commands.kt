@@ -538,6 +538,59 @@ object Commands {
     /** The config archive sysupgrade itself would carry across, written where it can be read. */
     const val BACKUP_FILE = "/tmp/wrtpulse-backup.tar.gz"
 
+    // ── Firewall ──────────────────────────────────────────────────────────────
+    // fw4 reads /etc/config/firewall and nothing else the app touches, so the whole section
+    // is uci in and `firewall reload` out. The reload is rollback-armed like a WAN change:
+    // a rule that rejects the phone's own SSH is the one mistake this screen can make that
+    // the screen itself cannot undo.
+
+    /** Config, engine state, and the lease table the device pickers read from. */
+    val FIREWALL_STATE = listOf(
+        "echo $SECTION firewall" to "uci show firewall 2>/dev/null",
+        "echo $SECTION service" to "ubus call service list '{\"name\":\"firewall\"}' 2>/dev/null || echo '{}'",
+        // fw4 is the nftables engine on 22.03+; its absence means iptables-era fw3.
+        "echo $SECTION engine" to "command -v fw4 >/dev/null 2>&1 && echo fw4 || echo fw3",
+        // Neither engine is a daemon — fw4 loads a ruleset and exits — so "running" means the
+        // ruleset is in the kernel: the fw4 table under nftables, or a zone chain under iptables.
+        "echo $SECTION active" to
+            "(nft list tables 2>/dev/null | grep -q 'inet fw4' && echo active) || " +
+            "(iptables -S zone_lan_input >/dev/null 2>&1 && echo active) || echo inactive",
+        "echo $SECTION reloaded" to "stat -c %Y /var/run/fw4.state 2>/dev/null || echo",
+        "echo $SECTION now" to "date +%s",
+        "echo $SECTION leases" to "cat /tmp/dhcp.leases 2>/dev/null",
+        // The router's own listeners — a forward onto one of these locks the app out.
+        "echo $SECTION listen" to "netstat -tln 2>/dev/null | awk 'NR>2{print \$4}' || true",
+    ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    const val FIREWALL_RELOAD = "/etc/init.d/firewall reload"
+    const val FIREWALL_ROLLBACK_DIR = "/tmp/wrtpulse-fw"
+
+    /**
+     * Applies firewall operations with the same failsafe as [wanApply]: the config is copied
+     * first and a detached watcher puts it back and reloads unless [FIREWALL_CONFIRM] lands
+     * within [seconds]. A rule that rejects the phone's own session is the one change here
+     * that would otherwise need a cable to undo.
+     */
+    fun firewallApply(operations: List<String>, seconds: Int = 15): String = buildString {
+        append("mkdir -p $FIREWALL_ROLLBACK_DIR && ")
+        append("cp /etc/config/firewall $FIREWALL_ROLLBACK_DIR/firewall && ")
+        append("rm -f $FIREWALL_ROLLBACK_DIR/confirm && ")
+        append("(sleep $seconds; [ -f $FIREWALL_ROLLBACK_DIR/confirm ] && exit 0; ")
+        append("cp $FIREWALL_ROLLBACK_DIR/firewall /etc/config/firewall; ")
+        append("$FIREWALL_RELOAD; echo rolled-back > $FIREWALL_ROLLBACK_DIR/last) ")
+        append(">/dev/null 2>&1 &\n")
+        append("uci batch <<'WRTPULSE_EOF'\n")
+        operations.forEach { append(it).append('\n') }
+        append("WRTPULSE_EOF\n")
+        append("uci commit firewall && $FIREWALL_RELOAD; echo applied")
+    }
+
+    /** Disarms the firewall rollback — sent once the app has re-read the router. */
+    const val FIREWALL_CONFIRM = "touch $FIREWALL_ROLLBACK_DIR/confirm && echo confirmed"
+
+    /** Whether the last watcher fired. Read on the next load so a revert is never silent. */
+    const val FIREWALL_LAST = "cat $FIREWALL_ROLLBACK_DIR/last 2>/dev/null; rm -f $FIREWALL_ROLLBACK_DIR/last"
+
     // ── Factory reset ─────────────────────────────────────────────────────────
     // The red zone has to name what it is about to erase, so it reads the config it is
     // about to throw away first. Nothing here writes; the destructive line is FACTORY_RESET

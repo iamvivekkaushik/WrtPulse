@@ -205,6 +205,32 @@ object WrtIcons {
     )
     val Clock = stroked("clock", 1.6f, "M12 3.5 A8.5 8.5 0 1 1 11.99 3.5 Z", "M12 7v5l3.5 2")
 
+    // Firewall hub (design screens 31–37)
+    val Forwarding = stroked("forwarding", 1.6f, "M7 8l-4 4 4 4", "M17 8l4 4-4 4", "M13 5l-2 14")
+    val Rules = stroked(
+        "rules", 1.6f,
+        "M4 6h16", "M7 12h13", "M10 18h10",
+        "M5 12 A1.3 1.3 0 1 1 4.99 12 Z", "M7.5 18 A1.3 1.3 0 1 1 7.49 18 Z",
+    )
+    val Zones = stroked(
+        "zones", 1.6f,
+        "M3 5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5z",
+        "M13 15a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-4z",
+        "M11 17H8a3 3 0 0 1-3-3v-3", "M13 7h3a3 3 0 0 1 3 3v3",
+    )
+    val ShieldOff = stroked(
+        "shieldOff", 1.6f,
+        "M12 2l8 3.5v5.5c0 5-3.4 8.6-8 10.5-4.6-1.9-8-5.5-8-10.5V5.5L12 2z",
+        "M6 6l12 12",
+    )
+    val Defaults = stroked(
+        "defaults", 1.6f,
+        "M12 9 A3 3 0 1 1 11.99 9 Z",
+        "M12 2v3", "M12 19v3", "M2 12h3", "M19 12h3",
+        "M4.9 4.9l2.1 2.1", "M17 17l2.1 2.1", "M19.1 4.9L17 7", "M7 17l-2.1 2.1",
+    )
+    val ArrowRight = stroked("arrowRight", 2f, "M5 12h14", "M13 6l6 6-6 6")
+
     // Logs
     val LiveLogs = stroked(
         "liveLogs", 1.6f,

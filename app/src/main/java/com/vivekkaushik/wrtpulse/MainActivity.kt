@@ -35,6 +35,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.vivekkaushik.wrtpulse.data.BackupStore
+import com.vivekkaushik.wrtpulse.data.FirewallStore
 import com.vivekkaushik.wrtpulse.data.FirmwareStore
 import com.vivekkaushik.wrtpulse.data.Inventory
 import com.vivekkaushik.wrtpulse.data.LanStore
@@ -159,6 +160,8 @@ private fun WrtPulseApp() {
     // until the Services screen is actually opened.
     val serviceStore = remember(session) { session?.let { ServiceStore(it) } }
     val firmwareStore = remember(session) { session?.let { FirmwareStore(it) } }
+    // Read when the section opens — it is a full `uci show firewall` plus the lease table.
+    val firewallStore = remember(session) { session?.let { FirewallStore(it) } }
     // Backups live in app-private storage. The store lists them on creation so the System
     // row can say when the last one was taken without the screen being opened.
     val backupStore = remember(session) { session?.let { BackupStore(it, File(context.filesDir, "backups")) } }
@@ -400,6 +403,7 @@ private fun WrtPulseApp() {
                                     store = wifiStore,
                                     lan = lanStore,
                                     wan = wanStore,
+                                    firewall = firewallStore,
                                     live = telemetry,
                                     liveLatencyMs = telemetry?.latencyMs,
                                     routerName = currentRouter,

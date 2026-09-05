@@ -1962,6 +1962,209 @@ object Parsers {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Firewall
+    // -----------------------------------------------------------------------
+
+    /** `config zone` — a named group of networks with one policy per direction. */
+    data class FwZone(
+        /** The uci section: `@zone[1]` or a named one. */
+        val section: String,
+        val name: String,
+        val networks: List<String>,
+        val input: String,
+        val output: String,
+        val forward: String,
+        val masq: Boolean,
+        val mtuFix: Boolean,
+    )
+
+    /** `config redirect` with target DNAT — a port forward, or a DMZ when it names no port. */
+    data class FwForward(
+        val section: String,
+        val name: String,
+        val src: String,
+        val dest: String,
+        val proto: String,
+        /** The port the world knocks on. Empty means every port — that is a DMZ. */
+        val srcPort: String,
+        val destIp: String,
+        /** Empty means the same as [srcPort]. */
+        val destPort: String,
+        val enabled: Boolean,
+    ) {
+        val isDmz: Boolean get() = srcPort.isEmpty() && destIp.isNotEmpty()
+    }
+
+    /** `config rule` — a traffic rule, with fw4's optional schedule. */
+    data class FwRule(
+        val section: String,
+        val name: String,
+        val src: String,
+        val dest: String,
+        val proto: String,
+        val srcIp: String,
+        val destIp: String,
+        val destPort: String,
+        val target: String,
+        val enabled: Boolean,
+        val weekdays: List<String>,
+        val startTime: String,
+        val stopTime: String,
+        val family: String,
+    ) {
+        val scheduled: Boolean get() = weekdays.isNotEmpty() || startTime.isNotEmpty() || stopTime.isNotEmpty()
+    }
+
+    /** `config forwarding` — permission for one zone to reach another. */
+    data class FwForwarding(val section: String, val src: String, val dest: String)
+
+    /** `config defaults`. */
+    data class FwDefaults(
+        val section: String = "@defaults[0]",
+        val input: String = "REJECT",
+        val output: String = "ACCEPT",
+        val forward: String = "REJECT",
+        val synFlood: Boolean = false,
+        val dropInvalid: Boolean = false,
+    )
+
+    data class FirewallConfig(
+        val defaults: FwDefaults = FwDefaults(),
+        val zones: List<FwZone> = emptyList(),
+        val forwards: List<FwForward> = emptyList(),
+        val rules: List<FwRule> = emptyList(),
+        val forwardings: List<FwForwarding> = emptyList(),
+    )
+
+    /** What is running: fw4 or fw3, whether the service is up, and when it last loaded. */
+    data class FwEngine(
+        val running: Boolean,
+        val engine: String,
+        /** Seconds since the last reload, when the state file says. */
+        val reloadedAgoSec: Long?,
+    )
+
+    private fun uciBool(value: String?): Boolean = value == "1" || value == "true" || value == "yes" || value == "on"
+
+    /**
+     * `uci show firewall` → the config as typed sections.
+     *
+     * Section order is kept: fw4 evaluates rules top to bottom and the screen has to show
+     * them in the order they fire. A section missing a `name` is shown by its section id
+     * rather than dropped — an unnamed rule still rejects packets.
+     */
+    fun firewallConfig(uci: Map<String, String>): FirewallConfig {
+        // Section lines are `firewall.<section>=<type>` — exactly one dot.
+        val sections = uci.entries
+            .filter { it.key.startsWith("firewall.") && it.key.count { c -> c == '.' } == 1 }
+            .map { it.key.removePrefix("firewall.") to it.value }
+        fun opt(section: String, option: String) = uci["firewall.$section.$option"]
+        fun list(section: String, option: String) = uciList(opt(section, option).orEmpty())
+        var defaults = FwDefaults()
+        val zones = mutableListOf<FwZone>()
+        val forwards = mutableListOf<FwForward>()
+        val rules = mutableListOf<FwRule>()
+        val forwardings = mutableListOf<FwForwarding>()
+        for ((section, type) in sections) {
+            when (type) {
+                "defaults" -> defaults = FwDefaults(
+                    section = section,
+                    input = opt(section, "input") ?: "REJECT",
+                    output = opt(section, "output") ?: "ACCEPT",
+                    forward = opt(section, "forward") ?: "REJECT",
+                    synFlood = uciBool(opt(section, "syn_flood")),
+                    dropInvalid = uciBool(opt(section, "drop_invalid")),
+                )
+                "zone" -> zones += FwZone(
+                    section = section,
+                    name = opt(section, "name").orEmpty(),
+                    networks = list(section, "network"),
+                    input = opt(section, "input") ?: defaults.input,
+                    output = opt(section, "output") ?: defaults.output,
+                    forward = opt(section, "forward") ?: defaults.forward,
+                    masq = uciBool(opt(section, "masq")),
+                    mtuFix = uciBool(opt(section, "mtu_fix")),
+                )
+                "redirect" -> if ((opt(section, "target") ?: "DNAT").equals("DNAT", ignoreCase = true)) {
+                    forwards += FwForward(
+                        section = section,
+                        name = opt(section, "name").orEmpty(),
+                        src = opt(section, "src").orEmpty(),
+                        dest = opt(section, "dest").orEmpty(),
+                        proto = opt(section, "proto") ?: "tcp udp",
+                        srcPort = opt(section, "src_dport").orEmpty(),
+                        destIp = opt(section, "dest_ip").orEmpty(),
+                        destPort = opt(section, "dest_port").orEmpty(),
+                        enabled = opt(section, "enabled")?.let(::uciBool) ?: true,
+                    )
+                }
+                "rule" -> rules += FwRule(
+                    section = section,
+                    name = opt(section, "name").orEmpty(),
+                    src = opt(section, "src").orEmpty(),
+                    dest = opt(section, "dest").orEmpty(),
+                    proto = opt(section, "proto").orEmpty(),
+                    srcIp = list(section, "src_ip").joinToString(" "),
+                    destIp = list(section, "dest_ip").joinToString(" "),
+                    destPort = opt(section, "dest_port").orEmpty(),
+                    target = opt(section, "target") ?: "DROP",
+                    enabled = opt(section, "enabled")?.let(::uciBool) ?: true,
+                    // Either a list or one space-joined string, depending on who wrote it.
+                    weekdays = list(section, "weekdays").flatMap { it.split(' ') }.filter { it.isNotEmpty() },
+                    startTime = opt(section, "start_time").orEmpty(),
+                    stopTime = opt(section, "stop_time").orEmpty(),
+                    family = opt(section, "family").orEmpty(),
+                )
+                "forwarding" -> forwardings += FwForwarding(
+                    section = section,
+                    src = opt(section, "src").orEmpty(),
+                    dest = opt(section, "dest").orEmpty(),
+                )
+            }
+        }
+        return FirewallConfig(defaults, zones, forwards, rules, forwardings)
+    }
+
+    /**
+     * The `service`, `engine`, `active`, `reloaded` and `now` sections of [Commands.FIREWALL_STATE].
+     *
+     * Running means a ruleset is loaded. procd's "running" is accepted too, but fw4 never
+     * says it — the script exits once the rules are in — so on its own it would read as a
+     * stopped firewall on every fw4 router.
+     */
+    fun firewallEngine(parts: Map<String, String>): FwEngine {
+        val service = parts["service"].orEmpty()
+        val running = parts["active"].orEmpty().trim() == "active" ||
+            service.contains("\"running\": true") || service.contains("\"running\":true")
+        val engine = parts["engine"].orEmpty().trim().ifEmpty { "fw3" }
+        val reloaded = parts["reloaded"]?.trim()?.toLongOrNull()
+        val now = parts["now"]?.trim()?.toLongOrNull()
+        return FwEngine(
+            running = running,
+            engine = engine,
+            reloadedAgoSec = if (reloaded != null && now != null && now >= reloaded) now - reloaded else null,
+        )
+    }
+
+    /**
+     * `netstat -tln` addresses → the ports the router itself listens on. A forward that takes
+     * one of these steals it from the router — port 22 being the one that locks the app out.
+     */
+    fun listeningPorts(text: String): Set<Int> = text.lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .mapNotNull { it.substringAfterLast(':').toIntOrNull() }
+        .toSet()
+
+    /** `21:00` → minutes since midnight, or null for anything that is not HH:MM. */
+    fun clockMinutes(text: String): Int? {
+        val m = Regex("^(\\d{1,2}):(\\d{2})(?::\\d{2})?$").find(text.trim()) ?: return null
+        val h = m.groupValues[1].toInt()
+        val min = m.groupValues[2].toInt()
+        return if (h in 0..23 && min in 0..59) h * 60 + min else null
+    }
+
     /**
      * What a factory reset takes with it, read from the config before it is erased.
      *
