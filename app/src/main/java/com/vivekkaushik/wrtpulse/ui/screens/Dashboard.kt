@@ -71,18 +71,22 @@ fun DashboardScreen(
     live: Telemetry?,
     inventory: Inventory?,
     ops: RouterOps? = null,
+    guest: com.vivekkaushik.wrtpulse.data.GuestStore? = null,
+    board: com.vivekkaushik.wrtpulse.ops.BoardInfo? = null,
     routerName: String,
     onRouterTap: () -> Unit,
     onOpenTerminal: () -> Unit,
 ) {
     var rebootOpen by remember { mutableStateOf(false) }
     var speedOpen by remember { mutableStateOf(false) }
+    var guestOpen by remember { mutableStateOf(false) }
     if (rebootOpen && ops != null) {
         RebootDialog(ops, routerName, onDismiss = { rebootOpen = false })
     }
     if (speedOpen && ops != null) {
         SpeedtestDialog(ops, onDismiss = { speedOpen = false })
     }
+  Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         ConnectionTopBar(
             routerName = routerName,
@@ -141,7 +145,10 @@ fun DashboardScreen(
                     Modifier.weight(1f), WrtIcons.Reboot, "Reboot",
                     onClick = if (ops != null) ({ rebootOpen = true }) else null,
                 )
-                QuickAction(Modifier.weight(1f), WrtIcons.GuestWifi, "Guest Wi-Fi")
+                QuickAction(
+                    Modifier.weight(1f), WrtIcons.GuestWifi, "Guest Wi-Fi",
+                    onClick = if (guest != null) ({ guestOpen = true }) else null,
+                )
                 QuickAction(
                     Modifier.weight(1f), WrtIcons.Speedtest, "Speedtest",
                     onClick = if (ops != null) ({ speedOpen = true }) else null,
@@ -150,6 +157,10 @@ fun DashboardScreen(
             }
         }
     }
+    SheetHost(visible = guestOpen, onDismiss = { guestOpen = false }) {
+        GuestSheet(guest, board?.hostname, onDismiss = { guestOpen = false })
+    }
+  }
 }
 
 @Composable

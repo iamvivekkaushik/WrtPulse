@@ -36,6 +36,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.vivekkaushik.wrtpulse.data.BackupStore
 import com.vivekkaushik.wrtpulse.data.FirewallStore
+import com.vivekkaushik.wrtpulse.data.GuestStore
 import com.vivekkaushik.wrtpulse.data.FirmwareStore
 import com.vivekkaushik.wrtpulse.data.Inventory
 import com.vivekkaushik.wrtpulse.data.LanStore
@@ -152,6 +153,7 @@ private fun WrtPulseApp() {
     val wanStore = remember(session) { session?.let { WanStore(it) } }
     val termSessions = remember(session) { session?.let { TerminalSessions(it, scope) } }
     val routerOps = remember(session) { session?.let { RouterOps(it) } }
+    val guestStore = remember(session) { session?.let { GuestStore(it) } }
     val liveLogs = remember(session) { session?.let { LiveLogs(it) } }
     // Read on entry rather than on a tick — the installed list only changes when
     // somebody changes it, and reading it sweeps the whole package database.
@@ -394,6 +396,8 @@ private fun WrtPulseApp() {
                                     live = telemetry,
                                     inventory = inventory,
                                     ops = routerOps,
+                                    guest = guestStore,
+                                    board = flow.board,
                                     routerName = currentRouter,
                                     onRouterTap = { showSwitcher = true },
                                     onOpenTerminal = { tab = MainTab.Terminal },
