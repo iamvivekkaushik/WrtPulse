@@ -71,5 +71,9 @@ object Wrt {
     val DangerMono = Color(0xFFB9A29C)
     val DangerSub = Color(0xFF9B7A74)
     val DangerOutlineText = Color(0xFFD9938A)
+
+    // The "what you lose" rows (design screen 43) and the reassurance line beside them.
+    val DangerLoss = Color(0xFFD9B8B2)
+    val AccentBody = Color(0xFFB8D4CB)
     val OnRed = Color(0xFF2A0C08)
 }

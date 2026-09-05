@@ -1963,6 +1963,47 @@ object Parsers {
     }
 
     /**
+     * What a factory reset takes with it, read from the config before it is erased.
+     *
+     * Counts rather than contents: the screen has to be honest about the scale of the loss
+     * without turning into a config dump nobody reads at the moment they are least able to.
+     */
+    data class ResetSummary(
+        val ssids: List<String> = emptyList(),
+        val lanAddress: String? = null,
+        val wanProto: String? = null,
+        val forwards: Int = 0,
+        val rules: Int = 0,
+        val reservations: Int = 0,
+        val packages: List<String> = emptyList(),
+    )
+
+    /** Sections of [Commands.RESET_SUMMARY] → what the reset erases. */
+    fun resetSummary(parts: Map<String, String>): ResetSummary {
+        val wireless = uciShow(parts["wireless"].orEmpty())
+        val network = uciShow(parts["network"].orEmpty())
+        val firewall = uciShow(parts["firewall"].orEmpty())
+        val dhcp = uciShow(parts["dhcp"].orEmpty())
+        // A disabled radio's SSID still disappears, so it is still a loss worth naming.
+        val ssids = wireless.entries
+            .filter { it.key.endsWith(".ssid") }
+            .map { it.value }
+            .filter { it.isNotBlank() }
+            .distinct()
+        return ResetSummary(
+            ssids = ssids,
+            // The address may be held as a CIDR, the same shape the LAN screen handles.
+            lanAddress = network["network.lan.ipaddr"]?.substringBefore('/')?.takeIf { it.isNotBlank() },
+            wanProto = network["network.wan.proto"]?.takeIf { it.isNotBlank() },
+            forwards = firewall.values.count { it == "redirect" },
+            rules = firewall.values.count { it == "rule" },
+            // Named and anonymous host sections both, but only the section lines themselves.
+            reservations = dhcp.entries.count { it.value == "host" && it.key.count { c -> c == '.' } == 1 },
+            packages = userPackages(parts["packages"].orEmpty()),
+        )
+    }
+
+    /**
      * `uci show wireless` → flat key/value map, quotes stripped.
      * e.g. wireless.@wifi-iface[0].ssid='Casa'
      */

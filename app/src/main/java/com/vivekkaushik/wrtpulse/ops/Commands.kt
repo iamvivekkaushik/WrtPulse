@@ -538,6 +538,28 @@ object Commands {
     /** The config archive sysupgrade itself would carry across, written where it can be read. */
     const val BACKUP_FILE = "/tmp/wrtpulse-backup.tar.gz"
 
+    // ── Factory reset ─────────────────────────────────────────────────────────
+    // The red zone has to name what it is about to erase, so it reads the config it is
+    // about to throw away first. Nothing here writes; the destructive line is FACTORY_RESET
+    // and it runs only from the hold.
+
+    /** Everything the reset screen names before it lets the hold arm. */
+    val RESET_SUMMARY = listOf(
+        "echo $SECTION wireless" to "uci show wireless 2>/dev/null",
+        "echo $SECTION network" to "uci show network 2>/dev/null",
+        "echo $SECTION firewall" to "uci show firewall 2>/dev/null",
+        "echo $SECTION dhcp" to "uci show dhcp 2>/dev/null",
+        "echo $SECTION packages" to USER_PACKAGES,
+    ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    /**
+     * `firstboot -y && reboot` — wipes /overlay and restarts.
+     *
+     * Detached and delayed for the same reason as [flash]: the reboot kills the SSH session,
+     * and a command still attached to it would look like a failure when it is the point.
+     */
+    const val FACTORY_RESET = "(sleep 1; firstboot -y && reboot) >/dev/null 2>&1 & echo resetting"
+
     /** Writes the backup and answers with its size, so the app can refuse an absurd one. */
     const val BACKUP_CREATE =
         "rm -f $BACKUP_FILE; sysupgrade -b $BACKUP_FILE >/dev/null 2>&1 && wc -c < $BACKUP_FILE"

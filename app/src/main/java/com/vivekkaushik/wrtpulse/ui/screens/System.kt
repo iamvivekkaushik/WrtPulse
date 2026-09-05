@@ -64,6 +64,7 @@ fun SystemScreen(
     onOpenPackages: () -> Unit = {},
     onOpenServices: () -> Unit = {},
     onOpenFirmware: () -> Unit = {},
+    onOpenReset: () -> Unit = {},
     onOpenCountry: () -> Unit = {},
     onOpenSshKeys: () -> Unit = {},
     onOpenBackup: () -> Unit = {},
@@ -226,7 +227,11 @@ fun SystemScreen(
                     .background(Wrt.Red.copy(alpha = 0.04f), RoundedCornerShape(13.dp))
                     .padding(horizontal = 14.dp, vertical = 2.dp)
             ) {
-                DangerRow(WrtIcons.Warning, "Factory reset", "Erases all settings · type RESET to confirm")
+                DangerRow(
+                    WrtIcons.Warning, "Factory reset",
+                    "Erases all settings · firstboot -y && reboot",
+                    onClick = if (isLive) onOpenReset else null,
+                )
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Wrt.Red.copy(alpha = 0.15f)))
                 DangerRow(
                     WrtIcons.Lightning, "Reflash firmware",

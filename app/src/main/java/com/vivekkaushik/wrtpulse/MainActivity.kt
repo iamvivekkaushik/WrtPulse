@@ -42,6 +42,7 @@ import com.vivekkaushik.wrtpulse.data.WanStore
 import com.vivekkaushik.wrtpulse.data.LiveLogs
 import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.PackageStore
+import com.vivekkaushik.wrtpulse.data.ResetStore
 import com.vivekkaushik.wrtpulse.data.RouterOps
 import com.vivekkaushik.wrtpulse.data.RouterStatus
 import com.vivekkaushik.wrtpulse.data.ServiceStore
@@ -60,6 +61,7 @@ import com.vivekkaushik.wrtpulse.ui.screens.ClientsScreen
 import com.vivekkaushik.wrtpulse.ui.screens.CountryScreen
 import com.vivekkaushik.wrtpulse.ui.screens.DashboardScreen
 import com.vivekkaushik.wrtpulse.ui.screens.DiffSheetContent
+import com.vivekkaushik.wrtpulse.ui.screens.FactoryResetScreen
 import com.vivekkaushik.wrtpulse.ui.screens.FirmwareScreen
 import com.vivekkaushik.wrtpulse.ui.screens.HostKeyScreen
 import com.vivekkaushik.wrtpulse.ui.screens.LogsScreen
@@ -160,6 +162,11 @@ private fun WrtPulseApp() {
     // Backups live in app-private storage. The store lists them on creation so the System
     // row can say when the last one was taken without the screen being opened.
     val backupStore = remember(session) { session?.let { BackupStore(it, File(context.filesDir, "backups")) } }
+    // Reads only until the hold; the screen loads it, since walking the config to say what
+    // a reset erases is not worth doing until someone is looking at the red zone.
+    val resetStore = remember(session) {
+        session?.let { ResetStore(it, File(context.filesDir, "backups")) }
+    }
     LaunchedEffect(backupStore) {
         backupStore?.refreshLocal()
         // "Snapshot before every Apply" (design screen 38). The preference outlives the
@@ -215,6 +222,7 @@ private fun WrtPulseApp() {
     var packagesOpen by remember { mutableStateOf(false) }
     var servicesOpen by remember { mutableStateOf(false) }
     var firmwareOpen by remember { mutableStateOf(false) }
+    var resetOpen by remember { mutableStateOf(false) }
     var countryOpen by remember { mutableStateOf(false) }
     var sshKeysOpen by remember { mutableStateOf(false) }
     var backupOpen by remember { mutableStateOf(false) }
@@ -474,6 +482,11 @@ private fun WrtPulseApp() {
                                         store = wifiStore,
                                         onBack = { countryOpen = false },
                                     )
+                                } else if (resetOpen) {
+                                    FactoryResetScreen(
+                                        store = resetStore,
+                                        onBack = { resetOpen = false },
+                                    )
                                 } else if (firmwareOpen) {
                                     FirmwareScreen(
                                         store = firmwareStore,
@@ -526,6 +539,7 @@ private fun WrtPulseApp() {
                                         onOpenPackages = { packagesOpen = true },
                                         onOpenServices = { servicesOpen = true },
                                         onOpenFirmware = { firmwareOpen = true },
+                                        onOpenReset = { resetOpen = true },
                                         onOpenCountry = { countryOpen = true },
                                         onOpenSshKeys = { sshKeysOpen = true },
                                         onOpenBackup = { backupOpen = true },
@@ -537,7 +551,7 @@ private fun WrtPulseApp() {
                             WrtBottomNav(current = tab) { picked ->
                                 if (picked != MainTab.System) {
                                     logsOpen = false; packagesOpen = false
-                                    servicesOpen = false; firmwareOpen = false
+                                    servicesOpen = false; firmwareOpen = false; resetOpen = false
                                     countryOpen = false; sshKeysOpen = false; backupOpen = false
                                 }
                                 tab = picked
@@ -635,6 +649,7 @@ private fun WrtPulseApp() {
             dest == Dest.Main && tab == MainTab.System && sshKeysOpen -> sshKeysOpen = false
             dest == Dest.Main && tab == MainTab.System && backupOpen -> backupOpen = false
             dest == Dest.Main && tab == MainTab.System && countryOpen -> countryOpen = false
+            dest == Dest.Main && tab == MainTab.System && resetOpen -> resetOpen = false
             dest == Dest.Main && tab == MainTab.System && firmwareOpen -> firmwareOpen = false
             dest == Dest.Main && tab == MainTab.System && servicesOpen -> servicesOpen = false
             dest == Dest.Main && tab == MainTab.System && packagesOpen -> packagesOpen = false
