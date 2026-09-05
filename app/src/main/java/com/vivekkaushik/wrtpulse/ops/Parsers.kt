@@ -1437,6 +1437,48 @@ object Parsers {
     // ── Backup & restore ──────────────────────────────────────────────────────
 
     /**
+     * A progress line from `owut download`, as a fraction and as bytes when it says both.
+     *
+     * The format is not something this app gets to decide, and it has never been read off a
+     * real run here — so the parser takes the shapes owut and the fetchers under it are known
+     * to print (`45%`, `18.3M/27.9M`, `18.3 / 27.9 MB`, raw byte pairs) and returns null for
+     * anything else, which the screen shows as an indeterminate bar rather than a wrong one.
+     */
+    fun downloadProgress(line: String): Pair<Float?, Pair<Long, Long>?>? {
+        val text = line.trim()
+        if (text.isEmpty()) return null
+        val pair = Regex(
+            "([0-9]+(?:\\.[0-9]+)?)\\s*([kKmMgG])?[bB]?\\s*/\\s*([0-9]+(?:\\.[0-9]+)?)\\s*([kKmMgG])?[bB]?"
+        ).find(text)
+        if (pair != null) {
+            // "18.3 / 27.9 MB" states the unit once and means it for both sides; only when
+            // each side carries its own is one allowed to differ.
+            val doneUnit = pair.groupValues[2].ifEmpty { pair.groupValues[4] }
+            val totalUnit = pair.groupValues[4].ifEmpty { pair.groupValues[2] }
+            val done = scaleBytes(pair.groupValues[1], doneUnit)
+            val total = scaleBytes(pair.groupValues[3], totalUnit)
+            if (done != null && total != null && total > 0 && done <= total) {
+                return (done.toFloat() / total) to (done to total)
+            }
+        }
+        val percent = Regex("(?<![0-9.])([0-9]{1,3})\\s*%").find(text)
+            ?.groupValues?.get(1)?.toIntOrNull()
+        if (percent != null && percent in 0..100) return (percent / 100f) to null
+        return null
+    }
+
+    private fun scaleBytes(number: String, unit: String): Long? {
+        val value = number.toDoubleOrNull() ?: return null
+        val factor = when (unit.lowercase()) {
+            "k" -> 1024.0
+            "m" -> 1024.0 * 1024
+            "g" -> 1024.0 * 1024 * 1024
+            else -> 1.0
+        }
+        return (value * factor).toLong()
+    }
+
+    /**
      * `owut list -f fs-user` → the packages the user installed beyond the default image.
      *
      * One name per line, sometimes with a version after whitespace; header or status lines

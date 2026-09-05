@@ -81,13 +81,16 @@ does not configure.
 - **Services** — every init script, with whether it is running, whether it starts at boot, and
   its PID. Start, stop, restart, reload, enable, disable — each showing the exact command
   before it runs.
-- **Firmware** — attended sysupgrade through `owut`, five gates on one screen, each showing
-  its state: back up the config to the phone, ask the upgrade server (which also names the
-  packages a plain flash would lose), build and download the image — or fetch a URL, or push a
-  `.bin` from the phone — let `sysupgrade -T` check it, and only then offer the flash behind a
-  three-second hold. After the flash the screen watches for the router to come back, logging
-  every attempt, then re-reads the version and says outright if it did not change, and offers
-  to reinstall the packages it named.
+- **Firmware** — attended sysupgrade through `owut`, five gates on one screen, each carrying
+  its own state: back up the config to the phone; ask the upgrade server, whose answer is shown
+  as it came (server, target, version, its own verdict quoted) along with the packages a plain
+  flash would lose, by name; build and download — streamed, so there is a real progress bar —
+  or fetch a URL, or push a `.bin` from the phone; let `sysupgrade -T` check it. Gate five stays
+  locked until the four above it are green, then opens a red-zone screen of its own where the
+  consequences get the whole display and a three-second hold is the only way past them. After
+  the flash a watch screen retries the connection every ten seconds, logs each attempt, re-reads
+  the version and says outright in red if it did not change, and offers to put the named
+  packages back.
 - **Backup & restore** — `sysupgrade -b` pulled onto the phone, kept in app-private storage,
   shared or saved from there; every archive on the phone is listed with the hostname inside it,
   and ones from another router are marked. The paths a backup carries beyond `/etc/config` are

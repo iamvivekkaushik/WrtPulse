@@ -50,6 +50,17 @@ class FirmwareStore(private val session: RouterSession) {
     /** A line describing whatever long operation is running, for the screen to show. */
     var progress by mutableStateOf<String?>(null); private set
 
+    // ---- gate 3's progress bar (design screen 40) ----
+
+    /** owut's own last line while it builds and fetches — shown as written. */
+    var downloadLine by mutableStateOf<String?>(null); private set
+
+    /** 0..1 when owut said enough to know; null means indeterminate, never a guess. */
+    var downloadFraction by mutableStateOf<Float?>(null); private set
+
+    /** done to total in bytes, when the line carried both. */
+    var downloadBytes by mutableStateOf<Pair<Long, Long>?>(null); private set
+
     /** Set once sysupgrade has been launched; the session is expected to die after this. */
     var flashing by mutableStateOf(false); private set
 
@@ -78,6 +89,9 @@ class FirmwareStore(private val session: RouterSession) {
     var reinstallOutput by mutableStateOf<String?>(null); private set
 
     val backupDone: Boolean get() = backupFile != null
+
+    /** The address this session reaches the router on — what a wipe would move. */
+    val host: String get() = session.target.host
 
     suspend fun load() {
         loading = true
@@ -128,6 +142,11 @@ class FirmwareStore(private val session: RouterSession) {
             when {
                 parsed.fields.isEmpty() -> "Failed: owut said nothing this app could read."
                 !parsed.safe -> "owut will not call this upgrade safe"
+                // No newer release, but packages have moved — the server would rebuild THIS
+                // version with current ones. Calling that "upgrade available" misreads it.
+                parsed.sameVersion && parsed.hasWork ->
+                    parsed.outdatedPackages?.let { "Same version · $it packages out of date · rebuild available" }
+                        ?: "Same version · rebuild available"
                 parsed.hasWork -> "Upgrade available"
                 else -> "Already current"
             }
@@ -178,12 +197,29 @@ class FirmwareStore(private val session: RouterSession) {
         }
         busy = true
         progress = "Building on the server, then downloading…"
+        downloadLine = null
+        downloadFraction = null
+        downloadBytes = null
         return try {
-            val out = session.exec(Commands.UPGRADE_DOWNLOAD, timeoutMs = 900_000)
+            // Streamed rather than run to completion: a build-and-download takes minutes, and
+            // a screen with a progress bar on it has to have something to put in the bar.
+            // The exit code is lost this way, so what lands in /tmp is the verdict — which is
+            // re-read below either way.
+            val collected = StringBuilder()
+            runCatching {
+                session.streamLines(Commands.UPGRADE_DOWNLOAD).collect { line ->
+                    collected.append(line).append('\n')
+                    if (line.isNotBlank()) downloadLine = line.trim()
+                    Parsers.downloadProgress(line)?.let { (fraction, bytes) ->
+                        downloadFraction = fraction
+                        bytes?.let { downloadBytes = it }
+                    }
+                }
+            }
             load()
             // owut says where it put the file; trust that over the directory listing, and
             // fall back to whatever is staged only when it didn't say.
-            val text = out.stdout.trim() + "\n" + out.stderr.trim()
+            val text = collected.toString().trim()
             val stated = Parsers.savedImagePath(text)?.takeIf { Commands.safeImagePath(it) }
             val staged = stated?.let { path ->
                 path to (status.images.firstOrNull { it.first == path }?.second ?: 0L)
@@ -201,6 +237,7 @@ class FirmwareStore(private val session: RouterSession) {
         } finally {
             busy = false
             progress = null
+            downloadFraction = null
         }
     }
 
@@ -498,41 +535,72 @@ class FirmwareStore(private val session: RouterSession) {
          * What the user has to read before the last button. None of these block: they are
          * consequences of a choice that is legitimately theirs to make.
          */
-        fun flashWarnings(keepSettings: Boolean, check: UpgradeCheck?, lanAddress: String?): List<String> =
+        fun flashWarnings(
+            keepSettings: Boolean,
+            check: UpgradeCheck?,
+            lanAddress: String?,
+            backupName: String? = null,
+        ): List<FlashNotice> =
             buildList {
+                fun caution(text: String) = add(FlashNotice(text, NoticeKind.Caution))
+                // The design leads with the two unavoidable risks, then the caveats, and ends
+                // on the one reassuring line — so the eye lands on red before it lands on green.
+                add(FlashNotice("Router offline about 4 minutes — every client drops.", NoticeKind.Downtime))
+                add(
+                    FlashNotice(
+                        "Power loss while flashing can brick the device. Don't unplug it.",
+                        NoticeKind.Power,
+                    )
+                )
+                if (backupName == null) {
+                    caution("No backup was taken — there is nothing to restore from.")
+                }
                 if (!keepSettings) {
-                    add(
+                    caution(
                         "Discarding settings resets the LAN address to 192.168.1.1" +
                             (lanAddress?.let { ", so the saved entry for $it stops working" } ?: "") +
                             " — you will have to add this router again at its new address."
                     )
-                    add(
+                    caution(
                         "It also regenerates the router's SSH host key. The app will report a " +
                             "changed key on the next connection; after a wipe that is expected, " +
                             "not a sign of interception."
                     )
                 } else {
-                    add(
+                    caution(
                         "Settings are carried across. Across a major version that can bring " +
                             "forward configuration the new release no longer understands."
                     )
                 }
                 if (check?.sameVersion == true) {
-                    add(
+                    caution(
                         "This rebuilds the same version with current packages rather than " +
                             "moving to a new release."
                     )
                 }
                 (check?.missingPackages ?: 0).takeIf { it > 0 }?.let {
-                    add("$it package(s) the server expects are missing from this router.")
+                    caution("$it package(s) the server expects are missing from this router.")
                 }
-                add(
+                caution(
                     "If you reach this router over its own Wi-Fi, the link drops while it " +
                         "flashes and you will not see it finish."
                 )
+                backupName?.let {
+                    add(FlashNotice("Backup saved to this phone as $it.", NoticeKind.Reassurance))
+                }
             }
     }
 }
+
+/**
+ * What a red-zone line is. The design gives each kind its own glyph and colour so the
+ * severity reads before the sentence does: red for what the flash costs you outright,
+ * amber for what you should weigh, green for the one line that is good news.
+ */
+enum class NoticeKind { Downtime, Power, Caution, Reassurance }
+
+/** One line of the flash confirmation, with the kind that picks its icon. */
+data class FlashNotice(val text: String, val kind: NoticeKind)
 
 /** How the reboot watch finished. */
 enum class WatchEnd {

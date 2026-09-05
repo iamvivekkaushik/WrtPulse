@@ -1,6 +1,7 @@
 package com.vivekkaushik.wrtpulse.ops
 
 import com.vivekkaushik.wrtpulse.data.FirmwareStore
+import com.vivekkaushik.wrtpulse.data.NoticeKind
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -305,7 +306,7 @@ class FlashWarningTest {
 
     @Test
     fun `discarding settings warns about the address and the host key`() {
-        val warnings = FirmwareStore.flashWarnings(false, sameVersion, "192.168.2.1")
+        val warnings = FirmwareStore.flashWarnings(false, sameVersion, "192.168.2.1").map { it.text }
         assertTrue(warnings.any { it.contains("192.168.1.1") })
         assertTrue(warnings.any { it.contains("192.168.2.1") })
         assertTrue(warnings.any { it.contains("host key") })
@@ -313,7 +314,7 @@ class FlashWarningTest {
 
     @Test
     fun `keeping settings warns about carrying config across a release instead`() {
-        val warnings = FirmwareStore.flashWarnings(true, sameVersion, "192.168.2.1")
+        val warnings = FirmwareStore.flashWarnings(true, sameVersion, "192.168.2.1").map { it.text }
         assertTrue(warnings.any { it.contains("carried across") })
         assertFalse(warnings.any { it.contains("192.168.1.1") })
     }
@@ -322,15 +323,41 @@ class FlashWarningTest {
     fun `a same-version rebuild says so, so it is not mistaken for a release upgrade`() {
         assertTrue(
             FirmwareStore.flashWarnings(true, sameVersion, null)
-                .any { it.contains("same version") }
+                .any { it.text.contains("same version") }
         )
     }
 
     @Test
     fun `losing Wi-Fi mid-flash is always worth saying`() {
         assertTrue(
-            FirmwareStore.flashWarnings(true, null, null).any { it.contains("Wi-Fi") }
+            FirmwareStore.flashWarnings(true, null, null).any { it.text.contains("Wi-Fi") }
         )
+    }
+
+    @Test
+    fun `the two unavoidable risks lead, each with its own icon`() {
+        val warnings = FirmwareStore.flashWarnings(true, null, null)
+        assertEquals(NoticeKind.Downtime, warnings[0].kind)
+        assertTrue(warnings[0].text.contains("offline"))
+        assertEquals(NoticeKind.Power, warnings[1].kind)
+        assertTrue(warnings[1].text.contains("brick"))
+    }
+
+    @Test
+    fun `a saved backup is the one green line, and it comes last`() {
+        val warnings = FirmwareStore.flashWarnings(true, null, null, "wrtpulse-1.tar.gz")
+        assertEquals(NoticeKind.Reassurance, warnings.last().kind)
+        assertTrue(warnings.last().text.contains("wrtpulse-1.tar.gz"))
+        assertEquals(1, warnings.count { it.kind == NoticeKind.Reassurance })
+        assertFalse(warnings.any { it.text.contains("No backup was taken") })
+    }
+
+    @Test
+    fun `no backup is an amber caution, not a green reassurance`() {
+        val warnings = FirmwareStore.flashWarnings(true, null, null, null)
+        val missing = warnings.single { it.text.contains("No backup was taken") }
+        assertEquals(NoticeKind.Caution, missing.kind)
+        assertFalse(warnings.any { it.kind == NoticeKind.Reassurance })
     }
 }
 
@@ -535,5 +562,52 @@ class Turn7Test {
         assertEquals(2, gone.size)
         assertTrue(gone.all { it.name.endsWith("1.tar.gz") || it.name.endsWith("2.tar.gz") })
         assertTrue(gone.none { it.name == "notes.txt" })
+    }
+}
+
+/**
+ * Gate 3's progress bar. The format owut prints has never been read off a real run here, so
+ * the parser takes the shapes its fetchers are known to use and answers null for anything
+ * else — an indeterminate bar rather than a wrong one.
+ */
+class DownloadProgressTest {
+
+    @Test
+    fun `a byte pair gives both a fraction and the bytes`() {
+        val (fraction, bytes) = Parsers.downloadProgress("18.3M/27.9M")!!
+        assertEquals(0.655f, fraction!!, 0.01f)
+        assertEquals(27.9 * 1024 * 1024, bytes!!.second.toDouble(), 1024.0)
+    }
+
+    @Test
+    fun `spaces and a unit suffix are tolerated`() {
+        val (fraction, bytes) = Parsers.downloadProgress("  Downloading 18.3 / 27.9 MB  ")!!
+        assertEquals(0.655f, fraction!!, 0.01f)
+        assertNotNull(bytes)
+    }
+
+    @Test
+    fun `a bare percentage gives a fraction and no bytes`() {
+        val (fraction, bytes) = Parsers.downloadProgress("fetching image... 45%")!!
+        assertEquals(0.45f, fraction!!, 0.001f)
+        assertNull(bytes)
+    }
+
+    /** Anything else is not progress, and must not be turned into a bar. */
+    @Test
+    fun `prose and nonsense are not progress`() {
+        assertNull(Parsers.downloadProgress("Collecting package lists"))
+        assertNull(Parsers.downloadProgress(""))
+        assertNull(Parsers.downloadProgress("version 23.05.4"))
+        // Past the end is not a fraction either.
+        assertNull(Parsers.downloadProgress("30M/27.9M"))
+        assertNull(Parsers.downloadProgress("140%"))
+    }
+
+    @Test
+    fun `raw byte counts work without units`() {
+        val (fraction, bytes) = Parsers.downloadProgress("1000000/2000000")!!
+        assertEquals(0.5f, fraction!!, 0.001f)
+        assertEquals(2_000_000L, bytes!!.second)
     }
 }

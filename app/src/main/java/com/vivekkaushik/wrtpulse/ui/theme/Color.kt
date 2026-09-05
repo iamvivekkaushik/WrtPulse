@@ -61,6 +61,10 @@ object Wrt {
     // Host-key interstitial (danger theme)
     val DangerBg = Color(0xFF150D0B)
     val DangerCode = Color(0xFF100B0A)
+
+    // The code box inside the red zone (design screen 41) — darker than the panel it sits on.
+    val DangerCodeBg = Color(0xFF0A0706)
+    val DangerCodeBorder = Color(0xFF241512)
     val DangerText = Color(0xFFF0E4E1)
     val DangerBody = Color(0xFFC9ACA6)
     val DangerDim = Color(0xFF8A716B)
