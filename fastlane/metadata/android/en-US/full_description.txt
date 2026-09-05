@@ -1,0 +1,32 @@
+WrtPulse manages OpenWrt routers over SSH. Nothing is installed on the router, no cloud service sits in the middle, and nothing is scraped out of LuCI. The app opens an SSH session and runs the same commands you would type yourself — ubus, uci, iwinfo, logread, apk/opkg, sysupgrade — then reads the output. If the router can do it from a shell, the app can do it; if it cannot, the app does not pretend otherwise.
+
+DASHBOARD
+CPU, RAM, flash, load, uptime and live throughput, one batched command a second. The upstream card follows whichever interface actually holds the default route, so it is right whether your WAN is a cable or a Wi-Fi client. Reboot, a speed test and a one-tap isolated guest network live here.
+
+CLIENTS
+Every device on the router, wireless and wired, with signal, lease and per-client usage (with nlbwmon). Rename, block, wake-on-LAN, DHCP reservations.
+
+NETWORK
+LAN — the subnet, the DHCP server and its pool, static leases, switch VLANs.
+Internet & WAN — every uplink with its port, VLAN tag, protocol and IPv6; a connection test that is bound to the uplink you are looking at; failover order by route metric.
+Wireless — radios and interfaces. Add or edit access points and station (client) links; change channel, width, encryption and SSID. Neighbour scans suggest the least busy channel.
+Firewall — port forwards, traffic rules with schedules, zones and the inter-zone matrix, DMZ, defaults and SYN-flood protection.
+
+TERMINAL
+A real SSH shell with a VT screen model: cursor addressing, scrollback, selection and paste, and multiple tabs on one connection.
+
+SYSTEM
+Live logs, packages (apk and opkg), services, firmware upgrades, backup & restore, regulatory domain, SSH keys, factory reset.
+
+FOUR RULES, EVERYWHERE
+• Show the command. Every action shows the exact shell command it is about to run.
+• Dry-run first. Where the router offers one — apk add --simulate, opkg --noaction, sysupgrade -T, a uci diff — the app runs it and shows you the answer before anything changes.
+• Refuse from a row what cannot be undone. Flashing firmware, restoring a backup and a factory reset each get their own screen that names exactly what it will cost, and a three-second hold.
+• Trust the router over the app. Exit code 0 is not success; the app re-reads the router to confirm.
+
+Changes are staged, shown as a diff, and applied in one uci batch. A change that carries the connection itself — the WAN, the LAN address — is applied with the router's own rollback armed, so a mistake undoes itself if the app cannot reconnect.
+
+SECURITY
+Passwords and private keys are sealed with an Android Keystore key and never leave the phone. Host keys are pinned on first contact, and a changed key stops the connection until you say otherwise. The app can generate its own ed25519 key, install it on the router, and prove it works before you rely on it.
+
+Requires an OpenWrt router with SSH enabled (21.02 or newer recommended; 24.10+ for apk). No account, no analytics, no ads.

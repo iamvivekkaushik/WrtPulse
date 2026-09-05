@@ -68,9 +68,12 @@ platform :android do
       track: "internal",
       aab: lane_context[SharedValues::GRADLE_AAB_OUTPUT_PATH],
       json_key: ENV["PLAY_JSON_KEY_FILE"],
-      skip_upload_metadata: true,
-      skip_upload_images: true,
-      skip_upload_screenshots: true,
+      # The listing lives in fastlane/metadata/android — text, icon, feature graphic and
+      # screenshots — so a release carries it up rather than leaving the console by hand.
+      skip_upload_metadata: false,
+      skip_upload_images: false,
+      skip_upload_screenshots: false,
+      skip_upload_changelogs: true,
     )
   end
 end
