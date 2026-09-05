@@ -12,7 +12,7 @@ default_platform(:android)
 # Release signing. Read by app/build.gradle.kts from the environment (CI) or from an
 # untracked keystore.properties (workstation). Missing → the release build is unsigned and
 # the `release` lane refuses, rather than quietly producing something that cannot ship.
-SIGNING_ENV = %w[RELEASE_STORE_FILE RELEASE_STORE_PASSWORD RELEASE_KEY_ALIAS RELEASE_KEY_PASSWORD].freeze
+SIGNING_ENV = %w[KEYSTORE_FILE KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD].freeze
 
 platform :android do
   desc "Unit tests — 770 JVM tests over the parsers and stores"
@@ -45,8 +45,8 @@ platform :android do
         "Export them (or write keystore.properties) — see README › Releasing."
       )
     end
-    UI.user_error!("RELEASE_STORE_FILE does not exist: #{ENV['RELEASE_STORE_FILE']}") \
-      unless File.exist?(ENV["RELEASE_STORE_FILE"])
+    UI.user_error!("KEYSTORE_FILE does not exist: #{ENV['KEYSTORE_FILE']}") \
+      unless File.exist?(ENV["KEYSTORE_FILE"])
 
     props = {}
     props["versionName"] = ENV["VERSION_NAME"] if ENV["VERSION_NAME"].to_s != ""
@@ -67,7 +67,7 @@ platform :android do
     upload_to_play_store(
       track: "internal",
       aab: lane_context[SharedValues::GRADLE_AAB_OUTPUT_PATH],
-      json_key_data: ENV["PLAY_JSON_KEY"],
+      json_key: ENV["PLAY_JSON_KEY_FILE"],
       skip_upload_metadata: true,
       skip_upload_images: true,
       skip_upload_screenshots: true,

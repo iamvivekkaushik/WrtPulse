@@ -13,7 +13,7 @@ val keystoreProps = Properties().apply {
     rootProject.file("keystore.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
 }
 fun secret(name: String): String? = System.getenv(name)?.takeIf { it.isNotBlank() } ?: keystoreProps.getProperty(name)
-val releaseStoreFile = secret("RELEASE_STORE_FILE")
+val releaseStoreFile = secret("KEYSTORE_FILE")
 
 android {
     namespace = "com.vivekkaushik.wrtpulse"
@@ -38,9 +38,9 @@ android {
         if (releaseStoreFile != null) {
             create("release") {
                 storeFile = rootProject.file(releaseStoreFile)
-                storePassword = secret("RELEASE_STORE_PASSWORD")
-                keyAlias = secret("RELEASE_KEY_ALIAS")
-                keyPassword = secret("RELEASE_KEY_PASSWORD")
+                storePassword = secret("KEYSTORE_PASSWORD")
+                keyAlias = secret("KEY_ALIAS")
+                keyPassword = secret("KEY_PASSWORD")
             }
         }
     }

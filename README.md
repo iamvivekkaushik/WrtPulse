@@ -194,10 +194,10 @@ bundle exec fastlane android release    # signed AAB + APK
 `keystore.properties` in the repo root:
 
 ```properties
-RELEASE_STORE_FILE=/absolute/path/to/release.jks
-RELEASE_STORE_PASSWORD=…
-RELEASE_KEY_ALIAS=…
-RELEASE_KEY_PASSWORD=…
+KEYSTORE_FILE=/absolute/path/to/release.jks
+KEYSTORE_PASSWORD=…
+KEY_ALIAS=…
+KEY_PASSWORD=…
 ```
 
 With none of these set the release build is unsigned and the lane refuses — it never quietly
@@ -206,13 +206,13 @@ override the Gradle defaults.
 
 **CI.** `.github/workflows/ci.yml` runs `check` and uploads a debug APK on every push and pull
 request. `.github/workflows/release.yml` fires on a `v*` tag: it restores the keystore from
-`RELEASE_KEYSTORE_BASE64` (`base64 -i release.jks`), stamps `versionName` from the tag and
+`KEYSTORE_BASE64` (`base64 -i release.jks`), stamps `versionName` from the tag and
 `versionCode` from the run number, builds the signed AAB and APK, and attaches both to a GitHub
-Release. If a `PLAY_JSON_KEY` secret (the Play Console service-account JSON) is present it also
+Release. If a `PLAY_JSON_KEY_BASE64` secret (the Play Console service-account JSON, base64) is present it also
 uploads the AAB to the internal track; without it that step is skipped, so the pipeline is
 useful before Play is set up. Secrets to add under Settings › Secrets and variables › Actions:
-`RELEASE_KEYSTORE_BASE64`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`,
-`RELEASE_KEY_PASSWORD`, and optionally `PLAY_JSON_KEY`.
+`KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`,
+`KEY_PASSWORD`, and optionally `PLAY_JSON_KEY_BASE64`.
 
 ## Not done yet
 

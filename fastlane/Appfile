@@ -1,5 +1,5 @@
 package_name("com.vivekkaushik.wrtpulse")
 
 # Play Console service-account JSON, for the `beta` lane only. Never committed: CI passes it
-# as PLAY_JSON_KEY; locally point this at a file outside the repo.
+# as PLAY_JSON_KEY_BASE64 and decoded to a file; locally point this at one outside the repo.
 json_key_file(ENV["PLAY_JSON_KEY_FILE"]) if ENV["PLAY_JSON_KEY_FILE"]
