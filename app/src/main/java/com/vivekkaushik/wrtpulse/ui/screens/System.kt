@@ -161,12 +161,9 @@ fun SystemScreen(
                         }
                     },
                 )
-                SystemRow(WrtIcons.LiveLogs, "Live logs", "logread -f · streaming", onClick = onOpenLogs)
-                SystemRow(
-                    WrtIcons.Clock, "Scheduled tasks",
-                    if (isLive) "Coming soon" else "3 cron jobs",
-                    last = true,
-                )
+                // Scheduled tasks (cron) is hidden until it does something: a row that only
+                // ever said "Coming soon" is a promise the screen cannot keep yet.
+                SystemRow(WrtIcons.LiveLogs, "Live logs", "logread -f · streaming", onClick = onOpenLogs, last = true)
             }
             SectionLabel("ROUTER · APP", tracking = 0.14)
             SystemCard {
