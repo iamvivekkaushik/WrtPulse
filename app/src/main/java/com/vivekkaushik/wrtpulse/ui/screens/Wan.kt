@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -166,9 +168,25 @@ private fun WanHub(
                     "so this router has no uplink of its own to manage."
             )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            rows.forEach { row ->
-                WanChip(row, row.section == store.selected, Modifier.weight(1f)) { store.select(row.section) }
+        // One or two uplinks fill the width, the way the hub is drawn. Past that, weight
+        // squeezes each chip until its metric and device name ellipsize into nothing, so the
+        // row scrolls sideways instead and every chip keeps its natural, readable width.
+        if (rows.size <= 2) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                rows.forEach { row ->
+                    WanChip(row, row.section == store.selected, Modifier.weight(1f)) { store.select(row.section) }
+                }
+            }
+        } else {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                rows.forEach { row ->
+                    WanChip(row, row.section == store.selected, Modifier.widthIn(min = 150.dp)) {
+                        store.select(row.section)
+                    }
+                }
             }
         }
         selected?.let { row ->
