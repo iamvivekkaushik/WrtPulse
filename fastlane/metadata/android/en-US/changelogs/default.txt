@@ -1,0 +1,5 @@
+• Failover order is now set by dragging. Hold an uplink under Network › WAN and drag it — the metrics restamp to 10, 20, 30, so two uplinks can no longer share a number.
+
+• The interface now scales to your screen width, so it no longer reads small on a wide phone. Text and the controls around it grow together with the system font size.
+
+• Router setup no longer comes apart when the keyboard opens: the field you are typing in stays visible, and Connect stays below it.

@@ -73,7 +73,11 @@ platform :android do
       skip_upload_metadata: false,
       skip_upload_images: false,
       skip_upload_screenshots: false,
-      skip_upload_changelogs: true,
+      # Release notes come from metadata/android/<locale>/changelogs. versionCode is the CI
+      # run number, so there is no <versionCode>.txt to write ahead of time — supply falls
+      # back to default.txt, which is the one kept in step with CHANGELOG.md's Unreleased
+      # section. Play rejects a note over 500 characters, so keep default.txt under it.
+      skip_upload_changelogs: false,
     )
   end
 end

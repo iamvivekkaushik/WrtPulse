@@ -27,9 +27,8 @@ android {
         applicationId = "com.vivekkaushik.wrtpulse"
         minSdk = 28
         targetSdk = 36
-        // Overridable so CI can stamp a release: -PversionCode=<run number> -PversionName=<tag>.
-        versionCode = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 1
-        versionName = (project.findProperty("versionName") as String?) ?: "1.0"
+        versionCode = 2
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
