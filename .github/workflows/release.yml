@@ -49,16 +49,29 @@ jobs:
           ruby-version: "3.3"
           bundler-cache: true
 
-      - name: Version from tag
+      # The version lives in app/build.gradle.kts as a literal — Gradle ignores -PversionName
+      # and -PversionCode — so the tag does not set it, it only has to agree with it. Read the
+      # version out of the build file and refuse a tag that says something else, rather than
+      # publishing a release called v1.2 whose APK reports 1.1.
+      - name: Version from build.gradle.kts
         id: version
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "name=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "name=${{ inputs.version_name || '0.0.0-manual' }}" >> "$GITHUB_OUTPUT"
+          name=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
+          code=$(grep -oP 'versionCode\s*=\s*\K[0-9]+' app/build.gradle.kts | head -1)
+          if [[ -z "$name" || -z "$code" ]]; then
+            echo "::error::Could not read versionName/versionCode from app/build.gradle.kts."
+            exit 1
           fi
-          # Monotonic across every run, which is all Play requires of versionCode.
-          echo "code=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF#refs/tags/v}"
+            if [[ "$tag" != "$name" ]]; then
+              echo "::error::Tag v$tag does not match versionName \"$name\" in app/build.gradle.kts. Bump the file or retag."
+              exit 1
+            fi
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Building $name ($code)"
 
       - name: Restore signing keystore
         env:
@@ -79,6 +92,32 @@ jobs:
           VERSION_NAME: ${{ steps.version.outputs.name }}
           VERSION_CODE: ${{ steps.version.outputs.code }}
         run: bundle exec fastlane android release
+
+      # Signing is the whole point of this workflow, so it is asserted rather than assumed.
+      # With no keystore Gradle does not fail — it writes app-release-unsigned.apk and carries
+      # on, which would otherwise sail through to the GitHub Release and the Play upload.
+      - name: Verify the artifacts are signed
+        run: |
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/release/*.apk)
+          aabs=(app/build/outputs/bundle/release/*.aab)
+          if (( ${#apks[@]} == 0 || ${#aabs[@]} == 0 )); then
+            echo "::error::Expected one APK and one AAB; got ${#apks[@]} and ${#aabs[@]}."
+            exit 1
+          fi
+          for f in "${apks[@]}" "${aabs[@]}"; do
+            case "$f" in *unsigned*)
+              echo "::error::Unsigned artifact: $f"; exit 1;;
+            esac
+          done
+          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+          if [[ -z "$apksigner" ]]; then
+            echo "::error::apksigner not found under $ANDROID_HOME/build-tools."
+            exit 1
+          fi
+          "$apksigner" verify --print-certs "${apks[0]}"
+          # An AAB is a jar; jarsigner is what can speak to its signature.
+          jarsigner -verify "${aabs[0]}" | tail -1
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

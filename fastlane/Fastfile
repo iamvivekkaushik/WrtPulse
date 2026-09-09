@@ -68,15 +68,18 @@ platform :android do
       track: "internal",
       aab: lane_context[SharedValues::GRADLE_AAB_OUTPUT_PATH],
       json_key: ENV["PLAY_JSON_KEY_FILE"],
+      # `release` builds the APK too — the GitHub Release carries it — which leaves its path in
+      # the lane context where supply finds it on its own. Handed an AAB as well it refuses to
+      # guess, so the APK is skipped explicitly: Play gets the bundle, the tag gets both.
+      skip_upload_apk: true,
       # The listing lives in fastlane/metadata/android — text, icon, feature graphic and
       # screenshots — so a release carries it up rather than leaving the console by hand.
       skip_upload_metadata: false,
       skip_upload_images: false,
       skip_upload_screenshots: false,
-      # Release notes come from metadata/android/<locale>/changelogs. versionCode is the CI
-      # run number, so there is no <versionCode>.txt to write ahead of time — supply falls
-      # back to default.txt, which is the one kept in step with CHANGELOG.md's Unreleased
-      # section. Play rejects a note over 500 characters, so keep default.txt under it.
+      # Release notes come from metadata/android/<locale>/changelogs. supply looks for
+      # <versionCode>.txt first and falls back to default.txt, which is the one kept here.
+      # Play rejects a note over 500 characters, so keep default.txt under it.
       skip_upload_changelogs: false,
     )
   end
