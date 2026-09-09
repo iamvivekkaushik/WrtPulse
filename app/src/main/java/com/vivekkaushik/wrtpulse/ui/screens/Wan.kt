@@ -3,6 +3,7 @@ package com.vivekkaushik.wrtpulse.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,16 +25,26 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.vivekkaushik.wrtpulse.data.LanV6
 import com.vivekkaushik.wrtpulse.data.Telemetry
 import com.vivekkaushik.wrtpulse.data.V6Mode
@@ -52,6 +63,7 @@ import com.vivekkaushik.wrtpulse.ui.mono
 import com.vivekkaushik.wrtpulse.ui.sans
 import com.vivekkaushik.wrtpulse.ui.theme.Wrt
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /** The pages behind the WAN card — design screens 26 through 29. */
 internal enum class WanPage { Hub, Port, Ipv4, Ipv6 }
@@ -232,11 +244,32 @@ private fun WanHub(
 }
 
 /**
- * Every uplink with its metric — the one number that decides failover on a router without
- * mwan3. Lower wins the default route; the rest wait for it to disappear.
+ * Every uplink in the order it will be tried, dragged rather than numbered.
+ *
+ * The metric is still the only thing a router without mwan3 has, but a free-text number is a
+ * poor way to express "this one first": it lets two uplinks hold the same value, invites
+ * off-by-one edits, and asks the reader to remember that lower wins. The list says it
+ * directly — top is first — and [WanStore.stageFailoverOrder] restamps the numbers underneath.
  */
 @Composable
 private fun FailoverCard(store: WanStore, rows: List<WanRow>) {
+    val ordered = rows.sortedBy { it.metric }
+    // The drop is handled inside a pointerInput block, which is not rebuilt on every
+    // recomposition — so the list it reorders has to be the current one, not the one captured
+    // when the gesture detector was installed.
+    val latest by rememberUpdatedState(ordered)
+    val haptics = LocalHapticFeedback.current
+
+    var dragFrom by remember { mutableIntStateOf(-1) }
+    var dragBy by remember { mutableFloatStateOf(0f) }
+    // One row plus the gap above it: the distance the finger has to travel to displace a
+    // neighbour. Measured rather than assumed, because the whole UI is density-scaled.
+    var slotPx by remember { mutableIntStateOf(0) }
+
+    fun targetOf(from: Int, by: Float): Int =
+        if (from < 0 || slotPx <= 0) -1
+        else (from + (by / slotPx).roundToInt()).coerceIn(0, latest.lastIndex)
+
     Column(
         Modifier
             .fillMaxWidth()
@@ -246,14 +279,66 @@ private fun FailoverCard(store: WanStore, rows: List<WanRow>) {
     ) {
         Text("Failover order", style = sans(13f, 600))
         Text(
-            "Route metric — lower wins. The others carry traffic only once the winner's route " +
-                "is gone.",
+            if (ordered.size > 1) {
+                "Hold a row and drag it. The top uplink carries the traffic; the rest wait for " +
+                    "its route to disappear."
+            } else {
+                "One uplink, so nothing to fail over to. A second one would be ordered here."
+            },
             style = sans(10.5f, 400, Wrt.TextDim, lineHeight = 16.sp),
             modifier = Modifier.padding(top = 3.dp),
         )
-        rows.sortedBy { it.metric }.forEach { row ->
+        val dragTo = targetOf(dragFrom, dragBy)
+        ordered.forEachIndexed { i, row ->
+            // While a row is held, the ones it has passed slide out of its way by exactly one
+            // slot, so the gap under the finger is where the row will land.
+            val shift = when {
+                i == dragFrom -> dragBy
+                dragFrom < 0 || dragTo < 0 -> 0f
+                dragFrom < dragTo && i > dragFrom && i <= dragTo -> -slotPx.toFloat()
+                dragTo < dragFrom && i >= dragTo && i < dragFrom -> slotPx.toFloat()
+                else -> 0f
+            }
             Row(
-                Modifier.fillMaxWidth().padding(top = 10.dp),
+                Modifier
+                    .fillMaxWidth()
+                    // Outside the padding, so the measurement is the whole slot — row plus the
+                    // gap above it — which is the distance a neighbour has to travel. Taken from
+                    // the first row alone: a row wearing an EDITED tag can be a shade taller, and
+                    // a pitch that changed mid-drag would make the list slip under the finger.
+                    .onSizeChanged { if (i == 0 && it.height > 0) slotPx = it.height }
+                    .padding(top = 10.dp)
+                    .zIndex(if (i == dragFrom) 1f else 0f)
+                    .graphicsLayer { translationY = shift }
+                    .then(
+                        if (ordered.size < 2) Modifier
+                        else Modifier.pointerInput(row.section, ordered.size) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = {
+                                    dragFrom = i
+                                    dragBy = 0f
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                },
+                                onDrag = { change, amount ->
+                                    change.consume()
+                                    dragBy += amount.y
+                                },
+                                onDragEnd = {
+                                    val from = dragFrom
+                                    val to = targetOf(from, dragBy)
+                                    if (from >= 0 && to >= 0 && to != from) {
+                                        val next = latest.map { it.section }.toMutableList()
+                                        next.add(to, next.removeAt(from))
+                                        store.stageFailoverOrder(next)
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    }
+                                    dragFrom = -1
+                                    dragBy = 0f
+                                },
+                                onDragCancel = { dragFrom = -1; dragBy = 0f },
+                            )
+                        }
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
@@ -272,46 +357,49 @@ private fun FailoverCard(store: WanStore, rows: List<WanRow>) {
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                MetricField(store.metricText(row.section)) { store.stageMetric(row.section, it) }
+                MetricBadge(row.metric)
+                if (ordered.size > 1) DragGrip(held = i == dragFrom)
             }
         }
         Text(
-            "$ uci set network.<wan>.metric='10'",
+            "$ uci set network.<wan>.metric='${WanStore.FAILOVER_STEP}'",
             style = mono(9.5f, 500, Wrt.TextDim),
             modifier = Modifier.padding(top = 10.dp),
         )
     }
 }
 
-/** A short numeric field: the metric, sized for three digits rather than a whole row. */
+/** The metric the row's position gives it — shown because it is what lands in the config. */
 @Composable
-private fun MetricField(value: String, onChange: (String) -> Unit) {
-    Row(
+private fun MetricBadge(metric: Int) {
+    Box(
         Modifier
-            .width(84.dp)
-            .height(38.dp)
-            .border(1.dp, Wrt.BorderInput, RoundedCornerShape(9.dp))
-            .background(Wrt.BgDeep, RoundedCornerShape(9.dp))
-            .padding(horizontal = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .border(1.dp, Wrt.BorderInput, RoundedCornerShape(7.dp))
+            .background(Wrt.BgDeep, RoundedCornerShape(7.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
     ) {
-        androidx.compose.foundation.text.BasicTextField(
-            value = value,
-            onValueChange = { onChange(it.filter { c -> c.isDigit() }.take(6)) },
-            textStyle = mono(12.5f, 600),
-            singleLine = true,
-            cursorBrush = androidx.compose.ui.graphics.SolidColor(Wrt.Accent),
-            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number,
-            ),
-            decorationBox = { inner ->
-                Box(Modifier.fillMaxWidth()) {
-                    if (value.isEmpty()) Text("0", style = mono(12.5f, 600, Wrt.TextFaint))
-                    inner()
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-        )
+        Text("$metric", style = mono(11.5f, 600, Wrt.TextSecondary))
+    }
+}
+
+/** Three bars: the usual "this row can be picked up", lit while it is. */
+@Composable
+private fun DragGrip(held: Boolean) {
+    Column(
+        Modifier.width(16.dp).alpha(if (held) 1f else 0.55f),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        repeat(3) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(1.5.dp)
+                    .background(
+                        if (held) Wrt.Accent else Wrt.TextDim,
+                        RoundedCornerShape(1.dp),
+                    )
+            )
+        }
     }
 }
 

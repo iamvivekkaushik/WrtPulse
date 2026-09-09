@@ -259,6 +259,25 @@ class WanStore(private val session: RouterSession) : Refreshable {
     fun stageMetric(section: String, value: String) =
         stage("network.$section.metric", configs[section]?.metric.orEmpty(), value.trim())
 
+    /**
+     * Rewrites the whole order at once from a list of sections, best first: 10, 20, 30.
+     *
+     * Every uplink is staged rather than only the one that moved, because a metric means
+     * nothing on its own — it is a comparison. Restamping the list is what keeps the numbers
+     * total and distinct; moving one and leaving the rest is exactly how two uplinks end up
+     * sharing a metric, which [notes] then has to complain about.
+     *
+     * The gap of ten is the convention in OpenWrt's own docs, and it leaves room to drop a
+     * third uplink between two without renumbering by hand. Anything already carrying the
+     * number it is being given stages nothing: [stage] drops a write equal to the saved value,
+     * so reordering two uplinks and putting them back leaves an empty batch.
+     */
+    fun stageFailoverOrder(sections: List<String>) {
+        sections.forEachIndexed { i, section ->
+            stageMetric(section, ((i + 1) * FAILOVER_STEP).toString())
+        }
+    }
+
     /** Interfaces whose own options this batch touches — decides between ifup and a reload. */
     fun touchedInterfaces(): Set<String> = (staged.keys + stagedLists.keys)
         .filter { it.startsWith("network.") }
@@ -917,6 +936,9 @@ class WanStore(private val session: RouterSession) : Refreshable {
     }
 
     companion object {
+
+        /** The gap between one uplink's metric and the next when the list is restamped. */
+        const val FAILOVER_STEP = 10
 
         /**
          * The tiles a test produces, from the sections the script echoed.

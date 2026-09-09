@@ -125,6 +125,59 @@ class WanStoreTest {
         assertTrue(s.notes().any { it.contains("both have metric 20") })
     }
 
+    // ---- the hub: failover by drag ----
+
+    /** Top of the list is 10 and every one after it another ten, the gap OpenWrt's docs use. */
+    @Test
+    fun `restamping the order numbers the uplinks ten apart`() {
+        val s = store()
+        s.stageFailoverOrder(listOf("wwan", "wan"))
+        assertEquals(10, s.metricOf("wwan"))
+        assertEquals(20, s.metricOf("wan"))
+        assertEquals(
+            listOf("set network.wan.metric='20'", "set network.wwan.metric='10'"),
+            s.ops().sorted(),
+        )
+    }
+
+    /**
+     * The whole list is restamped, but a row already holding its number is not a write —
+     * which is what stops a drag from touching interfaces it did not move.
+     */
+    @Test
+    fun `restamping stages only the uplinks whose number actually changes`() {
+        val s = store()
+        // wwan already carries 20 in the config; wan carries nothing at all.
+        s.stageFailoverOrder(listOf("wan", "wwan"))
+        assertEquals(listOf("set network.wan.metric='10'"), s.ops())
+        assertEquals(setOf("wan"), s.touchedInterfaces())
+    }
+
+    /**
+     * Dragging a row down and back leaves the order it started in. The one write that stays
+     * is the uplink that never had a metric: making the order explicit is a real change to a
+     * config that was relying on netifd's default.
+     */
+    @Test
+    fun `dragging an uplink down and back restores the original order`() {
+        val s = store()
+        s.stageFailoverOrder(listOf("wwan", "wan"))
+        s.stageFailoverOrder(listOf("wan", "wwan"))
+        assertEquals(10, s.metricOf("wan"))
+        assertEquals(20, s.metricOf("wwan"))
+        assertEquals(listOf("set network.wan.metric='10'"), s.ops())
+    }
+
+    /** Restamping cannot leave two uplinks sharing a number, which a free-text field could. */
+    @Test
+    fun `restamping never gives two uplinks the same metric`() {
+        val s = store()
+        s.stageFailoverOrder(listOf("wwan", "wan"))
+        val metrics = s.wanRows().map { s.metricOf(it.section) }
+        assertEquals(metrics.size, metrics.toSet().size)
+        assertFalse(s.notes().any { it.contains("both have metric") })
+    }
+
     /** One interface changed is one ifup; two changed needs netifd to reload them all. */
     @Test
     fun `reordering two uplinks reloads the network rather than ifup-ing one`() {
