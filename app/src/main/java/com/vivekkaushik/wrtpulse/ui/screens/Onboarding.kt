@@ -11,10 +11,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,13 +28,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -217,7 +224,20 @@ private fun InputBox(
     isPassword: Boolean = false,
 ) {
     var reveal by remember { mutableStateOf(false) }
-    Column {
+    var focused by remember { mutableStateOf(false) }
+    val requester = remember { BringIntoViewRequester() }
+
+    // A field is scrolled into view the moment it takes focus — while the form is still full
+    // height. The keyboard then rises and shrinks the viewport under it, and nothing scrolls
+    // again, which left the focused field cut in half behind the Connect button. Tracking the
+    // inset rather than a visible/not-visible flag re-asks all the way through the animation,
+    // so the last request is the one made against the settled height.
+    val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
+    LaunchedEffect(focused, imeBottom) {
+        if (focused) requester.bringIntoView()
+    }
+
+    Column(Modifier.bringIntoViewRequester(requester)) {
         SectionLabel(label)
         Row(
             Modifier
@@ -243,7 +263,9 @@ private fun InputBox(
                     visualTransformation =
                         if (isPassword && !reveal) PasswordVisualTransformation('•')
                         else VisualTransformation.None,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { focused = it.isFocused },
                 )
             }
             if (isPassword) {
