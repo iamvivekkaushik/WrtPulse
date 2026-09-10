@@ -8,6 +8,7 @@ import com.vivekkaushik.wrtpulse.net.SshTarget
 import com.vivekkaushik.wrtpulse.ops.FIREWALL_UCI
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -352,4 +353,67 @@ class FirewallStoreTest {
         assertEquals(0, s.pendingCount)
         assertTrue(s.ops().isEmpty())
     }
+
+    // ---- section names must not land on one the router already has ----
+
+    /**
+     * The counter used to start at 1 in every store, and a store is rebuilt whenever the session
+     * changes — leaving the router-switcher and coming back was enough. The next forward added
+     * was then written straight over `wrtpulse_fwd_1`, keeping whatever options the new draft did
+     * not set, so the survivor forwarded to the old internal port.
+     */
+    @Test
+    fun `a draft never reuses a section the router already carries`() {
+        val first = store()
+        val d1 = first.newForwardDraft().copy(name = "a", proto = "tcp", srcPort = "2222", destIp = "192.168.1.87", destPort = "22")
+        assertNull(first.stageForward(d1))
+        val applied = draftSectionOf(first, d1)
+
+        // The router now holds that section; a fresh store reads it back and must move past it.
+        val second = storeWith(FIREWALL_UCI + "\n" + redirectSection(applied, "2222"))
+        val d2 = second.newForwardDraft().copy(name = "b", proto = "tcp", srcPort = "3333", destIp = "192.168.1.88", destPort = "22")
+        assertNull(second.stageForward(d2))
+        val next = draftSectionOf(second, d2)
+
+        assertNotEquals(applied, next)
+        assertFalse(second.ops().any { it.startsWith("set firewall.$applied=") })
+    }
+
+    /** Rules share the counter, so seeding has to move past the highest of either kind. */
+    @Test
+    fun `seeding moves past the highest wrtpulse section of either kind`() {
+        val s = storeWith(FIREWALL_UCI + "\n" + redirectSection("wrtpulse_fwd_7", "2222"))
+        val d = s.newForwardDraft().copy(name = "c", proto = "tcp", srcPort = "4444", destIp = "192.168.1.90", destPort = "22")
+        assertNull(s.stageForward(d))
+        assertTrue("expected an id past 7, got ${d.id}", d.id > 7)
+    }
+
+    private fun redirectSection(name: String, srcPort: String) = """
+        firewall.$name=redirect
+        firewall.$name.name='existing'
+        firewall.$name.src='wan'
+        firewall.$name.dest='lan'
+        firewall.$name.proto='tcp'
+        firewall.$name.src_dport='$srcPort'
+        firewall.$name.dest_ip='192.168.1.99'
+        firewall.$name.dest_port='9999'
+        firewall.$name.target='DNAT'
+    """.trimIndent()
+
+    private fun storeWith(firewallUci: String): FirewallStore =
+        FirewallStore(RouterSession(SshTarget("192.168.1.1"), unusedClient, { error("unused") })).apply {
+            ingest(
+                mapOf(
+                    "firewall" to firewallUci,
+                    "service" to """{"firewall":{"instances":{"instance1":{"running":true}}}}""",
+                    "engine" to "fw4",
+                    "listen" to "0.0.0.0:22\n",
+                    "leases" to "",
+                )
+            )
+        }
+
+    private fun draftSectionOf(s: FirewallStore, d: ForwardDraft): String =
+        s.ops().first { it.endsWith("=redirect") }
+            .removePrefix("set firewall.").removeSuffix("=redirect")
 }

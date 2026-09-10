@@ -101,7 +101,32 @@ class FirewallStore(private val session: RouterSession) {
     /** The DMZ as staged; null means untouched since the last load. */
     var dmzDraft by mutableStateOf<DmzDraft?>(null); private set
 
+    /**
+     * The counter behind `wrtpulse_fwd_N` / `wrtpulse_rule_N`. Seeded past whatever the router
+     * already carries on every read — see [seedNextId] — because it used to start at 1 in each
+     * new store, and a store is rebuilt whenever the session changes. The second forward added
+     * after any switch away from the Main scaffold was written straight over the first, which
+     * kept whichever options the new draft did not set: `dest_port` is only emitted when it
+     * differs from `src_dport`, so the survivor quietly forwarded to the old internal port.
+     */
     private var nextId = 1
+
+    /**
+     * Moves [nextId] past every `wrtpulse_*_N` section already on the router. Named sections are
+     * the only ones that can collide — anonymous `@redirect[i]` sections carry no name to reuse —
+     * so only those are scanned, and anything that does not end in a number is ignored rather
+     * than guessed at.
+     */
+    private fun seedNextId() {
+        val used = (config.forwards.map { it.section } +
+            config.rules.map { it.section } +
+            config.forwardings.map { it.section })
+            .mapNotNull { section ->
+                Regex("""^wrtpulse_(?:fwd|rule)_(\d+)$""").find(section)
+                    ?.groupValues?.get(1)?.toIntOrNull()
+            }
+        nextId = maxOf(nextId, (used.maxOrNull() ?: 0) + 1)
+    }
 
     val pendingCount: Int
         get() = staged.size + deletions.size + forwardDrafts.size + ruleDrafts.size +
@@ -128,6 +153,7 @@ class FirewallStore(private val session: RouterSession) {
     /** The parsed sections of [Commands.FIREWALL_STATE] — split out so tests can feed them in. */
     internal fun ingest(parts: Map<String, String>) {
         config = Parsers.firewallConfig(Parsers.uciShow(parts["firewall"].orEmpty()))
+        seedNextId()
         engine = Parsers.firewallEngine(parts)
         leases = Parsers.leases(parts["leases"].orEmpty())
         listening = Parsers.listeningPorts(parts["listen"].orEmpty())

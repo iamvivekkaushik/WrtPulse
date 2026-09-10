@@ -292,7 +292,7 @@ class WanCommandTest {
      */
     @Test
     fun `the rollback is armed before the batch`() {
-        val script = Commands.wanApply(listOf("set network.wan.proto='pppoe'"), Commands.ifup("wan"), 30)
+        val script = Commands.wanApply(listOf("set network.wan.proto='pppoe'"), listOf("network"), Commands.ifup("wan"), 30)
         val copy = script.indexOf("cp /etc/config/network")
         val watcher = script.indexOf("sleep 30")
         val batch = script.indexOf("uci batch")
@@ -305,7 +305,7 @@ class WanCommandTest {
 
     @Test
     fun `the watcher stands down only for a confirm file`() {
-        val script = Commands.wanApply(emptyList(), Commands.NETWORK_RELOAD, 30)
+        val script = Commands.wanApply(emptyList(), listOf("network"), Commands.NETWORK_RELOAD, 30)
         assertTrue(script.contains("[ -f ${Commands.ROLLBACK_DIR}/confirm ] && exit 0"))
         assertTrue(Commands.WAN_CONFIRM.contains("touch ${Commands.ROLLBACK_DIR}/confirm"))
     }
@@ -315,5 +315,50 @@ class WanCommandTest {
         assertEquals("up 18 d 04:12", WanStore.uptimeLabel(18 * 86_400 + 4 * 3_600 + 12 * 60))
         assertEquals("up 02:05", WanStore.uptimeLabel(2 * 3_600 + 5 * 60))
         assertEquals("—", WanStore.uptimeLabel(0))
+    }
+
+    // ---- the dhcp half of an IPv6 apply ----
+
+    /**
+     * IPv6 on this screen is half `network` and half `dhcp`. Committing only `network` left the
+     * dhcp half in uci's delta: never written to disk, invisible because `uci show` merges the
+     * delta back, and finally committed by whichever unrelated screen ran `uci commit dhcp` next.
+     */
+    @Test
+    fun `an apply commits every package the batch wrote`() {
+        val script = Commands.wanApply(
+            listOf("set dhcp.lan.ra='server'"),
+            listOf("network", "dhcp"),
+            Commands.ifup("wan"),
+            30,
+        )
+        assertTrue(script.contains("uci commit network && uci commit dhcp"))
+    }
+
+    /** A rollback that restored only network would leave the dhcp half against the old config. */
+    @Test
+    fun `the rollback snapshots and restores every committed package`() {
+        val script = Commands.wanApply(emptyList(), listOf("network", "dhcp"), Commands.NETWORK_RELOAD, 30)
+        assertTrue(script.contains("cp /etc/config/network ${Commands.ROLLBACK_DIR}/network"))
+        assertTrue(script.contains("cp /etc/config/dhcp ${Commands.ROLLBACK_DIR}/dhcp"))
+        assertTrue(script.contains("cp ${Commands.ROLLBACK_DIR}/dhcp /etc/config/dhcp"))
+        val batch = script.indexOf("uci batch")
+        assertTrue(script.indexOf("cp /etc/config/dhcp") in 0 until batch)
+    }
+
+    /** netifd does not carry router advertisements; a committed ra change needs odhcpd told. */
+    @Test
+    fun `a dhcp apply reloads odhcpd and a network-only apply does not`() {
+        val v6 = Commands.wanApply(emptyList(), listOf("network", "dhcp"), Commands.NETWORK_RELOAD, 30)
+        assertTrue(v6.contains("odhcpd reload"))
+        val v4 = Commands.wanApply(emptyList(), listOf("network"), Commands.NETWORK_RELOAD, 30)
+        assertFalse(v4.contains("odhcpd"))
+    }
+
+    /** No packages at all still has to commit something, or the batch would be a no-op. */
+    @Test
+    fun `an empty package list still commits network`() {
+        val script = Commands.wanApply(emptyList(), emptyList(), Commands.NETWORK_RELOAD, 30)
+        assertTrue(script.contains("uci commit network"))
     }
 }

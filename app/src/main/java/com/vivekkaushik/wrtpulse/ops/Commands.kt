@@ -989,20 +989,49 @@ object Commands {
      * available when the change being applied is the one that carries the connection.
      *
      * The watcher is detached from this session on purpose: it has to outlive the link.
+     *
+     * [packages] is every config file the batch writes into, not just `network`. IPv6 on this
+     * screen is half `network` and half `dhcp` — odhcpd's `ra`, `dhcpv6` and `ndp` live in the
+     * latter — and committing only `network` left the dhcp half sitting in uci's delta: unwritten
+     * to disk, invisible because `uci show` merges the delta back, and eventually committed by
+     * whichever unrelated screen ran `uci commit dhcp` next.
+     *
+     * Every committed file is also snapshotted and restored, so a rollback puts back exactly what
+     * the apply touched. Restoring `network` alone would leave the dhcp half applied against the
+     * old network config — the mismatch a relay setup fails on.
      */
-    fun wanApply(operations: List<String>, reload: String, seconds: Int = 30): String = buildString {
+    fun wanApply(
+        operations: List<String>,
+        packages: List<String>,
+        reload: String,
+        seconds: Int = 30,
+    ): String = buildString {
+        val pkgs = packages.ifEmpty { listOf("network") }
         append("mkdir -p $ROLLBACK_DIR && ")
-        append("cp /etc/config/network $ROLLBACK_DIR/network && ")
+        pkgs.forEach { append("cp /etc/config/$it $ROLLBACK_DIR/$it && ") }
         append("rm -f $ROLLBACK_DIR/confirm && ")
         append("(sleep $seconds; [ -f $ROLLBACK_DIR/confirm ] && exit 0; ")
-        append("cp $ROLLBACK_DIR/network /etc/config/network; ")
-        append("/etc/init.d/network reload; echo rolled-back > $ROLLBACK_DIR/last) ")
+        pkgs.forEach { append("cp $ROLLBACK_DIR/$it /etc/config/$it; ") }
+        append("/etc/init.d/network reload; ")
+        if ("dhcp" in pkgs) append("$ODHCPD_RELOAD; ")
+        append("echo rolled-back > $ROLLBACK_DIR/last) ")
         append(">/dev/null 2>&1 &\n")
         append("uci batch <<'WRTPULSE_EOF'\n")
         operations.forEach { append(it).append('\n') }
         append("WRTPULSE_EOF\n")
-        append("uci commit network && ").append(reload).append("; echo applied")
+        append(pkgs.joinToString(" && ") { "uci commit $it" })
+        append(" && ").append(reload).append("; echo applied")
     }
+
+    /**
+     * Router advertisements and DHCPv6 are odhcpd's, and it only re-reads `/etc/config/dhcp` when
+     * told to. `network reload` does not tell it, so without this a committed `ra`/`dhcpv6`/`ndp`
+     * change sits on disk while clients carry on with the old advertisements. Absent on a router
+     * that serves v6 from dnsmasq instead, hence the guard rather than a bare call.
+     */
+    const val ODHCPD_RELOAD =
+        "[ -x /etc/init.d/odhcpd ] && /etc/init.d/odhcpd reload >/dev/null 2>&1; " +
+            "[ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq reload >/dev/null 2>&1; :"
 
     const val ROLLBACK_DIR = "/tmp/wrtpulse-wan"
 

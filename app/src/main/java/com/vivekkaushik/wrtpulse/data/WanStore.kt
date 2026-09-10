@@ -720,19 +720,25 @@ class WanStore(private val session: RouterSession) : Refreshable {
         }
     }
 
-    /** The reload the apply runs: one ifup when one interface changed, netifd otherwise. */
+    /**
+     * The reload the apply runs: one ifup when one interface changed, netifd otherwise — plus
+     * odhcpd whenever the batch wrote `dhcp`, since netifd does not carry router advertisements
+     * and a committed `ra`/`dhcpv6` change would otherwise go unannounced.
+     */
     fun reloadCommand(): String {
         val touched = touchedInterfaces()
-        return if (touchesDevice() || touched.size > 1) Commands.NETWORK_RELOAD
+        val network = if (touchesDevice() || touched.size > 1) Commands.NETWORK_RELOAD
         else Commands.ifup(touched.firstOrNull() ?: selected)
+        return if ("dhcp" in packages()) "$network; ${Commands.ODHCPD_RELOAD}" else network
     }
 
     fun commitLine(): String {
         val packages = packages().ifEmpty { listOf("network") }
         val touched = touchedInterfaces()
-        return "$ " + packages.joinToString(" && ") { "uci commit $it" } + " && " +
-            if (touchesDevice() || touched.size > 1) "/etc/init.d/network reload"
-            else "ifup ${touched.firstOrNull() ?: selected}"
+        val reload = if (touchesDevice() || touched.size > 1) "/etc/init.d/network reload"
+        else "ifup ${touched.firstOrNull() ?: selected}"
+        return "$ " + packages.joinToString(" && ") { "uci commit $it" } + " && " + reload +
+            if ("dhcp" in packages) "; /etc/init.d/odhcpd reload" else ""
     }
 
     // -----------------------------------------------------------------------
@@ -898,7 +904,7 @@ class WanStore(private val session: RouterSession) : Refreshable {
         error = null
         notice = null
         rolledBack = false
-        val script = Commands.wanApply(ops(), reloadCommand(), seconds)
+        val script = Commands.wanApply(ops(), packages(), reloadCommand(), seconds)
         return try {
             beforeApply?.invoke()
             session.exec(script, timeoutMs = 60_000).requireOk("uci batch")
