@@ -271,6 +271,42 @@ data class SwPort(val port: Int, val tagged: Boolean) {
 data class SwitchVlan(val section: String, val device: String, val vlan: Int, val ports: String)
 
 /** A DHCP lease from /tmp/dhcp.leases. */
+/**
+ * A `config route` / `config route6` section as written. A legacy IPv4 `target` + `netmask`
+ * pair is folded into one CIDR [target] on the way in, so the app has one shape to show.
+ */
+data class StaticRoute(
+    val section: String,
+    val ipv6: Boolean,
+    val target: String,
+    val gateway: String,
+    val iface: String,
+    val metric: String,
+    val mtu: String,
+    val table: String,
+    /** `unicast` when unset — the kernel's default. */
+    val type: String,
+    val onlink: Boolean,
+    val disabled: Boolean,
+    /** Every option the section carries, so an in-place rewrite knows what to delete. */
+    val options: Set<String>,
+)
+
+/** One line of `ip route show` — what the kernel is actually doing with a destination. */
+data class KernelRoute(
+    val ipv6: Boolean,
+    /** Normalised: `default` is `0.0.0.0/0` or `::/0`. */
+    val dst: String,
+    val via: String,
+    val dev: String,
+    val metric: Int?,
+    val proto: String,
+    val scope: String,
+    val src: String,
+    /** `unicast`, or the special kind printed first on the line: `unreachable`, `blackhole`… */
+    val type: String,
+)
+
 data class Lease(val expiry: Long, val mac: String, val ip: String, val hostname: String?)
 
 /** One AP interface from `ubus call network.wireless status`. */
@@ -1302,6 +1338,76 @@ object Parsers {
         BLOCKED_MAC.findAll(text).map { it.groupValues[1].lowercase() }.toSet()
 
     /** `uci show network` → the interface section names already in use. */
+    /** `uci show network` → every `config route` and `config route6`, in file order. */
+    fun staticRoutes(uci: Map<String, String>): List<StaticRoute> = uci.entries
+        .filter { (key, type) -> (type == "route" || type == "route6") && key.startsWith("network.") && key.count { it == '.' } == 1 }
+        .map { (key, type) ->
+            val section = key.removePrefix("network.")
+            fun opt(name: String) = uci["network.$section.$name"].orEmpty()
+            val ipv6 = type == "route6"
+            var target = opt("target")
+            // Pre-CIDR configs carry the mask separately; a target with no mask is a host route.
+            val netmask = opt("netmask")
+            if (!ipv6 && target.isNotEmpty() && !target.contains('/') && netmask.isNotEmpty()) {
+                target = "$target/${IpMath.prefixOf(netmask) ?: 32}"
+            }
+            StaticRoute(
+                section = section,
+                ipv6 = ipv6,
+                target = target,
+                gateway = opt("gateway"),
+                iface = opt("interface"),
+                metric = opt("metric"),
+                mtu = opt("mtu"),
+                table = opt("table"),
+                type = opt("type").ifEmpty { "unicast" },
+                onlink = opt("onlink") == "1",
+                disabled = opt("disabled") == "1",
+                options = uci.keys.filter { it.startsWith("network.$section.") }
+                    .map { it.removePrefix("network.$section.") }.toSet(),
+            )
+        }
+
+    /**
+     * `ip -4 route show` / `ip -6 route show` → one [KernelRoute] per line.
+     *
+     * Lines are `[type] <dst> key value key value …`: `default via 192.168.68.1 dev eth0.2 src
+     * 192.168.68.115 metric 10`, `10.20.0.0/16 via 192.168.0.2 dev br-lan`, `unreachable
+     * 10.9.0.0/16`, `fe80::/64 dev br-lan proto kernel metric 256 pref medium`. Bare flags
+     * (`linkdown`, `onlink`) have no value and are skipped.
+     */
+    fun kernelRoutes(text: String, ipv6: Boolean): List<KernelRoute> = text.lineSequence()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .mapNotNull { line ->
+            val tokens = line.split(' ').filter { it.isNotEmpty() }
+            var i = 0
+            val type = if (tokens[0] in ROUTE_TYPES) tokens[i++] else "unicast"
+            val rawDst = tokens.getOrNull(i++) ?: return@mapNotNull null
+            val dst = if (rawDst == "default") (if (ipv6) "::/0" else "0.0.0.0/0") else rawDst
+            var via = ""; var dev = ""; var proto = ""; var scope = ""; var src = ""; var metric: Int? = null
+            while (i < tokens.size) {
+                val key = tokens[i]
+                val value = tokens.getOrNull(i + 1)
+                when (key) {
+                    "via" -> via = value.orEmpty()
+                    "dev" -> dev = value.orEmpty()
+                    "proto" -> proto = value.orEmpty()
+                    "scope" -> scope = value.orEmpty()
+                    "src" -> src = value.orEmpty()
+                    "metric" -> metric = value?.toIntOrNull()
+                    "table", "pref", "mtu", "advmss", "hoplimit", "expires", "error" -> Unit
+                    else -> { i += 1; continue }   // a bare flag
+                }
+                i += 2
+            }
+            KernelRoute(ipv6, dst, via, dev, metric, proto, scope, src, type)
+        }
+        .toList()
+
+    /** The route kinds `ip route` prints before the destination. */
+    val ROUTE_TYPES = setOf("unicast", "local", "broadcast", "multicast", "anycast", "unreachable", "prohibit", "blackhole", "throw", "nat")
+
     fun networkInterfaces(uci: Map<String, String>): Set<String> = uci.entries
         .filter { (key, value) -> value == "interface" && key.startsWith("network.") && key.count { it == '.' } == 1 }
         .map { it.key.removePrefix("network.") }

@@ -37,6 +37,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.vivekkaushik.wrtpulse.data.BackupStore
 import com.vivekkaushik.wrtpulse.data.FirewallStore
+import com.vivekkaushik.wrtpulse.data.RouteStore
 import com.vivekkaushik.wrtpulse.data.GuestStore
 import com.vivekkaushik.wrtpulse.data.FirmwareStore
 import com.vivekkaushik.wrtpulse.data.Inventory
@@ -165,6 +166,8 @@ private fun WrtPulseApp() {
     val firmwareStore = remember(session) { session?.let { FirmwareStore(it) } }
     // Read when the section opens — it is a full `uci show firewall` plus the lease table.
     val firewallStore = remember(session) { session?.let { FirewallStore(it) } }
+    // Static routes: read when the section opens, then kept live for the kernel table.
+    val routeStore = remember(session) { session?.let { RouteStore(it) } }
     // Backups live in app-private storage. The store lists them on creation so the System
     // row can say when the last one was taken without the screen being opened.
     val backupStore = remember(session) { session?.let { BackupStore(it, File(context.filesDir, "backups")) } }
@@ -183,6 +186,7 @@ private fun WrtPulseApp() {
         wifiStore?.beforeApply = hook
         lanStore?.beforeApply = hook
         wanStore?.beforeApply = hook
+        routeStore?.beforeApply = hook
     }
     // The app's own public key, so the keys screen can recognise the entry it is signed in
     // with and refuse to delete it. Derived from the sealed private key, keyed on the saved
@@ -409,6 +413,7 @@ private fun WrtPulseApp() {
                                     lan = lanStore,
                                     wan = wanStore,
                                     firewall = firewallStore,
+                                    routes = routeStore,
                                     live = telemetry,
                                     liveLatencyMs = telemetry?.latencyMs,
                                     routerName = currentRouter,

@@ -974,6 +974,17 @@ object Commands {
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
     /**
+     * Everything the static-routes screen reads: the config, the interface dump (for each
+     * interface's live subnet), and what the kernel actually holds for both families.
+     */
+    val ROUTES_STATE = listOf(
+        "echo $SECTION net" to NETWORK_CONFIG,
+        "echo $SECTION dump" to "ubus call network.interface dump 2>/dev/null || echo '{}'",
+        "echo $SECTION v4" to "ip -4 route show 2>/dev/null",
+        "echo $SECTION v6" to "ip -6 route show 2>/dev/null",
+    ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    /**
      * The connection test: three pings each at the gateway, and at two resolvers beyond it.
      *
      * Split that way on purpose — the gateway answering while 1.1.1.1 does not is a

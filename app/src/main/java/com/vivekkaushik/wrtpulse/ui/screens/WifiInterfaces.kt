@@ -1446,6 +1446,8 @@ fun NetworkHomeScreen(
     onOpenWireless: () -> Unit,
     onOpenFirewall: () -> Unit = {},
     firewall: com.vivekkaushik.wrtpulse.data.FirewallStore? = null,
+    onOpenRoutes: () -> Unit = {},
+    routes: com.vivekkaushik.wrtpulse.data.RouteStore? = null,
 ) {
     // The LAN card's chips are read state, so the tab's landing page is what pays for the
     // round trip — by the time the LAN screen opens, its data is already there.
@@ -1639,8 +1641,42 @@ fun NetworkHomeScreen(
                 if (firewall != null && firewall.pendingCount > 0) StatusDot(Wrt.Accent, 6.dp)
                 Icon(WrtIcons.ChevronRight, null, Modifier.size(14.dp), tint = Wrt.TextDim)
             }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, Wrt.BorderCard, RoundedCornerShape(14.dp))
+                    .background(Wrt.BgCard, RoundedCornerShape(14.dp))
+                    .clickable(onClick = onOpenRoutes)
+                    .padding(horizontal = 14.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Icon(WrtIcons.Forwarding, null, Modifier.size(19.dp), tint = Wrt.Accent)
+                Column(Modifier.weight(1f)) {
+                    Text("Static routes", style = sans(14.5f, 650))
+                    Text(
+                        routesSummary(routes),
+                        style = mono(10.5f, 500, Wrt.TextDim),
+                        modifier = Modifier.padding(top = 3.dp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (routes != null && routes.pendingCount > 0) StatusDot(Wrt.Accent, 6.dp)
+                Icon(WrtIcons.ChevronRight, null, Modifier.size(14.dp), tint = Wrt.TextDim)
+            }
         }
     }
+}
+
+/** "3 routes · 2 in kernel" — the section's shape before going in. */
+private fun routesSummary(routes: com.vivekkaushik.wrtpulse.data.RouteStore?): String {
+    if (routes == null) return "not connected"
+    if (!routes.loaded) return routes.error ?: "opens to read"
+    val rows = routes.rows().filter { !it.deleting }
+    if (rows.isEmpty()) return "none configured · ${routes.kernel.size} in kernel table"
+    val live = rows.count { it.live != null }
+    return "${rows.size} route${if (rows.size == 1) "" else "s"} · $live in kernel"
 }
 
 /** "fw4 · 3 forwards · 12 rules" — the section's shape before going in. */
@@ -1742,6 +1778,7 @@ private sealed interface WifiRoute {
     data object Lan : WifiRoute
     data object Wan : WifiRoute
     data object Firewall : WifiRoute
+    data object Routes : WifiRoute
     data object Interfaces : WifiRoute
     data class Radio(val section: String) : WifiRoute
     data class ClientScan(val radio: String) : WifiRoute
@@ -1756,6 +1793,7 @@ fun WifiSection(
     lan: com.vivekkaushik.wrtpulse.data.LanStore?,
     wan: com.vivekkaushik.wrtpulse.data.WanStore?,
     firewall: com.vivekkaushik.wrtpulse.data.FirewallStore? = null,
+    routes: com.vivekkaushik.wrtpulse.data.RouteStore? = null,
     live: com.vivekkaushik.wrtpulse.data.Telemetry?,
     liveLatencyMs: Int?,
     routerName: String,
@@ -1784,7 +1822,8 @@ fun WifiSection(
     // The Wireless and LAN pages are still tab-level screens; only the steps past them
     // take over the whole display.
     val fullScreen = route !is WifiRoute.Home && route !is WifiRoute.Interfaces &&
-        route !is WifiRoute.Lan && route !is WifiRoute.Wan && route !is WifiRoute.Firewall
+        route !is WifiRoute.Lan && route !is WifiRoute.Wan && route !is WifiRoute.Firewall &&
+        route !is WifiRoute.Routes
     androidx.compose.runtime.LaunchedEffect(fullScreen) { onFullScreen(fullScreen) }
 
     // A router swap resets the flow — the sections it referred to are gone.
@@ -1836,6 +1875,14 @@ fun WifiSection(
             onOpenWan = { push(WifiRoute.Wan) },
             onOpenWireless = { push(WifiRoute.Interfaces) },
             onOpenFirewall = { push(WifiRoute.Firewall) },
+            onOpenRoutes = { push(WifiRoute.Routes) },
+            routes = routes,
+        )
+        is WifiRoute.Routes -> RoutesSection(
+            store = routes,
+            latencyMs = liveLatencyMs ?: ticker.latencyMs,
+            onBack = { pop() },
+            onFullScreen = onFullScreen,
         )
         is WifiRoute.Firewall -> FirewallSection(
             store = firewall,
