@@ -69,14 +69,17 @@ internal val WAN_FIREWALL_UCI = """
     firewall.@zone[1].network='wan' 'wan6' 'wwan'
 """.trimIndent()
 
-/** `ls /lib/netifd/proto` on a router with PPPoE but no MAP-E. */
+/**
+ * `ls /lib/netifd/proto; ls /usr/lib/pppd/＊/` on a router with ppp-mod-pppoe but no MAP-E.
+ * There is no `pppoe.sh`: ppp.sh registers pppoe when the `pppoe.so` plugin is installed.
+ */
 internal val PROTO_LS = """
     dhcp.sh
     dhcpv6.sh
     none.sh
     ppp.sh
-    pppoe.sh
     static.sh
+    pppoe.so
 """.trimIndent()
 
 class WanLinkTest {
@@ -180,6 +183,21 @@ class ProtoHandlerTest {
         assertTrue("dhcpv6" in protos)
         assertFalse("map" in protos)
         assertFalse("dslite" in protos)
+    }
+
+    /**
+     * The Deco M4R as found: ppp-mod-pppoe installed, PPPoE greyed out anyway, because the
+     * app looked for a `pppoe.sh` that no OpenWrt release has ever shipped.
+     */
+    @Test
+    fun `pppoe comes from ppp's plugin, not a script of its own`() {
+        assertTrue("pppoe" in Parsers.protoHandlers("dhcp.sh\nppp.sh\npppoe.so"))
+        // The script without the plugin is bare ppp; the plugin without the script is nothing.
+        assertFalse("pppoe" in Parsers.protoHandlers("dhcp.sh\nppp.sh"))
+        assertFalse("pppoe" in Parsers.protoHandlers("dhcp.sh\npppoe.so"))
+        assertTrue("pptp" in Parsers.protoHandlers("ppp.sh\npptp.so"))
+        assertTrue("pppoa" in Parsers.protoHandlers("ppp.sh\npppoatm.so"))
+        assertFalse("pptp" in Parsers.protoHandlers("ppp.sh\npppoe.so"))
     }
 
     /** static and dhcp are built into netifd itself, script or no script. */
@@ -360,5 +378,67 @@ class WanCommandTest {
     fun `an empty package list still commits network`() {
         val script = Commands.wanApply(emptyList(), emptyList(), Commands.NETWORK_RELOAD, 30)
         assertTrue(script.contains("uci commit network"))
+    }
+}
+
+/** The socket helpers both the LAN and WAN stores lean on for a swconfig board. */
+class SocketParseTest {
+
+    private val decoUci = Parsers.uciShow(
+        """
+        network.lan=interface
+        network.lan.device='br-lan'
+        network.br_lan=device
+        network.br_lan.name='br-lan'
+        network.br_lan.type='bridge'
+        network.br_lan.ports='eth0.1'
+        network.@switch_vlan[0]=switch_vlan
+        network.@switch_vlan[0].device='switch0'
+        network.@switch_vlan[0].vlan='1'
+        network.@switch_vlan[0].ports='3 5 0t'
+        """.trimIndent()
+    )
+
+    @Test
+    fun `a bridge device carries its member list`() {
+        val bridge = Parsers.netDevices(decoUci).single()
+        assertEquals(listOf("eth0.1"), bridge.ports)
+    }
+
+    /** The LAN's VLAN is found through the bridge member, not `network.lan.device`. */
+    @Test
+    fun `the lan's switch vlan comes from the bridge member`() {
+        assertEquals("eth0.1", Parsers.lanSwitchMember(decoUci))
+        assertEquals(1, Parsers.lanSwitchVlan(decoUci))
+    }
+
+    @Test
+    fun `a dsa board has no lan switch vlan`() {
+        val dsa = Parsers.uciShow(
+            """
+            network.lan=interface
+            network.lan.device='br-lan'
+            network.br_lan=device
+            network.br_lan.name='br-lan'
+            network.br_lan.type='bridge'
+            network.br_lan.ports='lan1' 'lan2'
+            """.trimIndent()
+        )
+        assertNull(Parsers.lanSwitchVlan(dsa))
+        assertEquals(listOf("lan1", "lan2"), Parsers.netDevices(dsa).single().ports)
+    }
+
+    /** The chip has seven ports; the config wires two. Those two are the sockets. */
+    @Test
+    fun `switch sockets are the ports the vlans name`() {
+        val dev = Parsers.switchDevs(SWCONFIG_OUT).single()
+        assertEquals(listOf(3, 5), Parsers.switchSockets(dev, Parsers.switchVlans(decoUci)))
+    }
+
+    /** With no VLANs configured there is nothing to go on, so every non-CPU port is offered. */
+    @Test
+    fun `without vlans every port but the cpu is a socket`() {
+        val dev = Parsers.switchDevs(SWCONFIG_OUT).single()
+        assertEquals(listOf(1, 2, 3, 4, 5), Parsers.switchSockets(dev, emptyList()))
     }
 }

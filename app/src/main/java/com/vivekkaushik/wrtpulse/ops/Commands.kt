@@ -199,12 +199,23 @@ object Commands {
     const val SPEEDTEST_HOST = "speed.cloudflare.com"
 
     /**
-     * Pulls [bytes] from the speed-test endpoint on the router and discards it. Echoes the
-     * byte count so a silent failure can't be mistaken for an instant download.
+     * What curl prints after a transfer: the bytes moved, the whole wall time, and how much of
+     * it went on DNS, TCP and the TLS handshake. The app measures from the third number to
+     * the second, so a 2-second handshake on a slow MIPS core does not read as a slow line.
+     */
+    private const val CURL_TIMING = "-w '%{size_download} %{size_upload} %{time_total} %{time_pretransfer}'"
+
+    /**
+     * Pulls [bytes] from the speed-test endpoint on the router and discards it.
+     *
+     * With curl the last line carries its own timing (see [CURL_TIMING]); without it the byte
+     * count is echoed so a silent failure can't be mistaken for an instant download, and the
+     * app falls back to timing the round trip itself.
      */
     fun speedtestDownload(bytes: Long): String =
         "URL='https://$SPEEDTEST_HOST/__down?bytes=$bytes'; " +
-        "{ uclient-fetch -q -O /dev/null \"\$URL\" || wget -q -O /dev/null \"\$URL\"; } && echo $bytes"
+        "if command -v curl >/dev/null 2>&1; then curl -s -o /dev/null $CURL_TIMING \"\$URL\"; else " +
+        "{ uclient-fetch -q -O /dev/null \"\$URL\" || wget -q -O /dev/null \"\$URL\"; } && echo $bytes; fi"
 
     /** Scratch payload for the upload leg; /tmp is RAM, so it is cleaned up straight after. */
     const val SPEEDTEST_UPLOAD_FILE = "/tmp/wrtpulse-speedtest.bin"
@@ -216,12 +227,16 @@ object Commands {
     /**
      * curl first: OpenWrt's uclient-fetch accepts --post-file but stalls partway through a
      * large body and the far end resets, so it cannot measure an upload.
+     *
+     * `-T file -X POST` streams the file. `--data-binary @file` reads all of it into memory
+     * first, and on a 128 MB router with the same 20 MB already sitting in tmpfs that got curl
+     * killed by the OOM reaper — which the app then reported as "curl missing".
      */
     fun speedtestUpload(bytes: Long): String =
         "URL='https://$SPEEDTEST_HOST/__up'; " +
         "if command -v curl >/dev/null 2>&1; then " +
-        "curl -s -o /dev/null --data-binary @$SPEEDTEST_UPLOAD_FILE \"\$URL\"; else " +
-        "uclient-fetch -q -O /dev/null --post-file=$SPEEDTEST_UPLOAD_FILE \"\$URL\"; fi && echo $bytes"
+        "curl -s -o /dev/null $CURL_TIMING -T $SPEEDTEST_UPLOAD_FILE -X POST \"\$URL\"; else " +
+        "uclient-fetch -q -O /dev/null --post-file=$SPEEDTEST_UPLOAD_FILE \"\$URL\" && echo $bytes; fi"
 
     const val SPEEDTEST_CLEANUP = "rm -f $SPEEDTEST_UPLOAD_FILE"
 
@@ -950,8 +965,12 @@ object Commands {
         "echo $SECTION dhcp" to "uci show dhcp 2>/dev/null",
         "echo $SECTION dump" to "ubus call network.interface dump 2>/dev/null || echo '{}'",
         "echo $SECTION links" to NETDEVS,
-        // Which protocols netifd can actually bring up on this router.
-        "echo $SECTION protos" to "ls /lib/netifd/proto 2>/dev/null",
+        // Which protocols netifd can actually bring up on this router. PPPoE, PPtP and PPPoA
+        // have no script of their own: ppp.sh registers each one only when its pppd plugin
+        // is installed, so the plugin directory is listed too.
+        "echo $SECTION protos" to "ls /lib/netifd/proto 2>/dev/null; ls /usr/lib/pppd/*/ 2>/dev/null",
+        // The switch chip on a swconfig board: its sockets are numbers here, not netdevs.
+        "echo $SECTION swconfig" to SWCONFIG,
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
     /**
@@ -1014,6 +1033,7 @@ object Commands {
         pkgs.forEach { append("cp $ROLLBACK_DIR/$it /etc/config/$it; ") }
         append("/etc/init.d/network reload; ")
         if ("dhcp" in pkgs) append("$ODHCPD_RELOAD; ")
+        if ("firewall" in pkgs) append("$FIREWALL_RELOAD; ")
         append("echo rolled-back > $ROLLBACK_DIR/last) ")
         append(">/dev/null 2>&1 &\n")
         append("uci batch <<'WRTPULSE_EOF'\n")

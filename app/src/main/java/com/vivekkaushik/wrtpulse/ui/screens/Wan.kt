@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.vivekkaushik.wrtpulse.data.LanV6
+import com.vivekkaushik.wrtpulse.data.Socket
 import com.vivekkaushik.wrtpulse.data.Telemetry
 import com.vivekkaushik.wrtpulse.data.V6Mode
 import com.vivekkaushik.wrtpulse.data.WanRow
@@ -86,6 +87,7 @@ fun WanSection(
     val scope = rememberCoroutineScope()
     var page by remember(store) { mutableStateOf(WanPage.Hub) }
     var reviewOpen by remember { mutableStateOf(false) }
+    var addOpen by remember { mutableStateOf(false) }
 
     com.vivekkaushik.wrtpulse.ui.LiveRefresh(store, WAN_REFRESH_MS)
     LaunchedEffect(page) { onFullScreen(page != WanPage.Hub) }
@@ -121,6 +123,7 @@ fun WanSection(
                     live = live,
                     onOpen = { page = it },
                     onTest = { scope.launch { store.runTest() } },
+                    onAdd = { addOpen = true },
                 )
                 WanPage.Port -> PortPage(store)
                 WanPage.Ipv4 -> Ipv4Page(store)
@@ -146,6 +149,18 @@ fun WanSection(
             onRevertAll = { store?.revert(); reviewOpen = false },
         )
     }
+    SheetHost(visible = addOpen, onDismiss = { addOpen = false }) {
+        if (store != null) {
+            AddWiredUplinkSheet(
+                store = store,
+                onCancel = { addOpen = false },
+                onCreate = { socket, proto ->
+                    store.addWiredUplink(socket, proto)
+                    addOpen = false
+                },
+            )
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +173,7 @@ private fun WanHub(
     live: Telemetry?,
     onOpen: (WanPage) -> Unit,
     onTest: () -> Unit,
+    onAdd: () -> Unit,
 ) {
     val rows = store.wanRows()
     val selected = rows.firstOrNull { it.section == store.selected } ?: rows.firstOrNull()
@@ -174,10 +190,12 @@ private fun WanHub(
             )
         }
         store.notice?.let { NoteCard(it) }
+        store.subnetClashes().forEach { ProblemCard(it) }
         if (rows.isEmpty() && store.loaded) {
             NoteCard(
                 "No interface here is in the firewall's wan zone or carrying a default route, " +
-                    "so this router has no uplink of its own to manage."
+                    "so this router has no uplink of its own to manage. Add one below to put " +
+                    "the ISP on an ethernet socket."
             )
         }
         // One or two uplinks fill the width, the way the hub is drawn. Past that, weight
@@ -230,15 +248,11 @@ private fun WanHub(
             }
         }
         if (rows.isNotEmpty()) FailoverCard(store, rows)
-        // "Add WAN" is drawn in the design and deliberately absent here: a second uplink is
-        // only a failover once something decides between them, and that is mwan3 — a package
-        // this app does not install or configure. The metric on each interface is what
-        // orders the ones that exist.
-        NoteCard(
-            "Adding a second uplink is not in this screen yet. Failover between the uplinks " +
-                "that exist is the metric above; health-checked failover is mwan3, which the " +
-                "app does not configure."
-        )
+        // A wired uplink is one batch: the socket leaves the LAN, an interface is created on
+        // it, and the firewall's wan zone takes it. Failover between the uplinks that exist is
+        // still the metric above; health-checked failover is mwan3, which the app does not
+        // configure.
+        AddUplinkCard(store, onAdd)
         Spacer(Modifier.height(6.dp))
     }
 }
@@ -597,7 +611,12 @@ private fun NavRow(title: String, detail: String, divider: Boolean, onClick: () 
 
 @Composable
 private fun PortPage(store: WanStore) {
-    val ports = store.availablePorts()
+    // Every socket on the case, plus whatever the WAN sits on now if the case does not list
+    // it — a netdev the board names oddly still has to be pickable back.
+    val ports = store.sockets().let { listed ->
+        if (store.port.isEmpty() || listed.any { it.id == store.port }) listed
+        else listed + store.socketFor(store.port)
+    }
     val tagged = store.vlanId.isNotEmpty()
     var customMtu by remember { mutableStateOf(store.mtu.isNotEmpty() && store.mtu !in WanStore.MTU_CHOICES) }
     var customMac by remember { mutableStateOf(store.macaddr.isNotEmpty()) }
@@ -634,20 +653,24 @@ private fun PortPage(store: WanStore) {
         Column {
             FieldLabel("PHYSICAL PORT")
             Row(
-                Modifier.padding(top = 6.dp),
+                Modifier.padding(top = 6.dp).fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(7.dp),
             ) {
-                ports.forEach { name ->
-                    val dev = store.devs.firstOrNull { it.name == name }
-                    MaskChip(
-                        name + (dev?.speedMbps?.let { if (it >= 1000) " ${it / 1000}G" else " ${it}M" } ?: ""),
-                        name == store.port,
-                    ) { store.stagePort(name) }
+                ports.forEach { socket ->
+                    MaskChip(socketChipLabel(socket), socket.id == store.port) { store.stagePort(socket.id) }
                 }
             }
+            val chosen = store.selectedSocket
             Text(
-                "The socket the ISP is plugged into. A port already in the LAN bridge cannot " +
-                    "carry the WAN as well.",
+                when {
+                    chosen?.inLan == true && store.swconfig ->
+                        "${chosen.label} is in the LAN today. Applying moves it out of the LAN's " +
+                            "switch VLAN into one of its own, and the WAN rides that VLAN's netdev."
+                    chosen?.inLan == true ->
+                        "${chosen.label} is in the LAN bridge today. Applying takes it out of the " +
+                            "bridge so it can carry the WAN."
+                    else -> "The socket the ISP is plugged into."
+                },
                 style = sans(10.5f, 400, Wrt.TextDim, lineHeight = 16.sp),
                 modifier = Modifier.padding(top = 6.dp),
             )
@@ -676,7 +699,7 @@ private fun PortPage(store: WanStore) {
                         }
                     }
                     Text(
-                        "maps to ${store.port}.${store.vlanId} · written as " +
+                        "maps to ${store.deviceName} · written as " +
                             "egress_qos_mapping '0:${store.pcp}'",
                         style = mono(10f, 500, Wrt.TextDim),
                         modifier = Modifier.padding(top = 7.dp),
@@ -730,8 +753,7 @@ private fun PortPage(store: WanStore) {
         }
         store.problems().forEach { ProblemCard(it) }
         Text(
-            "$ uci set network.${store.selected}.device='${store.port}" +
-                (if (store.vlanId.isEmpty()) "" else ".${store.vlanId}") + "'",
+            "$ uci set network.${store.selected}.device='${store.deviceName}'",
             style = mono(10f, 500, Wrt.TextDim),
             modifier = Modifier.padding(bottom = 10.dp),
         )
@@ -1039,6 +1061,157 @@ private fun ModeRow(
 // Screen 30 — apply & connect, with the rollback armed
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// A new wired uplink
+// ---------------------------------------------------------------------------
+
+/** "Port 5 · 1G · in LAN" — what a socket chip says. */
+private fun socketChipLabel(socket: Socket): String = listOfNotNull(
+    socket.label,
+    socket.speedMbps?.let { if (it >= 1000) "${it / 1000}G" else "${it}M" } ?: if (socket.up) "up" else "down",
+    if (socket.inLan) "in LAN" else null,
+).joinToString(" · ")
+
+/**
+ * The hub's way in. The design draws "Add WAN"; this is the wired half of it — a socket the
+ * LAN gives up, an interface on it, and the firewall's wan zone. A Wi-Fi client uplink is
+ * still made in Network · Wireless, where the radio is.
+ */
+@Composable
+private fun AddUplinkCard(store: WanStore, onAdd: () -> Unit) {
+    val used = store.usedSockets()
+    val free = store.sockets().filterNot { it.id in used }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(1.dp, Wrt.BorderCard, RoundedCornerShape(13.dp))
+            .background(Wrt.BgCard, RoundedCornerShape(13.dp))
+            .padding(horizontal = 14.dp),
+    ) {
+        NavRow(
+            "Add wired uplink",
+            when {
+                !store.loaded -> ""
+                free.isEmpty() -> "no free socket"
+                else -> free.joinToString(", ") { it.label }
+            },
+            divider = true,
+        ) { if (free.isNotEmpty()) onAdd() }
+        Text(
+            "Puts the ISP on an ethernet socket: the socket leaves the LAN, a new interface is " +
+                "created on it, and the firewall's wan zone takes it. Failover between the uplinks " +
+                "that exist is the metric above; health-checked failover is mwan3, which the app " +
+                "does not configure.",
+            style = sans(10.5f, 400, Wrt.TextDim, lineHeight = 16.sp),
+            modifier = Modifier.padding(vertical = 10.dp),
+        )
+    }
+}
+
+@Composable
+private fun AddWiredUplinkSheet(
+    store: WanStore,
+    onCancel: () -> Unit,
+    onCreate: (Socket, String) -> Unit,
+) {
+    val sockets = store.sockets()
+    val used = store.usedSockets()
+    // The socket with a live link that no uplink owns is almost always the one the cable was
+    // just plugged into, so it starts selected.
+    var chosenId by remember {
+        mutableStateOf(
+            sockets.firstOrNull { it.id !in used && it.up }?.id
+                ?: sockets.firstOrNull { it.id !in used }?.id,
+        )
+    }
+    var proto by remember { mutableStateOf("dhcp") }
+    val chosen = sockets.firstOrNull { it.id == chosenId }
+    val name = store.nextUplinkName()
+
+    Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 22.dp)) {
+        Text("Add wired uplink", style = sans(16f, 650), modifier = Modifier.padding(top = 14.dp))
+        Text(
+            "Plug the ISP into a socket and pick it here. The link is the surest tell: the " +
+                "socket that comes up with the cable in is the one.",
+            style = sans(12f, 400, Wrt.TextSecondary, lineHeight = 18.sp),
+            modifier = Modifier.padding(top = 4.dp),
+        )
+        Column(Modifier.padding(top = 14.dp)) {
+            FieldLabel("SOCKET")
+            if (sockets.isEmpty()) {
+                Text(
+                    "The case reports no ethernet sockets.",
+                    style = sans(11f, 400, Wrt.TextDim),
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+            }
+            Row(
+                Modifier.padding(top = 6.dp).fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                sockets.forEach { socket ->
+                    val taken = socket.id in used
+                    MaskChip(
+                        socketChipLabel(socket) + if (taken) " · WAN" else "",
+                        socket.id == chosenId,
+                    ) { if (!taken) chosenId = socket.id }
+                }
+            }
+        }
+        Column(Modifier.padding(top = 14.dp)) {
+            FieldLabel("IPV4 PROTOCOL")
+            Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                store.protoChoices().filter { it.first in setOf("dhcp", "pppoe", "static") }
+                    .forEach { (p, available) ->
+                        ProtoChip(p, p == proto, available) { if (available) proto = p }
+                    }
+            }
+            Text(
+                when (proto) {
+                    "pppoe" -> "Username and password go in on the IPv4 page once the uplink exists."
+                    "static" -> "Address, gateway and DNS go in on the IPv4 page once the uplink exists."
+                    else -> "Most ISP routers hand out an address by DHCP."
+                },
+                style = sans(10.5f, 400, Wrt.TextDim, lineHeight = 16.sp),
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+        chosen?.let { socket ->
+            Column(Modifier.padding(top = 14.dp)) {
+                FieldLabel("WHAT CHANGES")
+                store.wiredUplinkPreview(socket, proto).forEach { line ->
+                    Text(
+                        "· $line",
+                        style = sans(11.5f, 400, Wrt.TextSecondary, lineHeight = 18.sp),
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        if (chosen != null) {
+            PrimaryButton("Stage $name on ${chosen.label}") { onCreate(chosen, proto) }
+        } else {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(46.dp)
+                    .background(Wrt.BgDeep, RoundedCornerShape(11.dp))
+                    .border(1.dp, Wrt.BorderInput, RoundedCornerShape(11.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("Pick a socket", style = sans(13.5f, 650, Wrt.TextDim))
+            }
+        }
+        Box(
+            Modifier.fillMaxWidth().padding(top = 6.dp).height(40.dp).clickable(onClick = onCancel),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("Cancel", style = sans(13f, 600, Wrt.TextSecondary))
+        }
+    }
+}
+
 @Composable
 private fun WanReviewSheet(store: WanStore?, onApply: () -> Unit, onRevertAll: () -> Unit) {
     if (store == null) return
@@ -1098,7 +1271,8 @@ private fun WanReviewSheet(store: WanStore?, onApply: () -> Unit, onRevertAll: (
             Icon(WrtIcons.Shield, null, Modifier.padding(top = 1.dp).size(16.dp), tint = Wrt.Accent)
             Text(
                 "Rollback armed — the router keeps a copy of /etc/config/network and puts it " +
-                    "back unless WrtPulse reaches it again within ${WanStore.ROLLBACK_SECONDS} s. " +
+                    "back unless WrtPulse reaches it again within " +
+                    "${if (store.touchesSwitch()) WanStore.SWITCH_ROLLBACK_SECONDS else WanStore.ROLLBACK_SECONDS} s. " +
                     "Re-reading the config is what confirms it, not the command returning 0.",
                 style = sans(12f, 400, Wrt.TextSecondary, lineHeight = 18.sp),
             )

@@ -20,7 +20,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -87,7 +91,12 @@ fun SheetHost(visible: Boolean, onDismiss: () -> Unit, sheet: @Composable () -> 
                         .size(36.dp, 4.dp)
                         .background(Wrt.DotOff, RoundedCornerShape(2.dp))
                 )
-                sheet()
+                // A sheet taller than the screen — a review with several warnings — scrolls
+                // rather than pushing its Apply button under the navigation bar.
+                val maxHeight = LocalConfiguration.current.screenHeightDp.dp * 0.86f
+                Column(Modifier.heightIn(max = maxHeight).verticalScroll(rememberScrollState())) {
+                    sheet()
+                }
             }
         }
     }

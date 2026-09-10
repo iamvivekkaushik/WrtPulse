@@ -545,25 +545,7 @@ class LanStore(private val session: RouterSession) : Refreshable {
      * own device and the legacy `ifname`.
      */
     val lanSwVlan: Int?
-        get() {
-            val device = net?.device.orEmpty()
-            device.substringAfter('.', "").toIntOrNull()?.let { return it }
-            val members = buildList {
-                // A `config device` bridge lists its members in `ports`.
-                networkUci.entries.filter { it.value == "device" && it.key.count { c -> c == '.' } == 1 }
-                    .forEach { (key, _) ->
-                        val section = key.substringAfter('.')
-                        if (networkUci["network.$section.name"] == device) {
-                            addAll(Parsers.uciList(networkUci["network.$section.ports"].orEmpty())
-                                .flatMap { it.split(' ') })
-                        }
-                    }
-                // Pre-bridge configs put the members straight on the interface.
-                addAll(Parsers.uciList(networkUci["network.${section}.ifname"].orEmpty())
-                    .flatMap { it.split(' ') })
-            }
-            return members.mapNotNull { it.substringAfter('.', "").toIntOrNull() }.firstOrNull()
-        }
+        get() = Parsers.lanSwitchVlan(networkUci, section)
 
     /** True when the chip is in VLAN mode at all; adding VLANs does nothing while it is off. */
     val vlanModeOn: Boolean

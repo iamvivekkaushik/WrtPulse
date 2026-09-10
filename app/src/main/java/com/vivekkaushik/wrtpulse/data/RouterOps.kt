@@ -71,20 +71,55 @@ class RouterOps(private val session: RouterSession) {
         )
     }
 
-    /** Runs one transfer command and returns the bytes it confirmed plus how long it took. */
+    /**
+     * Runs one transfer command and returns the bytes it confirmed plus how long it took.
+     *
+     * With curl the router reports its own numbers — bytes down, bytes up, total time, and the
+     * time before the first byte moved — and the transfer time is the difference of the last
+     * two, so DNS, TCP and the TLS handshake are left out. Without curl the only number is the
+     * byte count, and the wall clock around the SSH exec has to do, handshake and all.
+     */
     private suspend fun timedTransfer(command: String): Pair<Long, Double>? = try {
         val started = System.nanoTime()
         val result = session.exec(command, timeoutMs = 180_000)
-        val seconds = (System.nanoTime() - started) / 1e9
-        val bytes = result.stdout.trim().lines().lastOrNull()?.trim()?.toLongOrNull()
-        if (!result.ok || bytes == null || seconds <= 0.05) null else bytes to seconds
+        val wall = (System.nanoTime() - started) / 1e9
+        val parsed = parseTransfer(result.stdout, wall)
+        if (!result.ok || parsed == null || parsed.second <= 0.05) null else parsed
     } catch (e: SshException) {
         null
     }
 
     companion object {
         const val DEFAULT_DOWN_BYTES = 20_000_000L
-        // Uplinks are usually slower and the payload lives in the router's RAM, so keep it small.
-        const val DEFAULT_UP_BYTES = 5_000_000L
+        // Same size as the download: 5 MB was over in well under a second on a fast line, so
+        // the SSH round trip and TLS setup inside the timing dominated and the number read
+        // far too low. The payload lives in the router's RAM, but 20 MB fits on anything
+        // that can run the app's other features.
+        const val DEFAULT_UP_BYTES = 20_000_000L
+
+        /**
+         * The last line of a transfer command → (bytes, seconds).
+         *
+         * Four fields are curl's `size_download size_upload time_total time_pretransfer`;
+         * whichever size is non-zero is the leg that ran. One field is the byte count echoed by
+         * the fallback, timed by [wall]. Anything else is a failed transfer.
+         */
+        fun parseTransfer(stdout: String, wall: Double): Pair<Long, Double>? {
+            val fields = stdout.trim().lines().lastOrNull()?.trim()?.split(Regex("\\s+")).orEmpty()
+            return when (fields.size) {
+                1 -> fields[0].toLongOrNull()?.let { it to wall }
+                4 -> {
+                    val down = fields[0].toLongOrNull() ?: return null
+                    val up = fields[1].toLongOrNull() ?: return null
+                    val total = fields[2].toDoubleOrNull() ?: return null
+                    val pre = fields[3].toDoubleOrNull() ?: return null
+                    val bytes = if (up > 0) up else down
+                    val seconds = (total - pre).takeIf { it > 0 } ?: wall
+                    if (bytes <= 0) null else bytes to seconds
+                }
+                else -> null
+            }
+        }
     }
+
 }

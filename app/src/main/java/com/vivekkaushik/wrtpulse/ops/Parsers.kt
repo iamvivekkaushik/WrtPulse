@@ -142,6 +142,8 @@ data class NetDevice(
     val mtu: String,
     /** netifd's `egress_qos_mapping`, which is how a PCP value is actually written. */
     val egressQos: String,
+    /** A bridge's members, one per entry — `lan1`, `lan2`, or `eth0.1` on a swconfig board. */
+    val ports: List<String> = emptyList(),
 )
 
 /** One target of the connection test. */
@@ -1657,20 +1659,35 @@ object Parsers {
                 macaddr = uci["network.$section.macaddr"].orEmpty(),
                 mtu = uci["network.$section.mtu"].orEmpty(),
                 egressQos = uci["network.$section.egress_qos_mapping"].orEmpty(),
+                ports = uciList(uci["network.$section.ports"].orEmpty())
+                    .flatMap { it.split(' ') }.filter { it.isNotBlank() },
             )
         }
 
     /**
-     * `ls /lib/netifd/proto` → the protocols this router can actually bring up.
+     * `ls /lib/netifd/proto` plus `ls /usr/lib/pppd/<version>/` → the protocols this router
+     * can actually bring up.
      *
      * The honest test for whether MAP-E or DS-Lite is on offer: netifd can only run a
      * protocol whose handler script is installed, and the package that ships it is what a
      * greyed-out row is really waiting for.
+     *
+     * The PPP family is the exception. There is no `pppoe.sh`: `ppp.sh` registers pppoe,
+     * pptp and pppoa itself, each only when its pppd plugin (`pppoe.so`, `pptp.so`,
+     * `pppoatm.so`) is present. Reading the script list alone greyed PPPoE out on a router
+     * with ppp-mod-pppoe installed.
      */
-    fun protoHandlers(text: String): Set<String> = text.lineSequence()
-        .map { it.trim().removeSuffix(".sh") }
-        .filter { it.isNotEmpty() && !it.contains('/') }
-        .toSet() + setOf("static", "dhcp", "none")
+    fun protoHandlers(text: String): Set<String> {
+        val names = text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.contains('/') }.toList()
+        val scripts = names.filter { it.endsWith(".sh") }.map { it.removeSuffix(".sh") }
+        val plugins = names.filter { it.endsWith(".so") }.map { it.removeSuffix(".so") }
+        val ppp = if ("ppp" in scripts) buildList {
+            if ("pppoe" in plugins) add("pppoe")
+            if ("pptp" in plugins) add("pptp")
+            if ("pppoatm" in plugins) add("pppoa")
+        } else emptyList()
+        return scripts.toSet() + ppp + setOf("static", "dhcp", "none")
+    }
 
     /**
      * busybox `ping -c N` output → loss and average RTT.
@@ -1845,6 +1862,49 @@ object Parsers {
             )
         }
         .sortedBy { it.vlan }
+
+    /**
+     * The bridge member that ties the LAN to its switch VLAN on a swconfig board — `eth0.1`.
+     *
+     * Not `network.lan.device`: that is `br-lan`. The member sits in the bridge's `ports`
+     * (a `config device`), or on the interface's legacy `ifname` on pre-bridge configs. Null on
+     * a DSA board, whose members are plain socket names with no VLAN suffix.
+     */
+    fun lanSwitchMember(uci: Map<String, String>, section: String = "lan"): String? {
+        val device = uci["network.$section.device"].orEmpty()
+        val members = buildList {
+            if (device.isNotEmpty()) add(device)
+            netDevices(uci).filter { it.name == device }.forEach { addAll(it.ports) }
+            addAll(uciList(uci["network.$section.ifname"].orEmpty()).flatMap { it.split(' ') })
+        }
+        return members.firstOrNull { it.substringAfter('.', "").toIntOrNull() != null }
+    }
+
+    /** The VLAN id the LAN rides on a swconfig board, from [lanSwitchMember]. Null on DSA. */
+    fun lanSwitchVlan(uci: Map<String, String>, section: String = "lan"): Int? =
+        lanSwitchMember(uci, section)?.substringAfter('.')?.toIntOrNull()
+
+    /**
+     * The switch ports that are wired to a socket, as far as the config can tell.
+     *
+     * A chip reports every port it has, and most boards wire only some of them: the Deco M4R's
+     * MT7530 has seven, two of which reach the case. Link state is no test either — its
+     * port 6 reports "up" with nothing plugged in. What the board's own config puts in a VLAN
+     * is the honest list; with no VLANs at all, every non-CPU port is offered.
+     */
+    fun switchSockets(dev: SwitchDev, vlans: List<SwitchVlan>): List<Int> {
+        val count = if (dev.ports > 0) dev.ports else 6
+        val all = (0 until count).filter { it != dev.cpuPort }
+        // Match VLANs to this chip by name; a config whose VLANs name a chip differently
+        // (one chip, renamed) still gets its ports read rather than none.
+        val own = vlans.filter { it.device == dev.name }.ifEmpty { vlans }
+        val configured = own
+            .flatMap { swPorts(it.ports) }
+            .map { it.port }
+            .filter { it != dev.cpuPort }
+            .distinct()
+        return if (configured.isEmpty()) all else configured.sorted()
+    }
 
     /** `uci show network` → swconfig VLANs, which the app reads and never writes. */
     fun switchVlans(uci: Map<String, String>): List<SwitchVlan> = uci.entries

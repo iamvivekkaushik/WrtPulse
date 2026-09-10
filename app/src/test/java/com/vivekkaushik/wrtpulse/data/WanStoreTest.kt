@@ -7,6 +7,7 @@ import com.vivekkaushik.wrtpulse.net.SshConnection
 import com.vivekkaushik.wrtpulse.net.SshTarget
 import com.vivekkaushik.wrtpulse.ops.NETDEV_LINES
 import com.vivekkaushik.wrtpulse.ops.PROTO_LS
+import com.vivekkaushik.wrtpulse.ops.SWCONFIG_OUT
 import com.vivekkaushik.wrtpulse.ops.WAN_DUMP
 import com.vivekkaushik.wrtpulse.ops.WAN_FIREWALL_UCI
 import com.vivekkaushik.wrtpulse.ops.WAN_NETWORK_UCI
@@ -717,5 +718,372 @@ class WanConnectionTestTest {
         // Nothing was ever run against this one, so it has nothing to show.
         assertTrue(s.pingsBySection["wwan_2"].orEmpty().isEmpty())
         assertEquals(4, s.pingsBySection["wan"]!!.size)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A wired uplink on a socket the LAN owns
+// ---------------------------------------------------------------------------
+
+/**
+ * `uci show network` on the TP-Link Deco M4R as found: both sockets (switch ports 3 and 5) in
+ * LAN VLAN 1, no `wan` interface at all, and a Wi-Fi client as the only uplink.
+ */
+private val DECO_NETWORK_UCI = """
+    network.lan=interface
+    network.lan.device='br-lan'
+    network.lan.proto='static'
+    network.lan.ipaddr='192.168.0.1/24'
+    network.br_lan=device
+    network.br_lan.name='br-lan'
+    network.br_lan.type='bridge'
+    network.br_lan.ports='eth0.1'
+    network.@switch[0]=switch
+    network.@switch[0].name='switch0'
+    network.@switch[0].reset='1'
+    network.@switch[0].enable_vlan='1'
+    network.@switch_vlan[0]=switch_vlan
+    network.@switch_vlan[0].device='switch0'
+    network.@switch_vlan[0].vlan='1'
+    network.@switch_vlan[0].ports='3 5 0t'
+    network.wwan=interface
+    network.wwan.proto='dhcp'
+    network.wwan.metric='30'
+""".trimIndent()
+
+private val DECO_FIREWALL_UCI = """
+    firewall.@zone[0]=zone
+    firewall.@zone[0].name='lan'
+    firewall.@zone[0].network='lan'
+    firewall.@zone[1]=zone
+    firewall.@zone[1].name='wan'
+    firewall.@zone[1].network='wan' 'wan6' 'wwan'
+""".trimIndent()
+
+private fun decoDump(wwanAddress: String = "10.143.245.231") = """
+{"interface":[
+ {"interface":"lan","up":true,"available":true,"proto":"static","device":"br-lan",
+  "l3_device":"br-lan","uptime":1000,
+  "ipv4-address":[{"address":"192.168.0.1","mask":24}],
+  "route":[{"target":"192.168.0.0","mask":24,"nexthop":"0.0.0.0"}]},
+ {"interface":"wwan","up":true,"available":true,"proto":"dhcp","device":"phy1-sta0",
+  "l3_device":"phy1-sta0","uptime":900,"metric":30,
+  "ipv4-address":[{"address":"$wwanAddress","mask":24}],
+  "route":[{"target":"0.0.0.0","mask":0,"nexthop":"10.143.245.33","source":""}]}
+]}
+""".trimIndent()
+
+private val DECO_NETDEVS = """
+    br-lan up 1 - a8:6e:84:93:80:38 virt wired
+    eth0 up 1 1000 a8:6e:84:93:80:38 phy wired
+    eth0.1 up 1 - a8:6e:84:93:80:38 virt wired
+    lo unknown 1 - 00:00:00:00:00:00 virt wired
+    phy0-ap0 up 1 - a8:6e:84:93:80:39 phy wifi
+    phy1-sta0 up 1 - a8:6e:84:93:80:3a phy wifi
+""".trimIndent()
+
+/** A chip that will not say which port is the CPU — [Parsers.switchDevs] leaves it null. */
+private val SWCONFIG_NO_CPU = """
+    Found: switch0 - mdio.0
+    # switch0
+    switch0: eth0(Generic), ports: 6, vlans: 16
+    Port 3:
+    	link: port:3 link:up speed:1000baseT full-duplex
+    Port 5:
+    	link: port:5 link:down
+    VLAN 1:
+    	ports: 3 5 0t
+""".trimIndent()
+
+class WiredUplinkTest {
+
+    private val unusedClient = object : SshClient {
+        override suspend fun probeHostKey(target: SshTarget) = error("unused")
+        override suspend fun connect(target: SshTarget, auth: SshAuth, connectTimeoutMs: Long): SshConnection =
+            error("unused")
+    }
+
+    private fun deco(
+        network: String = DECO_NETWORK_UCI,
+        firewall: String = DECO_FIREWALL_UCI,
+        dump: String = decoDump(),
+        swconfig: String = SWCONFIG_OUT,
+    ): WanStore = WanStore(RouterSession(SshTarget("192.168.0.1"), unusedClient, { error("unused") })).apply {
+        ingest(
+            mapOf(
+                "net" to network,
+                "fw" to firewall,
+                "dhcp" to DHCP_V6_UCI,
+                "dump" to dump,
+                "links" to DECO_NETDEVS,
+                "protos" to PROTO_LS,
+                "swconfig" to swconfig,
+            )
+        )
+    }
+
+    private fun socket(store: WanStore, id: String): Socket = store.sockets().single { it.id == id }
+
+    /** The chip has seven ports; the config puts two of them in a VLAN, and those are the case holes. */
+    @Test
+    fun `a swconfig board's sockets are the switch ports its vlans name`() {
+        val sockets = deco().sockets()
+        assertEquals(listOf("sw:3", "sw:5"), sockets.map { it.id })
+        assertEquals(listOf("Port 3", "Port 5"), sockets.map { it.label })
+        assertTrue(sockets.all { it.inLan })
+        assertTrue(sockets.single { it.id == "sw:3" }.up)
+        assertFalse(sockets.single { it.id == "sw:5" }.up)
+    }
+
+    /** No wired uplink yet, so the Wi-Fi client is the only one that owns a socket — none. */
+    @Test
+    fun `a wifi client owns no socket`() {
+        assertEquals(emptySet<String>(), deco().usedSockets())
+    }
+
+    /**
+     * The whole move in one batch, in the order uci needs: the VLAN that carries the socket
+     * to the CPU, the interface section, then its options — with the socket taken out of the
+     * LAN's VLAN, and no firewall change because the stock zone already lists `wan`.
+     */
+    @Test
+    fun `adding a wired uplink on a lan socket carves a vlan and creates wan on it`() {
+        val s = deco()
+        s.addWiredUplink(socket(s, "sw:5"))
+        assertEquals(
+            listOf(
+                "set network.swvlan2=switch_vlan",
+                "set network.swvlan2.device='switch0'",
+                "set network.swvlan2.vlan='2'",
+                "set network.swvlan2.ports='0t 5'",
+                "set network.wan=interface",
+                "set network.@switch_vlan[0].ports='0t 3'",
+                "set network.wan.device='eth0.2'",
+                "set network.wan.metric='40'",
+                "set network.wan.proto='dhcp'",
+            ),
+            s.ops(),
+        )
+        assertEquals(listOf("network"), s.packages())
+        assertTrue(s.touchesSwitch())
+        assertTrue(s.reloadCommand().startsWith("/etc/init.d/network reload"))
+        assertEquals(emptyList<String>(), s.problems())
+    }
+
+    @Test
+    fun `the drafted uplink is selected and shows on the hub before the apply`() {
+        val s = deco()
+        s.addWiredUplink(socket(s, "sw:5"))
+        assertEquals("wan", s.selected)
+        val row = s.wanRows().single { it.section == "wan" }
+        assertEquals("dhcp", row.proto)
+        assertEquals("eth0.2", row.device)
+        assertEquals(40, row.metric)
+        assertFalse(row.up)
+        // The port page reads the socket back through the VLAN, not the netdev name.
+        assertEquals("sw:5", s.port)
+        assertEquals("", s.vlanId)
+        assertTrue(s.portLabel.startsWith("Port 5"))
+        assertEquals(setOf("sw:5"), s.usedSockets())
+    }
+
+    @Test
+    fun `reverting a drafted uplink leaves nothing selected that does not exist`() {
+        val s = deco()
+        s.addWiredUplink(socket(s, "sw:5"))
+        s.revert()
+        assertEquals(0, s.pendingCount)
+        assertEquals("wwan", s.selected)
+    }
+
+    /** A zone that does not list the new interface gets it, and the firewall is committed too. */
+    @Test
+    fun `an uplink the wan zone does not list joins it`() {
+        val fw = DECO_FIREWALL_UCI.replace("'wan' 'wan6' 'wwan'", "'wwan'")
+        val s = deco(firewall = fw)
+        s.addWiredUplink(socket(s, "sw:5"))
+        val ops = s.ops()
+        assertTrue(ops.contains("delete firewall.@zone[1].network"))
+        assertTrue(ops.contains("add_list firewall.@zone[1].network='wwan'"))
+        assertTrue(ops.contains("add_list firewall.@zone[1].network='wan'"))
+        assertEquals(listOf("network", "firewall"), s.packages())
+        assertTrue(s.reloadCommand().contains("/etc/init.d/firewall reload"))
+        assertTrue(s.commitLine().contains("uci commit firewall"))
+        assertTrue(s.commitLine().contains("/etc/init.d/firewall reload"))
+    }
+
+    /** A VLAN left behind by a deleted WAN — `ports '5 0t'` — is reused rather than duplicated. */
+    @Test
+    fun `a vlan already dedicated to the socket is reused`() {
+        val network = DECO_NETWORK_UCI.replace("network.@switch_vlan[0].ports='3 5 0t'", "network.@switch_vlan[0].ports='3 0t'") + """
+            
+            network.@switch_vlan[1]=switch_vlan
+            network.@switch_vlan[1].device='switch0'
+            network.@switch_vlan[1].vlan='2'
+            network.@switch_vlan[1].ports='5 0t'
+        """.trimIndent()
+        val s = deco(network = network)
+        val five = socket(s, "sw:5")
+        assertFalse(five.inLan)
+        s.addWiredUplink(five)
+        assertTrue(s.switchVlanDrafts.isEmpty())
+        assertTrue(s.ops().contains("set network.wan.device='eth0.2'"))
+        assertFalse(s.ops().any { it.contains("@switch_vlan[0]") })
+        assertTrue(s.wiredUplinkPreview(five, "dhcp").any { it.contains("VLAN 2 on switch0 is reused") })
+    }
+
+    @Test
+    fun `a second wired uplink gets the next name and the next vlan`() {
+        val s = deco()
+        s.addWiredUplink(socket(s, "sw:5"))
+        assertEquals("wan_2", s.nextUplinkName())
+        assertTrue(s.wiredUplinkPreview(socket(s, "sw:3"), "pppoe").any { it.contains("VLAN 3 is created") })
+    }
+
+    @Test
+    fun `a chip that hides its cpu port is refused with the reason`() {
+        val s = deco(swconfig = SWCONFIG_NO_CPU)
+        s.addWiredUplink(socket(s, "sw:5"))
+        assertTrue(s.problems().any { it.contains("did not report which port is the CPU") })
+    }
+
+    @Test
+    fun `taking the lan's last socket says so`() {
+        val network = DECO_NETWORK_UCI.replace("network.@switch_vlan[0].ports='3 5 0t'", "network.@switch_vlan[0].ports='5 0t'")
+        val s = deco(network = network)
+        val five = socket(s, "sw:5")
+        assertTrue(s.wiredUplinkPreview(five, "dhcp").any { it.contains("keeps no ethernet socket") })
+        s.addWiredUplink(five)
+        assertTrue(s.notes().any { it.contains("last ethernet socket") })
+        assertTrue(s.notes().any { it.contains("Every ethernet client drops") })
+    }
+
+    @Test
+    fun `an uplink inside the lan's own subnet is flagged on the hub`() {
+        assertEquals(emptyList<String>(), deco().subnetClashes())
+        val clashing = deco(dump = decoDump(wwanAddress = "192.168.0.50")).subnetClashes()
+        assertEquals(1, clashing.size)
+        assertTrue(clashing.single().contains("wwan got 192.168.0.50"))
+    }
+
+    /** The ISP tag on swconfig is the socket tagged in a VLAN whose id is the ISP's, not a second tag on eth0.N. */
+    @Test
+    fun `an isp tag on swconfig tags the socket in a vlan of that id`() {
+        val s = deco()
+        s.addWiredUplink(socket(s, "sw:5"))
+        s.stageVlan("100")
+        assertEquals("100", s.vlanId)
+        assertEquals("sw:5", s.port)
+        assertTrue(s.deviceDrafts.isEmpty())
+        val draft = s.switchVlanDrafts.values.single()
+        assertEquals(100, draft.vlan)
+        assertEquals("0t 5t", com.vivekkaushik.wrtpulse.ops.Parsers.swPortsValue(draft.ports))
+        assertTrue(s.ops().contains("set network.wan.device='eth0.100'"))
+        // Re-picking did not pile a second removal onto the LAN VLAN.
+        assertEquals(1, s.ops().count { it.startsWith("set network.@switch_vlan[0].ports=") })
+    }
+
+    /** The LAN's own VLAN is never the WAN's. */
+    @Test
+    fun `the lan's vlan id is refused as an isp tag`() {
+        val s = deco()
+        s.addWiredUplink(socket(s, "sw:5"))
+        s.stageVlan("1")
+        assertTrue(s.problems().any { it.contains("VLAN 1 is the LAN's own") })
+    }
+
+    // ---- DSA: the socket is a netdev in the bridge ----
+
+    private val dsaNetwork = WAN_NETWORK_UCI + """
+        
+        network.br_lan=device
+        network.br_lan.name='br-lan'
+        network.br_lan.type='bridge'
+        network.br_lan.ports='lan1' 'lan2' 'lan3' 'lan4'
+    """.trimIndent()
+
+    private fun dsa(): WanStore = WanStore(RouterSession(SshTarget("192.168.1.1"), unusedClient, { error("unused") })).apply {
+        ingest(
+            mapOf(
+                "net" to dsaNetwork,
+                "fw" to WAN_FIREWALL_UCI,
+                "dhcp" to DHCP_V6_UCI,
+                "dump" to WAN_DUMP,
+                "links" to NETDEV_LINES,
+                "protos" to PROTO_LS,
+            )
+        )
+    }
+
+    @Test
+    fun `dsa sockets are the named ports and the bridge says which are the lan's`() {
+        val sockets = dsa().sockets()
+        assertEquals(listOf("wan", "lan1", "lan2", "lan3", "lan4"), sockets.map { it.id })
+        assertFalse(sockets.single { it.id == "wan" }.inLan)
+        assertTrue(sockets.filter { it.id.startsWith("lan") }.all { it.inLan })
+        assertFalse(dsa().swconfig)
+    }
+
+    /** Moving the WAN onto a LAN port takes the port out of the bridge in the same batch. */
+    @Test
+    fun `picking a bridged port for the wan removes it from the bridge`() {
+        val s = dsa()
+        s.stagePort("lan4")
+        val ops = s.ops()
+        assertTrue(ops.contains("set network.wan.device='lan4.201'"))
+        assertTrue(ops.contains("delete network.br_lan.ports"))
+        assertTrue(ops.contains("add_list network.br_lan.ports='lan3'"))
+        assertFalse(ops.contains("add_list network.br_lan.ports='lan4'"))
+        assertTrue(s.touchesSwitch())
+        assertTrue(s.touchesDevice())
+        // Picking another socket afterwards puts lan4 back: only lan3 is removed now.
+        s.stagePort("lan3")
+        assertTrue(s.ops().contains("add_list network.br_lan.ports='lan4'"))
+        assertFalse(s.ops().contains("add_list network.br_lan.ports='lan3'"))
+    }
+
+    @Test
+    fun `a dsa uplink on a free socket touches no bridge`() {
+        val s = dsa()
+        s.addWiredUplink(s.sockets().single { it.id == "wan" })
+        assertEquals("wan_2", s.selected)
+        assertEquals(
+            listOf(
+                "set network.wan_2=interface",
+                "set network.wan_2.device='wan'",
+                "set network.wan_2.metric='30'",
+                "set network.wan_2.proto='dhcp'",
+                "delete firewall.@zone[1].network",
+                "add_list firewall.@zone[1].network='wan'",
+                "add_list firewall.@zone[1].network='wan6'",
+                "add_list firewall.@zone[1].network='wwan'",
+                "add_list firewall.@zone[1].network='wan_2'",
+            ),
+            s.ops(),
+        )
+        assertFalse(s.touchesSwitch())
+    }
+}
+
+class WiredUplinkRefreshTest {
+    private val unusedClient = object : SshClient {
+        override suspend fun probeHostKey(target: SshTarget) = error("unused")
+        override suspend fun connect(target: SshTarget, auth: SshAuth, connectTimeoutMs: Long): SshConnection =
+            error("unused")
+    }
+
+    /** The hub refreshes every few seconds; a re-read must not jump off the uplink being drafted. */
+    @Test
+    fun `a live refresh keeps the drafted uplink selected`() {
+        val parts = mapOf(
+            "net" to DECO_NETWORK_UCI, "fw" to DECO_FIREWALL_UCI, "dhcp" to DHCP_V6_UCI,
+            "dump" to decoDump(), "links" to DECO_NETDEVS, "protos" to PROTO_LS, "swconfig" to SWCONFIG_OUT,
+        )
+        val s = WanStore(RouterSession(SshTarget("192.168.0.1"), unusedClient, { error("unused") }))
+        s.ingest(parts)
+        s.addWiredUplink(s.sockets().single { it.id == "sw:5" })
+        s.ingest(parts)
+        assertEquals("wan", s.selected)
+        assertTrue(s.wanRows().any { it.section == "wan" })
     }
 }
