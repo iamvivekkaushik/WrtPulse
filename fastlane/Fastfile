@@ -5,7 +5,7 @@
 #   bundle exec fastlane android check     # unit tests + lint (what CI gates on)
 #   bundle exec fastlane android debug     # debug APK
 #   bundle exec fastlane android release   # signed AAB + APK — needs the signing env below
-#   bundle exec fastlane android beta      # release, then Play internal track
+#   bundle exec fastlane android production  # release, then Play production track
 
 default_platform(:android)
 
@@ -61,11 +61,13 @@ platform :android do
     UI.success("APK: #{apk}")
   end
 
-  desc "Release, then upload the AAB to the Play internal track"
-  lane :beta do
+  desc "Release, then upload the AAB straight to the Play production track"
+  lane :production do
     release
     upload_to_play_store(
-      track: "internal",
+      # Production, no internal-testing stop: a tag is the release, and the review that gates
+      # it is the diff on the pull request, not a second track.
+      track: "production",
       aab: lane_context[SharedValues::GRADLE_AAB_OUTPUT_PATH],
       json_key: ENV["PLAY_JSON_KEY_FILE"],
       # `release` builds the APK too — the GitHub Release carries it — which leaves its path in

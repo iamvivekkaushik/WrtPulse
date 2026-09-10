@@ -27,10 +27,24 @@ android {
         applicationId = "com.vivekkaushik.wrtpulse"
         minSdk = 28
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // The About screen lists the libraries the app ships with. Their versions are read
+        // from gradle/libs.versions.toml here rather than typed into Kotlin, so a bump in the
+        // catalog is a bump on the screen and the two cannot disagree.
+        buildConfigField("String", "LIB_KOTLIN", "\"${libs.versions.kotlin.get()}\"")
+        buildConfigField("String", "LIB_COROUTINES", "\"${libs.versions.coroutines.get()}\"")
+        buildConfigField("String", "LIB_COMPOSE_BOM", "\"${libs.versions.composeBom.get()}\"")
+        buildConfigField("String", "LIB_ACTIVITY_COMPOSE", "\"${libs.versions.activityCompose.get()}\"")
+        buildConfigField("String", "LIB_CORE_KTX", "\"${libs.versions.coreKtx.get()}\"")
+        buildConfigField("String", "LIB_LIFECYCLE", "\"${libs.versions.lifecycleRuntimeKtx.get()}\"")
+        buildConfigField("String", "LIB_ROOM", "\"${libs.versions.room.get()}\"")
+        buildConfigField("String", "LIB_BIOMETRIC", "\"${libs.versions.biometric.get()}\"")
+        buildConfigField("String", "LIB_JSCH", "\"${libs.versions.jsch.get()}\"")
+        buildConfigField("String", "LIB_BOUNCYCASTLE", "\"${libs.versions.bouncycastle.get()}\"")
     }
 
     signingConfigs {
@@ -64,6 +78,8 @@ android {
     }
     buildFeatures {
         compose = true
+        // Off by default under AGP 9; on for VERSION_NAME and the LIB_* fields above.
+        buildConfig = true
     }
 }
 

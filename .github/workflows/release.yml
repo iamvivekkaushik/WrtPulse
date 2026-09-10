@@ -167,7 +167,7 @@ jobs:
         if: env.PLAY_JSON_KEY_BASE64 != '' && startsWith(github.ref, 'refs/tags/v')
         run: echo "$PLAY_JSON_KEY_BASE64" | base64 -d > "$RUNNER_TEMP/play.json"
 
-      - name: Play internal track
+      - name: Play production track
         if: env.PLAY_JSON_KEY_BASE64 != '' && startsWith(github.ref, 'refs/tags/v')
         env:
           PLAY_JSON_KEY_FILE: ${{ runner.temp }}/play.json
@@ -177,7 +177,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           VERSION_NAME: ${{ steps.version.outputs.name }}
           VERSION_CODE: ${{ steps.version.outputs.code }}
-        run: bundle exec fastlane android beta
+        run: bundle exec fastlane android production
 
       - name: GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')

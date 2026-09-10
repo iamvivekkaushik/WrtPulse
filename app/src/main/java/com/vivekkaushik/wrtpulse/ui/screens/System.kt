@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import com.vivekkaushik.wrtpulse.BuildConfig
 import com.vivekkaushik.wrtpulse.data.BackupStore
 import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.PackageStore
@@ -37,9 +38,7 @@ import com.vivekkaushik.wrtpulse.data.Telemetry
 import com.vivekkaushik.wrtpulse.ops.BoardInfo
 import com.vivekkaushik.wrtpulse.ops.Regulatory
 import com.vivekkaushik.wrtpulse.ui.ConnectionTopBar
-import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.SectionLabel
-import com.vivekkaushik.wrtpulse.ui.StatusDot
 import com.vivekkaushik.wrtpulse.ui.WToggle
 import com.vivekkaushik.wrtpulse.ui.WrtIcons
 import com.vivekkaushik.wrtpulse.ui.mono
@@ -68,6 +67,7 @@ fun SystemScreen(
     onOpenCountry: () -> Unit = {},
     onOpenSshKeys: () -> Unit = {},
     onOpenBackup: () -> Unit = {},
+    onOpenAbout: () -> Unit = {},
 ) {
     var biometricDemo by remember { mutableStateOf(true) }
     val isLive = live != null
@@ -212,8 +212,15 @@ fun SystemScreen(
                         false -> "none — using password"
                         null -> "1 installed"
                     },
-                    last = true,
                     onClick = if (isLive) onOpenSshKeys else null,
+                )
+                // The app's own version and what it is built from. Needs no router, so it is
+                // never gated on isLive.
+                ValueRow(
+                    "About WrtPulse", "Version, links, open-source libraries",
+                    "v${BuildConfig.VERSION_NAME}",
+                    last = true,
+                    onClick = onOpenAbout,
                 )
             }
             SectionLabel("DANGER ZONE", color = Wrt.Red, tracking = 0.14)

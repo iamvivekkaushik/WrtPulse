@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -124,6 +125,8 @@ fun RouterListScreen(
     onDelete: (RouterEntity) -> Unit = {},
     /** Name and address together: both live on the same card and both are local-only edits. */
     onEdit: (RouterEntity, String, String, Int) -> Unit = { _, _, _, _ -> },
+    /** The About screen: version and libraries. Reachable here so it needs no router. */
+    onAbout: () -> Unit = {},
 ) {
     var confirmDelete by remember { mutableStateOf<RouterEntity?>(null) }
     var renaming by remember { mutableStateOf<RouterEntity?>(null) }
@@ -161,6 +164,12 @@ fun RouterListScreen(
                     Icon(
                         WrtIcons.Search, "search",
                         Modifier.size(19.dp).clickable { searching = true },
+                        tint = Wrt.TextTertiary,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Icon(
+                        WrtIcons.Info, "about WrtPulse",
+                        Modifier.size(19.dp).clickable(onClick = onAbout),
                         tint = Wrt.TextTertiary,
                     )
                 }

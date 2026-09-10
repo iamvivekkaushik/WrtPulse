@@ -230,6 +230,7 @@ object WrtIcons {
         "M4.9 4.9l2.1 2.1", "M17 17l2.1 2.1", "M19.1 4.9L17 7", "M7 17l-2.1 2.1",
     )
     val ArrowRight = stroked("arrowRight", 2f, "M5 12h14", "M13 6l6 6-6 6")
+    val Info = stroked("info", 1.7f, "M12 3.5 A8.5 8.5 0 1 1 11.99 3.5 Z", "M12 11v5.5", "M12 7.8v.2")
 
     // Logs
     val LiveLogs = stroked(

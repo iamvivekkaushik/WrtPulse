@@ -68,6 +68,7 @@ import com.vivekkaushik.wrtpulse.ui.screens.DiffSheetContent
 import com.vivekkaushik.wrtpulse.ui.screens.FactoryResetScreen
 import com.vivekkaushik.wrtpulse.ui.screens.FirmwareScreen
 import com.vivekkaushik.wrtpulse.ui.screens.HostKeyScreen
+import com.vivekkaushik.wrtpulse.ui.screens.AboutScreen
 import com.vivekkaushik.wrtpulse.ui.screens.LogsScreen
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingConnectScreen
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingFingerprintScreen
@@ -236,6 +237,10 @@ private fun WrtPulseApp() {
     var countryOpen by remember { mutableStateOf(false) }
     var sshKeysOpen by remember { mutableStateOf(false) }
     var backupOpen by remember { mutableStateOf(false) }
+    var aboutOpen by remember { mutableStateOf(false) }
+    // About opened from the router list, before any connection. Kept apart from aboutOpen so
+    // closing one never touches what the System tab is showing.
+    var aboutFromList by remember { mutableStateOf(false) }
     var pendingChanges by remember { mutableIntStateOf(3) }
     val termLines = remember { mutableStateListOf<TermLine>().apply { addAll(initialTerminalLines()) } }
     var termPending by remember { mutableStateOf("") }
@@ -322,7 +327,10 @@ private fun WrtPulseApp() {
                     onFinish = { currentRouter = flow.routerName; tab = MainTab.Dashboard; dest = Dest.Main },
                 )
                 Dest.Boot -> Box(Modifier.fillMaxSize().background(Wrt.BgScreen))
-                Dest.RouterList -> RouterListScreen(
+                Dest.RouterList -> if (aboutFromList) {
+                    AboutScreen(onBack = { aboutFromList = false })
+                } else RouterListScreen(
+                    onAbout = { aboutFromList = true },
                     saved = savedRouters,
                     connectedHost = if (WrtRuntime.session?.isConnected == true) WrtRuntime.session?.target?.host else null,
                     connectingHost = if (flow.busy) connectingHost else null,
@@ -475,7 +483,9 @@ private fun WrtPulseApp() {
                                         },
                                     )
                                 }
-                                MainTab.System -> if (sshKeysOpen) {
+                                MainTab.System -> if (aboutOpen) {
+                                    AboutScreen(onBack = { aboutOpen = false })
+                                } else if (sshKeysOpen) {
                                     SshKeysScreen(
                                         store = sshKeyStore,
                                         latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
@@ -557,6 +567,7 @@ private fun WrtPulseApp() {
                                         onOpenCountry = { countryOpen = true },
                                         onOpenSshKeys = { sshKeysOpen = true },
                                         onOpenBackup = { backupOpen = true },
+                                        onOpenAbout = { aboutOpen = true },
                                     )
                                 }
                             }
@@ -567,6 +578,7 @@ private fun WrtPulseApp() {
                                     logsOpen = false; packagesOpen = false
                                     servicesOpen = false; firmwareOpen = false; resetOpen = false
                                     countryOpen = false; sshKeysOpen = false; backupOpen = false
+                                    aboutOpen = false
                                 }
                                 tab = picked
                             }
@@ -646,10 +658,11 @@ private fun WrtPulseApp() {
     // to return to. Everywhere else it steps one level up.
     BackHandler(
         enabled = dest != Dest.Boot &&
-            !(dest == Dest.RouterList && !canReturnToMain) &&
+            !(dest == Dest.RouterList && !canReturnToMain && !aboutFromList) &&
             !(dest == Dest.Onboarding1 && !hasSavedRouters && !canReturnToMain),
     ) {
         when {
+            dest == Dest.RouterList && aboutFromList -> aboutFromList = false
             dest == Dest.RouterList -> dest = Dest.Main
             dest == Dest.Onboarding1 -> dest = if (canReturnToMain) Dest.Main else Dest.RouterList
             dest == Dest.Onboarding2 -> dest = Dest.Onboarding1
@@ -660,6 +673,7 @@ private fun WrtPulseApp() {
             dest == Dest.Main && showDiff -> showDiff = false
             dest == Dest.Main && showSwitcher -> showSwitcher = false
             dest == Dest.Main && snippetsOpen -> snippetsOpen = false
+            dest == Dest.Main && tab == MainTab.System && aboutOpen -> aboutOpen = false
             dest == Dest.Main && tab == MainTab.System && sshKeysOpen -> sshKeysOpen = false
             dest == Dest.Main && tab == MainTab.System && backupOpen -> backupOpen = false
             dest == Dest.Main && tab == MainTab.System && countryOpen -> countryOpen = false

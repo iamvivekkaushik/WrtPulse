@@ -209,7 +209,7 @@ request. `.github/workflows/release.yml` fires on a `v*` tag: it restores the ke
 `KEYSTORE_BASE64` (`base64 -i release.jks`), stamps `versionName` from the tag and
 `versionCode` from the run number, builds the signed AAB and APK, and attaches both to a GitHub
 Release. If a `PLAY_JSON_KEY_BASE64` secret (the Play Console service-account JSON, base64) is present it also
-uploads the AAB to the internal track; without it that step is skipped, so the pipeline is
+uploads the AAB straight to the production track (no internal-testing stop); without it that step is skipped, so the pipeline is
 useful before Play is set up. Secrets to add under Settings › Secrets and variables › Actions:
 `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`,
 `KEY_PASSWORD`, and optionally `PLAY_JSON_KEY_BASE64`.

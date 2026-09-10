@@ -1,5 +1,7 @@
-• Failover order is now set by dragging. Hold an uplink under Network › WAN and drag it — the metrics restamp to 10, 20, 30, so two uplinks can no longer share a number.
+• Wired WAN: turn a switch port into the internet uplink from Network › WAN › Add wired uplink, with a timed rollback if the router goes quiet.
 
-• The interface now scales to your screen width, so it no longer reads small on a wide phone. Text and the controls around it grow together with the system font size.
+• Static routes: Network › Static routes adds, edits and deletes config routes and shows the live kernel table beside them.
 
-• Router setup no longer comes apart when the keyboard opens: the field you are typing in stays visible, and Connect stays below it.
+• Speedtest moves 20 MB each way for a steadier number. PPPoE is offered again where the ppp plugin is installed.
+
+• About screen (System, or ⓘ on the router list): version and open-source libraries.
