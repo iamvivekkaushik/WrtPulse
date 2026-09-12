@@ -23,7 +23,10 @@ object Commands {
         // Every interface, so the upstream can be found by which one holds the default
         // route rather than by assuming it is called "wan".
         "echo $SECTION ifaces" to "ubus call network.interface dump 2>/dev/null || echo '{}'",
-        "echo $SECTION essid" to "iwinfo 2>/dev/null | grep ESSID || true",
+        // iw is the cheap one: on a MIPS 74Kc bare `iwinfo` was 0.30 s of a 0.35 s tick and
+        // `iw dev` 0.20 s. iwinfo stays as the fallback for a build without iw.
+        "echo $SECTION essid" to
+            "iw dev 2>/dev/null | grep -E 'Interface|ssid' || iwinfo 2>/dev/null | grep ESSID || true",
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
     /** Wireless config as UCI key=value lines. */
@@ -37,6 +40,21 @@ object Commands {
 
     /** Every wireless interface that is actually up: mode, channel, and a station's signal. */
     const val IWINFO = "iwinfo 2>/dev/null"
+
+    /**
+     * The channel widths each phy can actually run, from the capability lines of `iw phy`.
+     * Read per phy rather than per interface so a radio whose AP is off is still known: the
+     * width picker once offered 160 MHz to a QCA9886 that cannot do it, hostapd refused to
+     * start, and the network vanished from every client.
+     */
+    const val PHY_CAPS =
+        "for p in /sys/class/ieee80211/*; do n=\${p##*/}; echo \"# \$n\"; " +
+        "iw phy \$n info 2>/dev/null | grep -E 'HT20/HT40|Supported Channel Width|VHT Capabilities|HE PHY Capabilities|HE[0-9]+/|EHT PHY|Beamformer'; done"
+
+    /** Every dBm value each running interface's driver will accept — the TX power picker. */
+    const val TXPOWER_LISTS =
+        "for i in \$(iwinfo 2>/dev/null | grep ESSID | cut -d' ' -f1); do " +
+        "echo \"# \$i\"; iwinfo \$i txpowerlist 2>/dev/null; done"
 
     /** Associated stations per interface, so each SSID can report how many clients it has. */
     const val ASSOC_COUNTS =
@@ -110,8 +128,49 @@ object Commands {
         "[ -n \"\$s\" ] && uci delete dhcp.\$s && uci commit dhcp && " +
         "/etc/init.d/dnsmasq restart >/dev/null 2>&1; :"
 
+    /**
+     * Which phy each radio section really is. radio0 is phy0 on nearly every router, but that
+     * is a convention of the config generator, not a rule: the driver is asked.
+     */
+    const val PHY_NAMES =
+        "for r in \$(uci -q show wireless | sed -n 's/^wireless\\.\\([^.=]*\\)=wifi-device\$/\\1/p'); do " +
+        "echo \"\$r \$(iwinfo nl80211 phyname \$r 2>/dev/null)\"; done"
+
     /** Neighbour survey for the channel chart, through an interface already on the radio. */
     fun scan(radioIface: String) = "iwinfo $radioIface scan"
+
+    /** Where a detached survey leaves its result — one per radio so two never collide. */
+    fun surveyFile(radio: String) = "/tmp/wrtpulse-survey-$radio"
+
+    /**
+     * The survey that works on a driver that will not leave its channel while the AP is up:
+     * take the radio down, scan through a temporary station interface, bring it back.
+     *
+     * Detached with setsid on purpose. If the phone running the app is on this very band,
+     * the SSH session dies the moment the radio goes down; a job tied to that session would
+     * be killed before `wifi up` and leave the band off. The job writes to a scratch file and
+     * renames it into place when done, so [readSurvey] sees nothing until the whole thing —
+     * radio back up included — has run.
+     */
+    fun surveyWithRadioDown(radio: String, phy: String): String {
+        val temp = "wrtpulse-scan"
+        val out = surveyFile(radio)
+        val job = "wifi down $radio; sleep 2; " +
+            "iw dev $temp del >/dev/null 2>&1; " +
+            "iw phy $phy interface add $temp type managed >/dev/null 2>&1; " +
+            "ip link set $temp up >/dev/null 2>&1; " +
+            "iwinfo $temp scan > $out.part 2>&1; " +
+            "iw dev $temp del >/dev/null 2>&1; " +
+            "wifi up $radio; " +
+            "echo \"$SECTION done\" >> $out.part; mv $out.part $out"
+        return "rm -f $out $out.part; setsid sh -c '$job' >/dev/null 2>&1 </dev/null & echo started"
+    }
+
+    /** The detached survey's result; empty until the job has finished and the radio is back. */
+    fun readSurvey(radio: String) = "cat ${surveyFile(radio)} 2>/dev/null"
+
+    /** Tidies up after a detached survey has been collected. */
+    fun forgetSurvey(radio: String) = "rm -f ${surveyFile(radio)}"
 
     /**
      * Survey a radio that has no interface of its own — a band with no SSID configured has
@@ -195,34 +254,82 @@ object Commands {
      */
     const val REBOOT = "(sleep 1; reboot) >/dev/null 2>&1 & echo scheduled"
 
-    /** Public, unauthenticated fixed-size download; the app times the round trip itself. */
+    /**
+     * Public, unauthenticated fixed-size download; the app times the round trip itself.
+     *
+     * Both legs go over plain http on purpose. The payload is throwaway bytes to /dev/null,
+     * nothing to protect, and TLS was the ceiling: on a 775 MHz MIPS core with no crypto
+     * instructions curl decrypted at ~65 Mbps with the CPU pegged, while the same download
+     * over http measured 232 Mbps on the same box. Cloudflare's endpoint answers both.
+     */
     const val SPEEDTEST_HOST = "speed.cloudflare.com"
 
     /**
-     * What curl prints after a transfer: the bytes moved, the whole wall time, and how much of
-     * it went on DNS, TCP and the TLS handshake. The app measures from the third number to
-     * the second, so a 2-second handshake on a slow MIPS core does not read as a slow line.
+     * Each leg is one transfer of up to 100 MB, cut off after [SPEEDTEST_SECONDS] — whichever
+     * comes first. A 20 MB transfer was over in under a second on a fast line, a one-second
+     * sample of a bursty link; 100 MB is several seconds there and the clock bounds it on a
+     * slow one. curl reports how much moved either way.
      */
-    private const val CURL_TIMING = "-w '%{size_download} %{size_upload} %{time_total} %{time_pretransfer}'"
+    const val SPEEDTEST_SECONDS = 10
+
+    /** Cloudflare answers 403 to a single object of 100 MB or more; this is the most it gives. */
+    const val SPEEDTEST_DOWN_BYTES = 99_999_999L
+    const val SPEEDTEST_UP_BYTES = 100_000_000L
 
     /**
-     * Pulls [bytes] from the speed-test endpoint on the router and discards it.
-     *
-     * With curl the last line carries its own timing (see [CURL_TIMING]); without it the byte
-     * count is echoed so a silent failure can't be mistaken for an instant download, and the
-     * app falls back to timing the round trip itself.
+     * Without curl there is no clock and no partial count, so the fallback moves a fixed,
+     * smaller amount and the app wall-times it.
      */
-    fun speedtestDownload(bytes: Long): String =
-        "URL='https://$SPEEDTEST_HOST/__down?bytes=$bytes'; " +
-        "if command -v curl >/dev/null 2>&1; then curl -s -o /dev/null $CURL_TIMING \"\$URL\"; else " +
-        "{ uclient-fetch -q -O /dev/null \"\$URL\" || wget -q -O /dev/null \"\$URL\"; } && echo $bytes; fi"
+    const val SPEEDTEST_FALLBACK_BYTES = 20_000_000L
 
-    /** Scratch payload for the upload leg; /tmp is RAM, so it is cleaned up straight after. */
+    /** curl's exit status for hitting `--max-time`; for a speed test that is the normal end. */
+    private const val CURL_TIMED_OUT = "[ \$rc -eq 28 ] && rc=0"
+
+    /**
+     * The CPU line of /proc/stat, printed before and after a transfer so the app can tell how
+     * busy the router was while it ran. A single small core doing the download itself sits at
+     * 1% idle; what it reports is its own ceiling, not the line's, and the dialog says so.
+     */
+    private const val CPU_SAMPLE = "grep '^cpu ' /proc/stat"
+
+    /**
+     * What curl prints after a transfer: the bytes moved, the whole wall time, and how much of
+     * it went on DNS and connection setup. The app measures from the third number to the
+     * second, so a slow lookup on a small router does not read as a slow line. The trailing
+     * newline keeps the CPU sample that follows off the same line.
+     */
+    private const val CURL_TIMING = "-w '%{size_download} %{size_upload} %{time_total} %{time_pretransfer}\\n'"
+
+    /**
+     * Pulls up to [bytes] from the speed-test endpoint on the router and discards it, giving
+     * up after [seconds].
+     *
+     * With curl the last line carries its own timing (see [CURL_TIMING]) and the bytes that
+     * arrived before the clock ran out; without it a fixed [SPEEDTEST_FALLBACK_BYTES] is
+     * fetched and its count echoed, so a silent failure can't be mistaken for an instant
+     * download, and the app falls back to timing the round trip itself.
+     */
+    fun speedtestDownload(bytes: Long = SPEEDTEST_DOWN_BYTES, seconds: Int = SPEEDTEST_SECONDS): String =
+        "$CPU_SAMPLE; if command -v curl >/dev/null 2>&1; then " +
+        "curl -s -o /dev/null --max-time $seconds $CURL_TIMING 'http://$SPEEDTEST_HOST/__down?bytes=$bytes'; " +
+        "rc=\$?; $CURL_TIMED_OUT; else " +
+        "URL='http://$SPEEDTEST_HOST/__down?bytes=$SPEEDTEST_FALLBACK_BYTES'; " +
+        "{ uclient-fetch -q -O /dev/null \"\$URL\" || wget -q -O /dev/null \"\$URL\"; } && echo $SPEEDTEST_FALLBACK_BYTES; " +
+        "rc=\$?; fi; $CPU_SAMPLE; exit \$rc"
+
+    /** Scratch payload for the upload leg, in /tmp so it is cleaned up straight after. */
     const val SPEEDTEST_UPLOAD_FILE = "/tmp/wrtpulse-speedtest.bin"
 
-    /** Built before the timed leg so writing the file isn't counted as upload time. */
-    fun speedtestPrepareUpload(bytes: Long): String =
-        "dd if=/dev/zero of=$SPEEDTEST_UPLOAD_FILE bs=1024 count=${bytes / 1024} 2>/dev/null && echo ready"
+    /**
+     * Built before the timed leg so making the file isn't counted as upload time.
+     *
+     * Sparse, not written: /tmp is RAM and a 128 MB router has ~40 MB of it free, so a real
+     * 100 MB file cannot exist there. A hole in tmpfs reads as zeros without a page being
+     * allocated, and curl still sees a regular file with a length — which is what keeps the
+     * upload fast; streaming from stdin cost this core half its throughput.
+     */
+    fun speedtestPrepareUpload(bytes: Long = SPEEDTEST_UP_BYTES): String =
+        "dd if=/dev/zero of=$SPEEDTEST_UPLOAD_FILE bs=1 count=0 seek=$bytes 2>/dev/null && echo ready"
 
     /**
      * curl first: OpenWrt's uclient-fetch accepts --post-file but stalls partway through a
@@ -232,11 +339,13 @@ object Commands {
      * first, and on a 128 MB router with the same 20 MB already sitting in tmpfs that got curl
      * killed by the OOM reaper — which the app then reported as "curl missing".
      */
-    fun speedtestUpload(bytes: Long): String =
-        "URL='https://$SPEEDTEST_HOST/__up'; " +
+    fun speedtestUpload(bytes: Long = SPEEDTEST_UP_BYTES, seconds: Int = SPEEDTEST_SECONDS): String =
+        "URL='http://$SPEEDTEST_HOST/__up'; $CPU_SAMPLE; " +
         "if command -v curl >/dev/null 2>&1; then " +
-        "curl -s -o /dev/null $CURL_TIMING -T $SPEEDTEST_UPLOAD_FILE -X POST \"\$URL\"; else " +
-        "uclient-fetch -q -O /dev/null --post-file=$SPEEDTEST_UPLOAD_FILE \"\$URL\" && echo $bytes; fi"
+        "curl -s -o /dev/null --max-time $seconds $CURL_TIMING -T $SPEEDTEST_UPLOAD_FILE -X POST \"\$URL\"; " +
+        "rc=\$?; $CURL_TIMED_OUT; else " +
+        "uclient-fetch -q -O /dev/null --post-file=$SPEEDTEST_UPLOAD_FILE \"\$URL\" && echo $bytes; rc=\$?; fi; " +
+        "$CPU_SAMPLE; exit \$rc"
 
     const val SPEEDTEST_CLEANUP = "rm -f $SPEEDTEST_UPLOAD_FILE"
 
@@ -575,6 +684,11 @@ object Commands {
         "echo $SECTION leases" to "cat /tmp/dhcp.leases 2>/dev/null",
         // The router's own listeners — a forward onto one of these locks the app out.
         "echo $SECTION listen" to "netstat -tln 2>/dev/null | awk 'NR>2{print \$4}' || true",
+        // Whether offloading can be offered at all: software needs the flow-table module, and
+        // hardware only exists on silicon that has an offload engine — the target says which.
+        "echo $SECTION offload" to
+            "([ -d /sys/module/nf_flow_table ] || ls /lib/modules/*/nf_flow_table.ko >/dev/null 2>&1) && echo software; " +
+            "ubus call system board 2>/dev/null | jsonfilter -e '@.release.target' 2>/dev/null",
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
     const val FIREWALL_RELOAD = "/etc/init.d/firewall reload"

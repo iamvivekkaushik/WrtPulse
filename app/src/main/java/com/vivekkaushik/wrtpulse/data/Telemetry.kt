@@ -79,6 +79,13 @@ class Telemetry(private val session: RouterSession) {
     /** True until the first tick lands, and again whenever a tick fails. */
     var stale by mutableStateOf(true); private set
 
+    /**
+     * Set while the speed test runs. A tick is ~0.35 s of CPU on a single-core router and
+     * exec is not serialised, so at 1 Hz it took 20–50% off a measurement that is itself
+     * CPU-bound there. Polling picks up where it left off once the flag drops.
+     */
+    @Volatile var paused: Boolean = false
+
     private var prevCpu: CpuSample? = null
 
     /** device → (rx, tx) at the previous tick. A device with no entry cannot be differenced. */
@@ -88,6 +95,7 @@ class Telemetry(private val session: RouterSession) {
     suspend fun run(intervalMs: Long = 1_000L) {
         var ticks = 0
         while (true) {
+            while (paused) delay(PAUSE_POLL_MS)
             val started = System.nanoTime()
             try {
                 val result = session.exec(Commands.DASHBOARD_TICK, timeoutMs = 8_000)
@@ -129,7 +137,7 @@ class Telemetry(private val session: RouterSession) {
             }
         }
         sections["ifaces"]?.let { json ->
-            val essids = Parsers.iwinfoEssids(sections["essid"].orEmpty())
+            val essids = Parsers.essids(sections["essid"].orEmpty())
             // A tick where ubus failed answers '{}'; holding the last known links beats
             // blinking the card empty for a second.
             if (json.contains("\"interface\"")) {
@@ -192,6 +200,9 @@ class Telemetry(private val session: RouterSession) {
 
         /** Latency is measured every Nth tick; the chip does not need it at 1 Hz. */
         const val PING_EVERY_TICKS = 4
+
+        /** How often a paused loop checks whether it may go on. */
+        const val PAUSE_POLL_MS = 250L
 
         /** However slow the router, the dashboard still updates at least this often. */
         const val MAX_GAP_MS = 5_000L

@@ -3,6 +3,7 @@ package com.vivekkaushik.wrtpulse.data
 import com.vivekkaushik.wrtpulse.net.RouterSession
 import com.vivekkaushik.wrtpulse.net.SshException
 import com.vivekkaushik.wrtpulse.ops.Commands
+import com.vivekkaushik.wrtpulse.ops.Parsers
 
 /** Outcome of a WAN speed test. Upload can fail on its own without losing the download. */
 data class SpeedResult(
@@ -14,15 +15,34 @@ data class SpeedResult(
     val upSeconds: Double = 0.0,
     val error: String? = null,
     val uploadError: String? = null,
+    /** How busy the router's CPU was during each leg, 0–100; null when it could not be sampled. */
+    val downCpuPct: Int? = null,
+    val upCpuPct: Int? = null,
 ) {
     val hasUpload: Boolean get() = upBytes > 0 && upMbps > 0f
+
+    /**
+     * The router, not the line, set the number. A core with no idle left during the transfer
+     * could not have moved bytes any faster whatever the link offered.
+     */
+    val cpuLimited: Boolean get() = cpuPct >= CPU_LIMITED_PCT
+
+    /** The busier of the two legs, for the dialog's note. */
+    val cpuPct: Int get() = maxOf(downCpuPct ?: 0, upCpuPct ?: 0)
+
+    companion object {
+        const val CPU_LIMITED_PCT = 90
+    }
 }
+
+/** One leg as the router reported it: bytes moved, seconds it took, how busy the CPU was. */
+data class Transfer(val bytes: Long, val seconds: Double, val cpuPct: Int? = null)
 
 /** Which leg is running, for the dialog's progress line. */
 enum class SpeedPhase { Download, Upload }
 
 /** One-shot router actions from the dashboard's quick-action row. */
-class RouterOps(private val session: RouterSession) {
+class RouterOps(private val session: RouterSession, private val telemetry: Telemetry? = null) {
 
     suspend fun reboot(): String = try {
         session.exec(Commands.REBOOT, timeoutMs = 10_000)
@@ -34,91 +54,95 @@ class RouterOps(private val session: RouterSession) {
     }
 
     /**
-     * Measures WAN throughput by timing a fixed-size download and then an upload of a
-     * scratch file. The SSH round trip and connection setup sit inside each measurement, so
-     * both read slightly low — fine for "is the line healthy", not a lab instrument.
+     * Measures WAN throughput with one download and then one upload run on the router, each
+     * up to 100 MB or [Commands.SPEEDTEST_SECONDS], whichever ends first, dividing what moved
+     * by how long it took. It is the router's number as much as the line's: a single small
+     * core pushing bytes through curl can be the ceiling, so each leg also samples how busy
+     * the CPU was. The dashboard tick is held for the duration — it would otherwise share
+     * that same core.
      */
-    suspend fun speedtest(
-        downBytes: Long = DEFAULT_DOWN_BYTES,
-        upBytes: Long = DEFAULT_UP_BYTES,
-        onPhase: (SpeedPhase) -> Unit = {},
-    ): SpeedResult {
-        onPhase(SpeedPhase.Download)
-        val down = timedTransfer(Commands.speedtestDownload(downBytes))
-            ?: return SpeedResult(error = "Download failed — is the router online?")
+    suspend fun speedtest(onPhase: (SpeedPhase) -> Unit = {}): SpeedResult {
+        telemetry?.paused = true
+        try {
+            onPhase(SpeedPhase.Download)
+            val down = timedTransfer(Commands.speedtestDownload())
+                ?: return SpeedResult(error = "Download failed — is the router online?")
 
-        onPhase(SpeedPhase.Upload)
-        val up = try {
-            session.exec(Commands.speedtestPrepareUpload(upBytes), timeoutMs = 60_000)
-                .takeIf { it.ok }
-                ?.let { timedTransfer(Commands.speedtestUpload(upBytes)) }
-        } catch (e: SshException) {
-            null
+            onPhase(SpeedPhase.Upload)
+            val up = try {
+                session.exec(Commands.speedtestPrepareUpload(), timeoutMs = 60_000)
+                    .takeIf { it.ok }
+                    ?.let { timedTransfer(Commands.speedtestUpload()) }
+            } catch (e: SshException) {
+                null
+            } finally {
+                runCatching { session.exec(Commands.SPEEDTEST_CLEANUP, timeoutMs = 15_000) }
+            }
+
+            return SpeedResult(
+                downMbps = Telemetry.mbps(down.bytes, down.seconds),
+                downBytes = down.bytes,
+                downSeconds = down.seconds,
+                downCpuPct = down.cpuPct,
+                upMbps = up?.let { Telemetry.mbps(it.bytes, it.seconds) } ?: 0f,
+                upBytes = up?.bytes ?: 0,
+                upSeconds = up?.seconds ?: 0.0,
+                upCpuPct = up?.cpuPct,
+                uploadError = if (up == null) {
+                    "Upload needs curl on the router — uclient-fetch stalls on large uploads"
+                } else null,
+            )
         } finally {
-            runCatching { session.exec(Commands.SPEEDTEST_CLEANUP, timeoutMs = 15_000) }
+            telemetry?.paused = false
         }
-
-        return SpeedResult(
-            downMbps = Telemetry.mbps(down.first, down.second),
-            downBytes = down.first,
-            downSeconds = down.second,
-            upMbps = up?.let { Telemetry.mbps(it.first, it.second) } ?: 0f,
-            upBytes = up?.first ?: 0,
-            upSeconds = up?.second ?: 0.0,
-            uploadError = if (up == null) {
-                "Upload needs curl on the router — uclient-fetch stalls on large uploads"
-            } else null,
-        )
     }
 
     /**
-     * Runs one transfer command and returns the bytes it confirmed plus how long it took.
+     * Runs one leg and returns the bytes it confirmed plus how long they took to move.
      *
-     * With curl the router reports its own numbers — bytes down, bytes up, total time, and the
-     * time before the first byte moved — and the transfer time is the difference of the last
-     * two, so DNS, TCP and the TLS handshake are left out. Without curl the only number is the
-     * byte count, and the wall clock around the SSH exec has to do, handshake and all.
+     * With curl the router reports its own numbers — bytes down, bytes up, total time, and
+     * the time before the first byte moved — and the transfer time is the difference of the
+     * last two, so DNS and connection setup are left out; a leg the clock cut short reports
+     * what had arrived by then. Without curl the only number is the byte count of a fixed,
+     * smaller fetch, and the wall clock around the SSH exec has to do, setup and all.
      */
-    private suspend fun timedTransfer(command: String): Pair<Long, Double>? = try {
+    private suspend fun timedTransfer(command: String): Transfer? = try {
         val started = System.nanoTime()
         val result = session.exec(command, timeoutMs = 180_000)
         val wall = (System.nanoTime() - started) / 1e9
         val parsed = parseTransfer(result.stdout, wall)
-        if (!result.ok || parsed == null || parsed.second <= 0.05) null else parsed
+        if (!result.ok || parsed == null || parsed.seconds <= 0.05) null else parsed
     } catch (e: SshException) {
         null
     }
 
     companion object {
-        const val DEFAULT_DOWN_BYTES = 20_000_000L
-        // Same size as the download: 5 MB was over in well under a second on a fast line, so
-        // the SSH round trip and TLS setup inside the timing dominated and the number read
-        // far too low. The payload lives in the router's RAM, but 20 MB fits on anything
-        // that can run the app's other features.
-        const val DEFAULT_UP_BYTES = 20_000_000L
-
         /**
-         * The last line of a transfer command → (bytes, seconds).
+         * A transfer command's output → what moved, how long it took, how busy the CPU was.
          *
-         * Four fields are curl's `size_download size_upload time_total time_pretransfer`;
-         * whichever size is non-zero is the leg that ran. One field is the byte count echoed by
-         * the fallback, timed by [wall]. Anything else is a failed transfer.
+         * The transfer line is the last one that is not a /proc/stat sample: four fields are
+         * curl's `size_download size_upload time_total time_pretransfer`, whichever size is
+         * non-zero being the leg that ran; one field is the byte count echoed by the fallback,
+         * timed by [wall]. The `cpu` lines either side of it give the core's share of that
+         * time. Anything else is a failed transfer.
          */
-        fun parseTransfer(stdout: String, wall: Double): Pair<Long, Double>? {
-            val fields = stdout.trim().lines().lastOrNull()?.trim()?.split(Regex("\\s+")).orEmpty()
-            return when (fields.size) {
-                1 -> fields[0].toLongOrNull()?.let { it to wall }
+        fun parseTransfer(stdout: String, wall: Double): Transfer? {
+            val lines = stdout.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            val samples = lines.mapNotNull(Parsers::cpuSample)
+            val cpuPct = if (samples.size >= 2) samples.last().percentSince(samples.first()) else null
+            val fields = lines.lastOrNull { !it.startsWith("cpu ") }?.split(Regex("\\s+")).orEmpty()
+            val (bytes, seconds) = when (fields.size) {
+                1 -> (fields[0].toLongOrNull() ?: return null) to wall
                 4 -> {
                     val down = fields[0].toLongOrNull() ?: return null
                     val up = fields[1].toLongOrNull() ?: return null
                     val total = fields[2].toDoubleOrNull() ?: return null
                     val pre = fields[3].toDoubleOrNull() ?: return null
-                    val bytes = if (up > 0) up else down
-                    val seconds = (total - pre).takeIf { it > 0 } ?: wall
-                    if (bytes <= 0) null else bytes to seconds
+                    (if (up > 0) up else down) to ((total - pre).takeIf { it > 0 } ?: wall)
                 }
-                else -> null
+                else -> return null
             }
+            return if (bytes <= 0) null else Transfer(bytes, seconds, cpuPct)
         }
     }
 

@@ -433,9 +433,9 @@ private fun SpeedtestDialog(ops: RouterOps, onDismiss: () -> Unit) {
         ) {
             Text("Measure download speed", style = sans(15f, 650))
             Text(
-                "The router downloads ${RouterOps.DEFAULT_DOWN_BYTES / 1_000_000} MB from " +
-                    "${Commands.SPEEDTEST_HOST} and uploads ${RouterOps.DEFAULT_UP_BYTES / 1_000_000} MB back. " +
-                    "This uses your internet data.",
+                "The router downloads up to ${Commands.SPEEDTEST_UP_BYTES / 1_000_000} MB from " +
+                    "${Commands.SPEEDTEST_HOST} and uploads up to the same back, " +
+                    "${Commands.SPEEDTEST_SECONDS} s each at most. This uses your internet data.",
                 style = sans(12f, 400, Wrt.TextSecondary, lineHeight = 18.sp),
                 modifier = Modifier.padding(top = 6.dp),
             )
@@ -495,12 +495,9 @@ private fun SpeedtestDialog(ops: RouterOps, onDismiss: () -> Unit) {
                             }
                             Text("Mbps", style = mono(10.5f, 500, Wrt.TextDim), modifier = Modifier.padding(bottom = 3.dp))
                         }
-                        Text(
-                            outcome.uploadError
-                                ?: "Timed on the router. A small router CPU doing TLS can cap this below the line's real speed.",
-                            style = sans(10f, 400, if (outcome.uploadError != null) Wrt.Amber else Wrt.TextDim),
-                            modifier = Modifier.padding(top = 8.dp),
-                        )
+                        outcome.uploadError?.let {
+                            Text(it, style = sans(10f, 400, Wrt.Amber), modifier = Modifier.padding(top = 8.dp))
+                        }
                     }
                 }
             }

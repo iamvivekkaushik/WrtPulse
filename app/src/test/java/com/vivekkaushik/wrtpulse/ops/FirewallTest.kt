@@ -146,6 +146,26 @@ class FirewallConfigTest {
         assertEquals(180L, e.reloadedAgoSec)
     }
 
+    /**
+     * Offload toggles are offered only where they would do something: software needs the
+     * flow-table module, hardware needs an SoC with an offload engine (by target name).
+     */
+    @Test
+    fun `offload availability comes from the module and the target`() {
+        val base = mapOf("service" to "{}", "engine" to "fw4", "active" to "active")
+        val ath79 = Parsers.firewallEngine(base + ("offload" to "software\nath79/generic\n"))
+        assertTrue(ath79.flowOffload)
+        assertTrue(!ath79.hwOffload)
+        val mt7621 = Parsers.firewallEngine(base + ("offload" to "software\nramips/mt7621\n"))
+        assertTrue(mt7621.flowOffload && mt7621.hwOffload)
+        val filogic = Parsers.firewallEngine(base + ("offload" to "software\nmediatek/filogic\n"))
+        assertTrue(filogic.hwOffload)
+        // No module: nothing to offer, whatever the target.
+        val bare = Parsers.firewallEngine(base + ("offload" to "ramips/mt7621\n"))
+        assertTrue(!bare.flowOffload && bare.hwOffload)
+        assertTrue(!Parsers.firewallEngine(base).flowOffload)
+    }
+
     @Test
     fun `an absent state file means no reload age rather than a huge one`() {
         val e = Parsers.firewallEngine(mapOf("service" to "{}", "engine" to "fw3", "reloaded" to "", "now" to "1180", "active" to "inactive"))

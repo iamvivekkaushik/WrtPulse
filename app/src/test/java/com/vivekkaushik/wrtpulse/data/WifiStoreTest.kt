@@ -372,6 +372,100 @@ class ScanCommandTest {
     }
 }
 
+class TxPowerStagingTest {
+    private val unusedClient = object : com.vivekkaushik.wrtpulse.net.SshClient {
+        override suspend fun probeHostKey(target: com.vivekkaushik.wrtpulse.net.SshTarget) = error("unused")
+        override suspend fun connect(target: com.vivekkaushik.wrtpulse.net.SshTarget, auth: com.vivekkaushik.wrtpulse.net.SshAuth, connectTimeoutMs: Long): com.vivekkaushik.wrtpulse.net.SshConnection = error("unused")
+    }
+    private fun store() = WifiStore(com.vivekkaushik.wrtpulse.net.RouterSession(com.vivekkaushik.wrtpulse.net.SshTarget("t"), unusedClient, { error("unused") }))
+
+    /** Beamforming is one switch over four (seven on ax) options; "on" is their absence. */
+    @org.junit.Test
+    fun `beamforming toggles every switch and on means unset`() {
+        val s = store()
+        val ac = com.vivekkaushik.wrtpulse.ops.WifiRadio("radio0", "5G", "149", "VHT80", false)
+        org.junit.Assert.assertTrue(s.beamforming(ac))
+        s.setBeamforming(ac, false)
+        org.junit.Assert.assertFalse(s.beamforming(ac))
+        org.junit.Assert.assertEquals(
+            listOf("set wireless.radio0.mu_beamformee='0'", "set wireless.radio0.mu_beamformer='0'",
+                "set wireless.radio0.su_beamformee='0'", "set wireless.radio0.su_beamformer='0'"),
+            s.ops(),
+        )
+        s.setBeamforming(ac, true)
+        org.junit.Assert.assertEquals(emptyList<String>(), s.ops())   // back to saved = unset
+
+        // Saved as explicitly on: turning it on again removes the options, not sets "1".
+        val explicit = ac.copy(beamform = mapOf("su_beamformer" to "1", "mu_beamformer" to "0"))
+        org.junit.Assert.assertFalse(s.beamforming(explicit))
+        s.setBeamforming(explicit, true)
+        org.junit.Assert.assertEquals(
+            listOf("delete wireless.radio0.mu_beamformer", "delete wireless.radio0.su_beamformer"),
+            s.ops(),
+        )
+        // An ax radio carries the HE switches too.
+        val ax = ac.copy(htmode = "HE80")
+        org.junit.Assert.assertEquals(7, s.beamformOptions(ax).size)
+    }
+
+    /** "Auto" is the absence of the option, so choosing it after a fixed value deletes it. */
+    @org.junit.Test
+    fun `auto tx power deletes the option rather than setting it empty`() {
+        val s = store()
+        s.stage("radio0", "txpower", "26", "")
+        org.junit.Assert.assertEquals(listOf("delete wireless.radio0.txpower"), s.ops())
+        s.stage("radio0", "txpower", "", "20")
+        org.junit.Assert.assertEquals(listOf("set wireless.radio0.txpower='20'"), s.ops())
+    }
+}
+
+class SurveyHonestyTest {
+    private fun cell(ch: Int, bssid: String = "AA:BB:CC:DD:EE:0$ch") =
+        com.vivekkaushik.wrtpulse.ops.ScanCell(ch, -60, "n$ch", bssid)
+
+    /** Our own AP can appear in a scan; it is not a neighbour and must not score its channel. */
+    @org.junit.Test
+    fun `own access points are dropped from a scan`() {
+        val cells = listOf(cell(40), cell(40, "A8:6E:84:93:80:37"), cell(149))
+        val heard = WifiStore.withoutOwn(cells, setOf("A8:6E:84:93:80:37"))
+        org.junit.Assert.assertEquals(listOf(cell(40), cell(149)), heard)
+    }
+
+    /**
+     * A scan that heard only the AP's own channel is flagged, not trusted: on the reference
+     * router the driver never left the channel while the AP was up, and the old advisor rated
+     * the band on that one channel's neighbours.
+     */
+    @org.junit.Test
+    fun `hearing only the own channel marks the survey partial`() {
+        org.junit.Assert.assertTrue(WifiStore.onlyOwnChannel(listOf(cell(40), cell(40)), 40))
+        org.junit.Assert.assertFalse(WifiStore.onlyOwnChannel(listOf(cell(40), cell(149)), 40))
+        org.junit.Assert.assertFalse(WifiStore.onlyOwnChannel(emptyList(), 40))
+        // No live channel to compare with (radio off, temp-interface scan): nothing to flag.
+        org.junit.Assert.assertFalse(WifiStore.onlyOwnChannel(listOf(cell(40)), null))
+    }
+
+    @org.junit.Test
+    fun `radios are mapped to the phy the driver names`() {
+        val phys = com.vivekkaushik.wrtpulse.ops.Parsers.phyNames("radio0 phy1\nradio1 phy0\nradio2 \n")
+        org.junit.Assert.assertEquals(mapOf("radio0" to "phy1", "radio1" to "phy0"), phys)
+    }
+
+    /** The radio-off survey must outlive the SSH session that started it. */
+    @org.junit.Test
+    fun `radio-off survey is detached and brings the radio back`() {
+        val cmd = com.vivekkaushik.wrtpulse.ops.Commands.surveyWithRadioDown("radio0", "phy0")
+        org.junit.Assert.assertTrue(cmd.contains("setsid sh -c '"))
+        org.junit.Assert.assertTrue(cmd.contains("wifi down radio0; "))
+        org.junit.Assert.assertTrue(cmd.contains("iw phy phy0 interface add wrtpulse-scan type managed"))
+        org.junit.Assert.assertTrue(cmd.contains("iwinfo wrtpulse-scan scan > /tmp/wrtpulse-survey-radio0.part"))
+        org.junit.Assert.assertTrue(cmd.indexOf("wifi up radio0") > cmd.indexOf("wifi down radio0"))
+        // The file only appears, with its marker, once the radio is back up.
+        org.junit.Assert.assertTrue(cmd.contains("wifi up radio0; echo \"___wrt___ done\" >> /tmp/wrtpulse-survey-radio0.part; mv"))
+        org.junit.Assert.assertEquals("cat /tmp/wrtpulse-survey-radio0 2>/dev/null", com.vivekkaushik.wrtpulse.ops.Commands.readSurvey("radio0"))
+    }
+}
+
 class ScanParserTest {
     @org.junit.Test
     fun `iwinfo scan cells parse`() {
@@ -394,6 +488,46 @@ class ScanParserTest {
         org.junit.Assert.assertEquals(-72, cells[0].signalDbm)
         org.junit.Assert.assertEquals("neighbor-one", cells[0].ssid)
         org.junit.Assert.assertEquals(11, cells[1].channel)
+        // No operation block: a plain 20 MHz cell centred on its own channel.
+        org.junit.Assert.assertEquals(20, cells[0].widthMhz)
+        org.junit.Assert.assertEquals(6, cells[0].centerChannel)
+    }
+
+    /** As a Deco M4R prints its 5 GHz neighbours: HT and VHT operation blocks after the basics. */
+    @org.junit.Test
+    fun `scan cells carry the neighbour's real width and centre`() {
+        val cells = com.vivekkaushik.wrtpulse.ops.Parsers.scanCells(
+            """
+            Cell 01 - Address: A8:6E:84:93:7F:6F
+                      ESSID: "VivekWifi"
+                      Mode: Master  Frequency: 5.200 GHz  Band: 5 GHz  Channel: 40
+                      Signal: -14 dBm  Quality: 70/70
+                      Encryption: WPA PSK / FT PSK (CCMP)
+                      HT Operation:
+                                Primary Channel: 40
+                                Secondary Channel Offset: below
+                                Channel Width: 40 MHz or higher
+                      VHT Operation:
+                                Center Frequency 1: 42
+                                Center Frequency 2: 0
+                                Channel Width: 80 MHz
+            Cell 02 - Address: AA:BB:CC:DD:EE:02
+                      ESSID: "ht40-only"
+                      Mode: Master  Frequency: 2.437 GHz  Band: 2.4 GHz  Channel: 6
+                      Signal: -70 dBm  Quality: 40/70
+                      Encryption: none
+                      HT Operation:
+                                Primary Channel: 6
+                                Secondary Channel Offset: above
+                                Channel Width: 40 MHz or higher
+            """.trimIndent()
+        )
+        org.junit.Assert.assertEquals(40, cells[0].channel)
+        org.junit.Assert.assertEquals(80, cells[0].widthMhz)
+        org.junit.Assert.assertEquals(42, cells[0].centerChannel)
+        org.junit.Assert.assertEquals(-14, cells[0].signalDbm)
+        org.junit.Assert.assertEquals(40, cells[1].widthMhz)
+        org.junit.Assert.assertEquals(8, cells[1].centerChannel)   // HT40+, two channels up
     }
 }
 

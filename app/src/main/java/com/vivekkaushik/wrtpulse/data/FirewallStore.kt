@@ -227,6 +227,8 @@ class FirewallStore(private val session: RouterSession) {
             forward = value("$p.forward", d.forward),
             synFlood = bool("$p.syn_flood", d.synFlood),
             dropInvalid = bool("$p.drop_invalid", d.dropInvalid),
+            flowOffloading = bool("$p.flow_offloading", d.flowOffloading),
+            flowOffloadingHw = bool("$p.flow_offloading_hw", d.flowOffloadingHw),
         )
     }
 
@@ -383,7 +385,13 @@ class FirewallStore(private val session: RouterSession) {
 
     fun setDefaultFlag(option: String, on: Boolean) {
         val d = config.defaults
-        val saved = if (option == "syn_flood") d.synFlood else d.dropInvalid
+        val saved = when (option) {
+            "syn_flood" -> d.synFlood
+            "drop_invalid" -> d.dropInvalid
+            "flow_offloading" -> d.flowOffloading
+            "flow_offloading_hw" -> d.flowOffloadingHw
+            else -> false
+        }
         stage("firewall.${d.section}.$option", if (saved) "1" else "0", if (on) "1" else "0")
     }
 

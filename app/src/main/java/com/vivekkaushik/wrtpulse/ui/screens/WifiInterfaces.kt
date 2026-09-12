@@ -50,6 +50,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import com.vivekkaushik.wrtpulse.ui.GhostButton
+import com.vivekkaushik.wrtpulse.ui.PrimaryButton
 import com.vivekkaushik.wrtpulse.data.DraftIface
 import com.vivekkaushik.wrtpulse.data.InterfaceRow
 import com.vivekkaushik.wrtpulse.data.WifiStore
@@ -867,13 +870,15 @@ fun ApFormScreen(
                         FieldLabel("WIDTH")
                         FormSelect(
                             ChannelPlan.widthLabel(width),
-                            ChannelPlan.widths(soleRadio.htmode, soleRadio.band).map { ChannelPlan.widthLabel(it) },
+                            ChannelPlan.widths(soleRadio.htmode, soleRadio.band, store.supportedWidths[soleRadio.section])
+                                .map { ChannelPlan.widthLabel(it) },
                         ) { picked ->
-                            width = ChannelPlan.widths(soleRadio.htmode, soleRadio.band)
+                            width = ChannelPlan.widths(soleRadio.htmode, soleRadio.band, store.supportedWidths[soleRadio.section])
                                 .firstOrNull { ChannelPlan.widthLabel(it) == picked } ?: width
                         }
                     }
                 }
+                PartialSurveyNote(store, soleRadio)
                 ChannelAdviceStrip(
                     store = store,
                     radio = soleRadio,
@@ -1053,7 +1058,8 @@ private fun ChannelAdviceStrip(
     onScan: () -> Unit,
 ) {
     val cells = store.scans[radio.section]
-    val advice = cells?.let { ChannelPlan.advise(radio.band, it) }
+    val width = ChannelPlan.widthOf(store.value(radio.section, "htmode", radio.htmode))
+    val advice = cells?.let { ChannelPlan.advise(radio.band, it, width) }
     Row(
         Modifier
             .fillMaxWidth()
@@ -1089,6 +1095,56 @@ private fun ChannelAdviceStrip(
             style = sans(11f, 600, if (store.scanning) Wrt.TextDim else Wrt.Accent),
             modifier = Modifier.clickable(enabled = !store.scanning, onClick = onScan),
         )
+    }
+}
+
+/**
+ * Shown when the last scan may not have been a survey — see [WifiStore.partial]. Says so in
+ * plain words and offers the one that is: radio off, scan, radio up, ~20 s without this band.
+ */
+@Composable
+fun PartialSurveyNote(store: WifiStore, radio: WifiRadio) {
+    if (store.partial[radio.section] != true || store.scanning) return
+    val scope = rememberCoroutineScope()
+    var confirm by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Text(
+            "Only ${radio.band}'s own channel was heard. This driver may not leave its channel " +
+                "while the AP is up, so the rating covers one channel. A survey with the radio " +
+                "off hears everything.",
+            style = sans(10.5f, 400, Wrt.Amber, lineHeight = 15.sp),
+        )
+        Text(
+            "Survey with radio off (~20 s)",
+            style = sans(11f, 600, Wrt.Accent),
+            modifier = Modifier.padding(top = 6.dp).clickable { confirm = true },
+        )
+    }
+    if (confirm) {
+        Dialog(onDismissRequest = { confirm = false }) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, Wrt.BorderCard, RoundedCornerShape(16.dp))
+                    .background(Wrt.BgBar, RoundedCornerShape(16.dp))
+                    .padding(18.dp)
+            ) {
+                Text("Take ${radio.section} down to survey?", style = sans(15f, 650))
+                Text(
+                    "Every device on ${radio.band} drops for about 20 seconds and rejoins by itself. " +
+                        "If this phone is on it, the app reconnects when the radio is back. " +
+                        "Nothing is saved to the router.",
+                    style = sans(12f, 400, Wrt.TextSecondary, lineHeight = 18.sp),
+                    modifier = Modifier.padding(top = 6.dp, bottom = 16.dp),
+                )
+                PrimaryButton("Survey now") {
+                    confirm = false
+                    scope.launch { store.surveyWithRadioDown(radio.section) }
+                }
+                Spacer(Modifier.height(6.dp))
+                GhostButton("Cancel", onClick = { confirm = false })
+            }
+        }
     }
 }
 

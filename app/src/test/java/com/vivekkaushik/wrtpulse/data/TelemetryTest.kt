@@ -6,6 +6,9 @@ import com.vivekkaushik.wrtpulse.net.SshClient
 import com.vivekkaushik.wrtpulse.net.SshConnection
 import com.vivekkaushik.wrtpulse.net.SshTarget
 import com.vivekkaushik.wrtpulse.ops.Parsers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -73,6 +76,31 @@ class TelemetryTest {
         t.ingest(Parsers.sections(tickOutput(1100, 1100, rxBytes = 1_000, txBytes = 500)), 1_000_000_000L)
         assertEquals(0f, t.down.last(), 0.001f)
         assertEquals(0f, t.up.last(), 0.001f)
+    }
+
+    /**
+     * The speed test holds the tick: it is ~0.35 s of CPU per second on a single-core router
+     * and exec is not serialised, so it was sharing the core with curl and taking 20–50% off
+     * a number that was already CPU-bound there.
+     */
+    @Test
+    fun `a paused loop does not touch the router until it is resumed`() = runTest {
+        // Credentials are asked for on the first connect, which only a tick would trigger.
+        var connects = 0
+        val session = RouterSession(SshTarget("router.test"), unusedClient, credentials = { connects++; error("stop") })
+        val t = Telemetry(session)
+
+        t.paused = true
+        // The first tick's connect attempt throws, which ends the loop — so the job finishing
+        // is the tick having run.
+        val loop = backgroundScope.launch { runCatching { t.run() } }
+        advanceTimeBy(5_000)
+        assertEquals(0, connects)
+        assertTrue(loop.isActive)
+
+        t.paused = false
+        loop.join()
+        assertEquals(1, connects)
     }
 
     @Test

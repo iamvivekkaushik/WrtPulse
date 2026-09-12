@@ -142,11 +142,70 @@ class ChannelPlanTest {
     }
 
     @Test
-    fun `5 GHz only counts neighbours on the same channel`() {
+    fun `5 GHz 20 MHz neighbours only touch their own channel`() {
         val advice = ChannelPlan.advise("5G", listOf(cell(36), cell(36), cell(40)))!!
         assertEquals(0, advice.onChannel)
         assertEquals(0, advice.overlapping)
-        assertTrue(advice.channel != 36 && advice.channel != 40)
+        assertEquals(44, advice.channel)   // the lowest clear one
+    }
+
+    /**
+     * The survey that exposed the old advisor: a mesh pair and its guest SSIDs on primary 40
+     * at 80 MHz, i.e. all of 36–48, one node at −14 dBm in the next room. Counting primaries
+     * said "nothing on 36" and put the router inside their block.
+     */
+    private val meshOn40 = listOf(
+        ScanCell(40, -14, "VivekWifi", widthMhz = 80, centerChannel = 42),
+        ScanCell(40, -53, "VivekWifi", widthMhz = 80, centerChannel = 42),
+        ScanCell(40, -14, "VivekWifi_Guest", widthMhz = 80, centerChannel = 42),
+        ScanCell(40, -53, "VivekWifi_Guest", widthMhz = 80, centerChannel = 42),
+    )
+
+    @Test
+    fun `a wide neighbour covers every channel in its block`() {
+        val at80 = ChannelPlan.advise("5G", meshOn40, widthMhz = 80)!!
+        assertEquals(149, at80.channel)
+        assertTrue(at80.clear)
+        // Narrow or wide, 36 is inside their 80 MHz and must lose.
+        assertEquals(149, ChannelPlan.advise("5G", meshOn40, widthMhz = 20)!!.channel)
+        assertEquals(149, ChannelPlan.advise("5G", meshOn40, widthMhz = 40)!!.channel)
+    }
+
+    /** An 80 MHz radio has two non-DFS homes; offering it 40 or 44 just hides that. */
+    @Test
+    fun `candidates narrow with width`() {
+        assertEquals(listOf(36, 149), ChannelPlan.candidates("5G", 80))
+        assertEquals(listOf(36, 44, 149, 157), ChannelPlan.candidates("5G", 40))
+        assertEquals(ChannelPlan.candidates("5G"), ChannelPlan.candidates("5G", 20))
+        assertEquals(listOf(1, 6, 11), ChannelPlan.candidates("2.4G", 40))
+        assertEquals(80, ChannelPlan.widthOf("VHT80"))
+        assertEquals(20, ChannelPlan.widthOf(""))
+    }
+
+    @Test
+    fun `a loud neighbour outweighs several faint ones`() {
+        val cells = listOf(
+            ScanCell(36, -14, "next-door"),
+            ScanCell(149, -85, "far-a"), ScanCell(149, -85, "far-b"), ScanCell(149, -85, "far-c"),
+        )
+        // Three faint co-channel neighbours on 149 are less trouble than one at −14 dBm on 36;
+        // by head-count alone 36 would have won.
+        val advice = ChannelPlan.advise("5G", cells, widthMhz = 80)!!
+        assertEquals(149, advice.channel)
+        assertEquals(3, advice.onChannel)
+    }
+
+    /** Both blocks taken: the lighter one wins even though nothing is "clear". */
+    @Test
+    fun `the quieter block wins when both are occupied`() {
+        val cells = meshOn40 + listOf(
+            ScanCell(161, -60, "VivekWifi", widthMhz = 80, centerChannel = 155),
+            ScanCell(161, -60, "VivekWifi_Guest", widthMhz = 80, centerChannel = 155),
+        )
+        val advice = ChannelPlan.advise("5G", cells, widthMhz = 80)!!
+        assertEquals(149, advice.channel)
+        assertTrue(!advice.clear)
+        assertEquals(2, advice.overlapping)
     }
 
     @Test
@@ -171,6 +230,79 @@ class ChannelPlanTest {
         assertEquals(listOf("HT20", "HT40"), ChannelPlan.widths("", "2.4G"))
         assertEquals("80 MHz", ChannelPlan.widthLabel("VHT80"))
         assertEquals("—", ChannelPlan.widthLabel(""))
+    }
+
+    /**
+     * A QCA9886 tops out at 80 MHz. Offering it VHT160 made hostapd refuse to start and the
+     * network vanish from every client, so the picker is cut to what the phy reports.
+     */
+    @Test
+    fun `widths stop at what the chip supports`() {
+        assertEquals(listOf("VHT20", "VHT40", "VHT80"), ChannelPlan.widths("VHT80", "5G", setOf(20, 40, 80)))
+        assertEquals(listOf("HE20", "HE40", "HE80", "HE160"), ChannelPlan.widths("HE80", "5G", setOf(20, 40, 80, 160)))
+        // Unknown capability: the old full list, not an empty picker.
+        assertEquals(4, ChannelPlan.widths("VHT80", "5G", null).size)
+        assertEquals(4, ChannelPlan.widths("VHT80", "5G", emptySet()).size)
+    }
+
+    /** As the Deco's drivers print them; the starred entry is the current setting. */
+    @Test
+    fun `txpower lists come per interface and the picker offers a readable subset`() {
+        val lists = Parsers.txpowerLists(
+            "# phy0-ap0\n  27 dbm ( 501 mW)\n  28 dbm ( 630 mW)\n  29 dbm ( 794 mW)\n* 30 dbm (1000 mW)\n" +
+                "# phy1-ap0\n   1 dbm (   1 mW)\n  17 dbm (  50 mW)\n  18 dbm (  63 mW)\n  24 dbm ( 251 mW)\n  25 dbm ( 316 mW)\n  26 dbm ( 398 mW)\n"
+        )
+        assertEquals(listOf(27, 28, 29, 30), lists["phy0-ap0"])
+        assertEquals(listOf(1, 17, 18, 24, 25, 26), lists["phy1-ap0"])
+        // Only values the driver listed, top-heavy, short.
+        assertEquals(listOf(26, 25, 24, 18), ChannelPlan.txpowerOptions(lists["phy1-ap0"]!!))
+        assertEquals(listOf(30, 29, 28, 27), ChannelPlan.txpowerOptions(lists["phy0-ap0"]!!))
+        assertEquals(emptyList<Int>(), ChannelPlan.txpowerOptions(emptyList()))
+    }
+
+    /** The applied power is read from bare iwinfo so the editor can say when it is capped. */
+    @Test
+    fun `iwinfo reports the applied tx power`() {
+        val ifaces = Parsers.iwinfo(
+            "phy1-ap0  ESSID: \"OpenWrt\"\n          Access Point: A8:6E:84:93:80:38\n" +
+                "          Mode: Master  Channel: 11 (2.462 GHz)  HT Mode: HT40\n          Tx-Power: 18 dBm  Link Quality: 58/70\n"
+        )
+        assertEquals(18, ifaces.single().txPowerDbm)
+    }
+
+    /** The Deco: its 5 GHz QCA9888 beamforms, its 2.4 GHz ath9k cannot. */
+    @Test
+    fun `beamforming is offered only where the phy lists it`() {
+        val caps = Parsers.phyBeamforming(
+            "# phy0\n\t\t\tHT20/HT40\n\t\tVHT Capabilities (0x339979b2):\n\t\t\tSU Beamformer\n\t\t\tSU Beamformee\n\t\t\tMU Beamformer\n\t\t\tMU Beamformee\n" +
+                "# phy1\n\t\t\tHT20/HT40\n"
+        )
+        assertEquals(mapOf("phy0" to true, "phy1" to false), caps)
+    }
+
+    @Test
+    fun `phy capabilities give each radio its widths`() {
+        val caps = Parsers.phyWidths(
+            """
+            # phy0
+            			HT20/HT40
+            		VHT Capabilities (0x339979b2):
+            			Supported Channel Width: neither 160 nor 80+80
+            # phy1
+            			HT20/HT40
+            # phy2
+            			HT20/HT40
+            		VHT Capabilities (0x339b79f6):
+            			Supported Channel Width: 160 MHz
+            		HE PHY Capabilities: (0x0c 0x00 ...):
+            			HE40/HE80/5GHz
+            			HE160/5GHz
+            """.trimIndent()
+        )
+        assertEquals(setOf(20, 40, 80), caps["phy0"])
+        assertEquals(setOf(20, 40), caps["phy1"])
+        assertEquals(setOf(20, 40, 80, 160), caps["phy2"])
+        assertEquals(emptyMap<String, Set<Int>>(), Parsers.phyWidths(""))
     }
 
     @Test
@@ -265,7 +397,7 @@ class UpstreamTest {
 
     @Test
     fun `essid lines map interfaces to the network they are on`() {
-        val map = Parsers.iwinfoEssids(
+        val map = Parsers.essids(
             """
             phy0-sta0 ESSID: "VivekWifi"
             phy1-ap0  ESSID: "OpenWrt"
@@ -273,6 +405,16 @@ class UpstreamTest {
             """.trimIndent()
         )
         assertEquals(mapOf("phy0-sta0" to "VivekWifi", "phy1-ap0" to "OpenWrt"), map)
+    }
+
+    /** `iw dev | grep -E 'Interface|ssid'`, the tick's cheaper source — as a Deco M4R prints it. */
+    @Test
+    fun `iw dev interface and ssid lines map the same way`() {
+        val map = Parsers.essids(
+            "\tInterface phy1-ap0\n\t\tssid Casa Upstairs\n\tInterface phy0-sta0\n\t\tssid VivekWifi\n\tInterface phy0-ap0\n"
+        )
+        assertEquals(mapOf("phy1-ap0" to "Casa Upstairs", "phy0-sta0" to "VivekWifi"), map)
+        assertEquals(emptyMap<String, String>(), Parsers.essids(""))
     }
 }
 

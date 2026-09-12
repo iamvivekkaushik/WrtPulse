@@ -1130,6 +1130,18 @@ private fun DefaultsTab(store: FirewallStore) {
             ToggleRow("SYN-flood protection", "Rate-limits TCP handshakes · syn_flood", d.synFlood) { store.setDefaultFlag("syn_flood", !d.synFlood) }
             HairDivider()
             ToggleRow("Drop invalid packets", "Discards malformed conntrack states · drop_invalid", d.dropInvalid) { store.setDefaultFlag("drop_invalid", !d.dropInvalid) }
+            // Established flows skip the firewall walk; on a single small core this is the
+            // difference between the CPU and the line being the ceiling. Shown only when the
+            // kernel has the flow-table module, and the hardware variant only on silicon that
+            // has an offload engine — a toggle the router would ignore is worse than none.
+            if (store.engine?.flowOffload == true) {
+                HairDivider()
+                ToggleRow("Flow offloading", "Established connections bypass the rule walk · flow_offloading", d.flowOffloading) { store.setDefaultFlag("flow_offloading", !d.flowOffloading) }
+            }
+            if (store.engine?.hwOffload == true) {
+                HairDivider()
+                ToggleRow("Hardware flow offloading", "This SoC's offload engine carries established flows · flow_offloading_hw", d.flowOffloadingHw) { store.setDefaultFlag("flow_offloading_hw", !d.flowOffloadingHw) }
+            }
         }
         Column(
             Modifier

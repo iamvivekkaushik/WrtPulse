@@ -155,7 +155,7 @@ private fun WrtPulseApp() {
     val lanStore = remember(session) { session?.let { LanStore(it) } }
     val wanStore = remember(session) { session?.let { WanStore(it) } }
     val termSessions = remember(session) { session?.let { TerminalSessions(it, scope) } }
-    val routerOps = remember(session) { session?.let { RouterOps(it) } }
+    val routerOps = remember(session, telemetry) { session?.let { RouterOps(it, telemetry) } }
     val guestStore = remember(session) { session?.let { GuestStore(it) } }
     val liveLogs = remember(session) { session?.let { LiveLogs(it) } }
     // Read on entry rather than on a tick — the installed list only changes when

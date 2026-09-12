@@ -11,6 +11,7 @@ import com.vivekkaushik.wrtpulse.net.SshException
 import com.vivekkaushik.wrtpulse.ops.Commands
 import com.vivekkaushik.wrtpulse.ops.Parsers
 import com.vivekkaushik.wrtpulse.ops.ScanCell
+import kotlinx.coroutines.delay
 import com.vivekkaushik.wrtpulse.ops.WifiNetwork
 import com.vivekkaushik.wrtpulse.ops.WifiRadio
 
@@ -85,6 +86,15 @@ data class InterfaceRow(
 class WifiStore(private val session: RouterSession) : Refreshable {
 
     val radios = mutableStateListOf<WifiRadio>()
+
+    /** radio section → channel widths (MHz) its chip can run; absent when the phy did not say. */
+    val supportedWidths = mutableStateMapOf<String, Set<Int>>()
+
+    /** radio section → dBm values its driver accepts; absent while the radio has no interface. */
+    val txpowerAccepted = mutableStateMapOf<String, List<Int>>()
+
+    /** radio section → its chip can beamform, so the switch is worth showing. */
+    val supportsBeamforming = mutableStateMapOf<String, Boolean>()
     val networks = mutableStateListOf<WifiNetwork>()
 
     /** "section.option" → (saved value, staged value). */
@@ -121,7 +131,18 @@ class WifiStore(private val session: RouterSession) : Refreshable {
 
     /** radio section → last scan result. */
     val scans = mutableStateMapOf<String, List<ScanCell>>()
+
+    /**
+     * radio section → the last scan may not have been a survey. True when it failed, or when
+     * every neighbour heard sits on the radio's own channel — which is what ath10k-ct does
+     * with the AP up on the reference router: it never leaves the channel, and a rating
+     * built on that is a rating of one channel. Cleared by a survey that heard more.
+     */
+    val partial = mutableStateMapOf<String, Boolean>()
     var scanning by mutableStateOf(false); private set
+
+    /** radio section → phy, as the driver reports it; falls back to the name convention. */
+    private val phys = mutableMapOf<String, String>()
 
     override var loaded by mutableStateOf(false); private set
     override var applying by mutableStateOf(false); private set
@@ -152,6 +173,9 @@ class WifiStore(private val session: RouterSession) : Refreshable {
                 "echo ${Commands.SECTION} fw" to Commands.FIREWALL_CONFIG,
                 "echo ${Commands.SECTION} iwinfo" to Commands.IWINFO,
                 "echo ${Commands.SECTION} assoc" to Commands.ASSOC_COUNTS,
+                "echo ${Commands.SECTION} caps" to Commands.PHY_CAPS,
+                "echo ${Commands.SECTION} phys" to Commands.PHY_NAMES,
+                "echo ${Commands.SECTION} txpower" to Commands.TXPOWER_LISTS,
             ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
             val out = session.exec(batch, timeoutMs = 15_000).requireOk("read wireless").stdout
             val sections = Parsers.sections(out)
@@ -177,6 +201,17 @@ class WifiStore(private val session: RouterSession) : Refreshable {
             Parsers.stations(sections["assoc"].orEmpty())
                 .groupingBy { it.iface }.eachCount()
                 .forEach { (iface, count) -> clientCounts[iface] = count }
+            phys.clear()
+            phys.putAll(Parsers.phyNames(sections["phys"].orEmpty()))
+            val lists = Parsers.txpowerLists(sections["txpower"].orEmpty())
+            txpowerAccepted.clear()
+            ifnames.forEach { (radio, ifname) -> lists[ifname]?.takeIf { it.isNotEmpty() }?.let { txpowerAccepted[radio] = it } }
+            val caps = Parsers.phyWidths(sections["caps"].orEmpty())
+            supportedWidths.clear()
+            radios.forEach { radio -> caps[phyFor(radio.section)]?.let { supportedWidths[radio.section] = it } }
+            val beamforming = Parsers.phyBeamforming(sections["caps"].orEmpty())
+            supportsBeamforming.clear()
+            radios.forEach { radio -> beamforming[phyFor(radio.section)]?.let { supportsBeamforming[radio.section] = it } }
             loaded = true
             error = null
         } catch (e: SshException) {
@@ -208,14 +243,24 @@ class WifiStore(private val session: RouterSession) : Refreshable {
                 if (ifname != null) Commands.scan(ifname)
                 else Commands.scanViaTempInterface(phyFor(radio))
             val out = session.exec(command, timeoutMs = 60_000)
-            val cells = Parsers.scanCells(out.stdout)
+            val cells = withoutOwn(Parsers.scanCells(out.stdout), ownBssids())
             when {
-                cells.isNotEmpty() -> scans[radio] = cells
+                cells.isNotEmpty() -> {
+                    scans[radio] = cells
+                    partial[radio] = ifname != null && onlyOwnChannel(cells, live[ifname]?.channel)
+                }
                 out.stdout.contains("ERR add") ->
                     error = "This radio has no interface to scan with, and one couldn't be created."
-                !out.ok || out.stdout.contains("Not supported", true) || out.stdout.contains("failed", true) ->
+                !out.ok || out.stdout.contains("Not supported", true) || out.stdout.contains("failed", true) ||
+                    out.stdout.contains("Netlink error", true) -> {
                     error = "Scan failed: ${out.stdout.trim().lines().lastOrNull()?.take(90).orEmpty()}"
-                else -> scans[radio] = emptyList()   // scanned fine, genuinely nothing heard
+                    // A live AP that cannot scan is the case the radio-off survey exists for.
+                    if (ifname != null) partial[radio] = true
+                }
+                else -> {
+                    scans[radio] = emptyList()   // scanned fine, genuinely nothing heard
+                    partial[radio] = false
+                }
             }
         } catch (e: SshException) {
             error = "Scan failed: ${e.message}"
@@ -224,8 +269,50 @@ class WifiStore(private val session: RouterSession) : Refreshable {
         }
     }
 
-    /** OpenWrt numbers radios and phys alike: radio0 sits on phy0. */
-    private fun phyFor(radio: String) = "phy" + radio.filter { it.isDigit() }.ifEmpty { "0" }
+    /**
+     * Survey with the radio off — see [Commands.surveyWithRadioDown]. Every device on the
+     * band drops for the duration, this phone possibly included, so the result is collected
+     * by polling a file the detached job leaves behind; exec reconnects by itself once the
+     * radio is back.
+     */
+    suspend fun surveyWithRadioDown(radio: String) {
+        if (scanning) return
+        scanning = true
+        error = null
+        try {
+            session.exec(Commands.surveyWithRadioDown(radio, phyFor(radio)), timeoutMs = 10_000)
+            var text = ""
+            val deadline = System.nanoTime() + SURVEY_WAIT_NANOS
+            while (System.nanoTime() < deadline) {
+                delay(3_000)
+                text = try {
+                    session.exec(Commands.readSurvey(radio), timeoutMs = 8_000).stdout
+                } catch (e: SshException) {
+                    ""   // the link may be the very band that is down; try again shortly
+                }
+                if (text.contains("${Commands.SECTION} done")) break
+            }
+            if (!text.contains("${Commands.SECTION} done")) {
+                error = "The survey is taking too long. The radio comes back up on its own when it finishes."
+                return
+            }
+            scans[radio] = withoutOwn(Parsers.scanCells(text), ownBssids())
+            partial[radio] = false
+            runCatching { session.exec(Commands.forgetSurvey(radio), timeoutMs = 5_000) }
+        } catch (e: SshException) {
+            error = "Survey failed: ${e.message}"
+        } finally {
+            scanning = false
+        }
+    }
+
+    /** The MACs our own APs beacon with; a scan can hear them and they are not neighbours. */
+    private fun ownBssids(): Set<String> =
+        live.values.filter { !it.isClient && it.bssid.isNotBlank() }.map { it.bssid.uppercase() }.toSet()
+
+    /** The driver's answer when it gave one; otherwise the convention that radio0 sits on phy0. */
+    private fun phyFor(radio: String) =
+        phys[radio] ?: ("phy" + radio.filter { it.isDigit() }.ifEmpty { "0" })
 
     /** Stages one option; staging the saved value back un-stages it. */
     fun stageDelete(section: String) {
@@ -245,6 +332,23 @@ class WifiStore(private val session: RouterSession) : Refreshable {
 
     /** True when anything in this section is waiting to be applied. */
     fun changedIn(section: String): Boolean = staged.keys.any { it.startsWith("$section.") }
+
+    /** The beamforming switches this radio has: VHT always, HE on an 802.11ax radio. */
+    fun beamformOptions(radio: WifiRadio): List<String> =
+        WifiRadio.VHT_BEAMFORM +
+            if (radio.htmode.startsWith("HE") || radio.htmode.startsWith("EHT")) WifiRadio.HE_BEAMFORM else emptyList()
+
+    /** On unless any switch is explicitly off — the same reading hostapd makes. */
+    fun beamforming(radio: WifiRadio): Boolean =
+        beamformOptions(radio).all { value(radio.section, it, radio.beamform[it].orEmpty()) != "0" }
+
+    /**
+     * One switch for all of them. Turning on removes the options rather than writing "1":
+     * on is the default, and a config that says nothing is a config that follows the driver.
+     */
+    fun setBeamforming(radio: WifiRadio, on: Boolean) {
+        beamformOptions(radio).forEach { stage(radio.section, it, radio.beamform[it].orEmpty(), if (on) "" else "0") }
+    }
 
     /** The value the UI should render: staged if present, else saved. */
     fun value(section: String, option: String, saved: String): String =
@@ -383,8 +487,9 @@ class WifiStore(private val session: RouterSession) : Refreshable {
         .sortedBy { it.key }
         .map { (key, change) ->
             // Switching a network to open leaves the old passphrase sitting in the config
-            // file unless the option goes with it.
-            if (key.endsWith(".key") && change.second.isEmpty()) "delete wireless.$key"
+            // file unless the option goes with it; "auto" TX power and beamforming "on" are
+            // likewise the option's absence.
+            if (change.second.isEmpty() && key.substringAfterLast('.') in DELETE_WHEN_EMPTY) "delete wireless.$key"
             else "set wireless.$key='${escape(change.second)}'"
         } +
         deletions.sorted().map { "delete wireless.$it" } +
@@ -595,6 +700,25 @@ class WifiStore(private val session: RouterSession) : Refreshable {
     }
 
     companion object {
+        /** Options whose empty staged value means "remove it", not "set it to nothing". */
+        private val DELETE_WHEN_EMPTY: Set<String> =
+            setOf("key", "txpower") + WifiRadio.VHT_BEAMFORM + WifiRadio.HE_BEAMFORM
+
+        /** How long to wait for a detached survey; a scan is seconds, the radio restart most of the rest. */
+        private const val SURVEY_WAIT_NANOS = 90_000_000_000L
+
+        /** Our own APs, hidden or not, are not neighbours. */
+        fun withoutOwn(cells: List<ScanCell>, ownBssids: Set<String>): List<ScanCell> =
+            cells.filterNot { it.bssid.uppercase() in ownBssids }
+
+        /**
+         * A scan through a live AP that heard only the AP's own channel. It may be a quiet
+         * band, but on ath10k-ct it is the driver never leaving the channel, and the advice
+         * that follows would be built on one channel's worth of neighbours — so it is flagged
+         * as possibly partial rather than presented as a survey.
+         */
+        fun onlyOwnChannel(cells: List<ScanCell>, ownChannel: Int?): Boolean =
+            ownChannel != null && cells.isNotEmpty() && cells.all { it.channel == ownChannel }
         /**
          * A uci section name built from the SSID — `wrtpulse_` keeps it clear who added it,
          * and only letters, digits and underscores survive because uci accepts nothing else.

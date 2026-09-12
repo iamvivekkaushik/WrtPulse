@@ -328,7 +328,23 @@ data class WifiRadio(
     val htmode: String,        // "HE40", ...
     val disabled: Boolean,
     val country: String = "",  // regulatory domain, e.g. "IN"
-)
+    /** dBm as configured; empty means the driver's maximum for the channel and country. */
+    val txpower: String = "",
+    /**
+     * The beamforming options that are explicitly set, option → "0"/"1". Unset means on:
+     * hostapd advertises SU/MU beamformer and beamformee whenever the chip can and nothing
+     * says otherwise.
+     */
+    val beamform: Map<String, String> = emptyMap(),
+) {
+    companion object {
+        /** The VHT switches; every 802.11ac radio has them. */
+        val VHT_BEAMFORM = listOf("su_beamformer", "su_beamformee", "mu_beamformer", "mu_beamformee")
+
+        /** The HE ones on top, for 802.11ax radios. */
+        val HE_BEAMFORM = listOf("he_su_beamformer", "he_su_beamformee", "he_mu_beamformer")
+    }
+}
 
 /** One `wifi-iface` section from `uci show wireless` — an AP we serve or a network we join. */
 data class WifiNetwork(
@@ -540,12 +556,20 @@ data class DropbearAuth(
 
 /** One neighbouring AP from `iwinfo <iface> scan`. */
 data class ScanCell(
+    /** The primary channel — what the scan's "Channel:" line says. */
     val channel: Int,
     val signalDbm: Int,
     val ssid: String,
     val bssid: String = "",
     /** Already in the form the UI shows: "WPA2", "WPA3", "OPEN". */
     val encryption: String = "",
+    /**
+     * How much spectrum it actually occupies. An 80 MHz neighbour on primary 40 sits on
+     * 36–48 entirely, which is what made the old advisor call 36 "clear" next to it.
+     */
+    val widthMhz: Int = 20,
+    /** The channel number at the middle of that spectrum — 42 for an 80 MHz block on 36–48. */
+    val centerChannel: Int = channel,
 ) {
     /** iwinfo reports a hidden network's name literally as "unknown". */
     val named: Boolean get() = ssid.isNotBlank() && ssid != "unknown"
@@ -568,6 +592,11 @@ data class IwinfoIface(
     val channel: Int?,
     val signalDbm: Int?,     // stations report this; APs usually say "unknown"
     val encryption: String,
+    /**
+     * What the driver is actually transmitting at. Can sit below the configured value: an
+     * ath9k radio asked for 26 dBm stayed at 18, the cap its calibration data imposes.
+     */
+    val txPowerDbm: Int? = null,
 ) {
     val isClient: Boolean get() = mode.equals("Client", true)
 }
@@ -725,18 +754,33 @@ object Parsers {
     }
 
     /**
-     * The ESSID line of bare `iwinfo`, per interface. One grep-able line each, which is all
-     * the dashboard needs to say which network an upstream client is joined to.
+     * Interface → SSID from the tick's essid section: `iw dev` filtered to its `Interface x`
+     * and `ssid y` lines, or bare `iwinfo` filtered to its `x ESSID: "y"` lines on a router
+     * without iw. Either way it is the one thing the dashboard needs — which network an
+     * upstream client is joined to.
      */
-    fun iwinfoEssids(text: String): Map<String, String> = text.lineSequence()
-        .mapNotNull { line ->
-            if (!line.contains("ESSID:")) return@mapNotNull null
-            val ifname = line.substringBefore("ESSID:").trim()
-            val essid = line.substringAfter("ESSID:").trim().removeSurrounding("\"")
-            if (ifname.isEmpty() || essid.isEmpty() || essid.equals("unknown", true)) null
-            else ifname to essid
+    fun essids(text: String): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        var iwIface: String? = null
+        text.lineSequence().map { it.trim() }.forEach { line ->
+            when {
+                line.contains("ESSID:") -> {
+                    val ifname = line.substringBefore("ESSID:").trim()
+                    val essid = line.substringAfter("ESSID:").trim().removeSurrounding("\"")
+                    if (ifname.isNotEmpty() && essid.isNotEmpty() && !essid.equals("unknown", true)) {
+                        out[ifname] = essid
+                    }
+                }
+                line.startsWith("Interface ") -> iwIface = line.removePrefix("Interface ").trim()
+                line.startsWith("ssid ") -> {
+                    val essid = line.removePrefix("ssid ").trim()
+                    val ifname = iwIface
+                    if (ifname != null && essid.isNotEmpty()) out[ifname] = essid
+                }
+            }
         }
-        .toMap()
+        return out
+    }
 
     /** `df -k /overlay | tail -n1` → available kilobytes, null if the line doesn't parse. */
     fun overlayAvailKb(dfLine: String): Long? {
@@ -830,6 +874,17 @@ object Parsers {
      *             Mode: Master  Channel: 6
      *             Signal: -72 dBm  Quality: 38/70
      *             Encryption: WPA2 PSK (CCMP)
+     *             HT Operation:
+     *                 Primary Channel: 40
+     *                 Secondary Channel Offset: below
+     *                 Channel Width: 40 MHz or higher
+     *             VHT Operation:
+     *                 Center Frequency 1: 42
+     *                 Channel Width: 80 MHz
+     *
+     * The operation blocks are what say how wide a neighbour really is: the widest "Channel
+     * Width" wins, the VHT centre is taken as printed, and an HT40 cell's centre is two
+     * channels from its primary on the side the offset names.
      */
     fun scanCells(text: String): List<ScanCell> {
         val cells = mutableListOf<ScanCell>()
@@ -838,11 +893,22 @@ object Parsers {
         var encryption = ""
         var channel: Int? = null
         var signal: Int? = null
+        var width = 20
+        var vhtCenter = 0
+        var secondaryBelow: Boolean? = null
         fun flush() {
             val ch = channel
             val sig = signal
-            if (ch != null && sig != null) cells += ScanCell(ch, sig, ssid, bssid, encryption)
+            if (ch != null && sig != null) {
+                val center = when {
+                    vhtCenter > 0 -> vhtCenter
+                    width == 40 && secondaryBelow != null -> if (secondaryBelow == true) ch - 2 else ch + 2
+                    else -> ch
+                }
+                cells += ScanCell(ch, sig, ssid, bssid, encryption, width, center)
+            }
             ssid = ""; bssid = ""; encryption = ""; channel = null; signal = null
+            width = 20; vhtCenter = 0; secondaryBelow = null
         }
         text.lineSequence().forEach { raw ->
             val line = raw.trim()
@@ -855,7 +921,18 @@ object Parsers {
                     ssid = line.removePrefix("ESSID:").trim().removeSurrounding("\"")
                 line.startsWith("Encryption:") ->
                     encryption = securityLabel(line.removePrefix("Encryption:").trim())
+                line.startsWith("Channel Width:") ->
+                    Regex("(\\d+) MHz").find(line)?.let { width = maxOf(width, it.groupValues[1].toInt()) }
+                line.startsWith("Center Frequency 1:") ->
+                    line.substringAfter(':').trim().toIntOrNull()?.let { if (it > 0) vhtCenter = it }
+                line.startsWith("Secondary Channel Offset:") ->
+                    secondaryBelow = when (line.substringAfter(':').trim()) {
+                        "below" -> true
+                        "above" -> false
+                        else -> null
+                    }
                 else -> {
+                    // "Mode: Master  Channel: 40" and HT's "Primary Channel: 40" agree.
                     Regex("Channel: (\\d+)").find(line)?.let { channel = it.groupValues[1].toInt() }
                     Regex("Signal: (-?\\d+) dBm").find(line)?.let { signal = it.groupValues[1].toInt() }
                 }
@@ -892,11 +969,13 @@ object Parsers {
         var channel: Int? = null
         var signal: Int? = null
         var encryption = ""
+        var txPower: Int? = null
         fun flush() {
             if (ifname.isNotEmpty()) {
-                result += IwinfoIface(ifname, essid, bssid, mode, channel, signal, encryption)
+                result += IwinfoIface(ifname, essid, bssid, mode, channel, signal, encryption, txPower)
             }
             ifname = ""; essid = ""; bssid = ""; mode = ""; channel = null; signal = null; encryption = ""
+            txPower = null
         }
         text.lineSequence().forEach { raw ->
             // A block starts at column 0 with "<ifname>  ESSID: ..."; the rest is indented.
@@ -917,11 +996,28 @@ object Parsers {
                     Regex("Mode: (\\w+)").find(line)?.let { mode = it.groupValues[1] }
                     Regex("Channel: (\\d+)").find(line)?.let { channel = it.groupValues[1].toInt() }
                     Regex("Signal: (-?\\d+) dBm").find(line)?.let { signal = it.groupValues[1].toInt() }
+                    Regex("Tx-Power: (\\d+) dBm").find(line)?.let { txPower = it.groupValues[1].toInt() }
                 }
             }
         }
         flush()
         return result
+    }
+
+    /**
+     * [Commands.TXPOWER_LISTS] → ifname → the dBm values its driver accepts, ascending.
+     * Lines are `  26 dbm ( 398 mW)`, the current one starred; "# <ifname>" starts a block.
+     */
+    fun txpowerLists(text: String): Map<String, List<Int>> {
+        val out = LinkedHashMap<String, MutableList<Int>>()
+        var ifname: String? = null
+        text.lineSequence().map { it.trim() }.forEach { line ->
+            when {
+                line.startsWith("# ") -> ifname = line.removePrefix("# ").trim().also { out[it] = mutableListOf() }
+                ifname != null -> Regex("^\\*?\\s*(\\d+) dbm").find(line)?.let { out[ifname]!! += it.groupValues[1].toInt() }
+            }
+        }
+        return out.mapValues { it.value.sorted() }
     }
 
     /**
@@ -1413,6 +1509,39 @@ object Parsers {
         .map { it.key.removePrefix("network.") }
         .toSet()
 
+    /** [Commands.PHY_NAMES] → radio section → phy name, for the radios the driver answered for. */
+    fun phyNames(text: String): Map<String, String> = text.lineSequence()
+        .map { it.trim().split(Regex("\\s+")) }
+        .filter { it.size == 2 && it[0].startsWith("radio") && it[1].startsWith("phy") }
+        .associate { it[0] to it[1] }
+
+    /**
+     * [Commands.PHY_CAPS] → phy name → the channel widths (MHz) it supports.
+     *
+     * 20 is always there. HT40 is the "HT20/HT40" capability. 80 comes with VHT (or HE on a
+     * band that allows it — [ChannelPlan.widths] still applies the band's own ceiling).
+     * 160 needs VHT's "Supported Channel Width" to name it, or HE's "HE160" flag; "neither
+     * 160 nor 80+80" is how iw says a 2×2 Wave 2 chip tops out at 80.
+     */
+    fun phyWidths(text: String): Map<String, Set<Int>> {
+        val out = LinkedHashMap<String, MutableSet<Int>>()
+        var phy: String? = null
+        text.lineSequence().map { it.trim() }.forEach { line ->
+            when {
+                line.startsWith("# ") -> phy = line.removePrefix("# ").trim().also { out[it] = mutableSetOf(20) }
+                phy == null -> Unit
+                line.contains("HT20/HT40") -> out[phy]!! += 40
+                line.startsWith("VHT Capabilities") || line.startsWith("HE PHY Capabilities") ||
+                    line.startsWith("EHT PHY") -> out[phy]!! += setOf(40, 80)
+                line.startsWith("Supported Channel Width") ->
+                    if (!line.contains("neither") && line.contains("160")) out[phy]!! += 160
+                line.contains("HE160") -> out[phy]!! += setOf(40, 80, 160)
+                line.contains("HE80") -> out[phy]!! += setOf(40, 80)
+            }
+        }
+        return out
+    }
+
     /** `uci show wireless` → structured radios and their wifi-iface sections. */
     fun wireless(uci: Map<String, String>): Pair<List<WifiRadio>, List<WifiNetwork>> {
         val radios = mutableListOf<WifiRadio>()
@@ -1429,6 +1558,10 @@ object Parsers {
                     htmode = opt(section, "htmode").orEmpty(),
                     disabled = opt(section, "disabled") == "1",
                     country = opt(section, "country").orEmpty(),
+                    txpower = opt(section, "txpower").orEmpty(),
+                    beamform = (WifiRadio.VHT_BEAMFORM + WifiRadio.HE_BEAMFORM)
+                        .associateWith { opt(section, it).orEmpty() }
+                        .filterValues { it.isNotEmpty() },
                 )
                 // ap and sta only: mesh/adhoc/monitor have no SSID card to draw.
                 "wifi-iface" -> (opt(section, "mode") ?: "ap").let { mode ->
@@ -2193,6 +2326,14 @@ object Parsers {
         val forward: String = "REJECT",
         val synFlood: Boolean = false,
         val dropInvalid: Boolean = false,
+        /**
+         * Software flow offloading: established connections skip the full firewall walk.
+         * The single biggest NAT throughput win on a small CPU — measured on a 775 MHz MIPS
+         * core as softirq dropping from 64% to 21% at the same rate.
+         */
+        val flowOffloading: Boolean = false,
+        /** Hardware offloading; only some switch/NPU silicon (MT7621, Filogic) honours it. */
+        val flowOffloadingHw: Boolean = false,
     )
 
     data class FirewallConfig(
@@ -2209,6 +2350,10 @@ object Parsers {
         val engine: String,
         /** Seconds since the last reload, when the state file says. */
         val reloadedAgoSec: Long?,
+        /** The kernel has the flow-table module, so `flow_offloading` would do something. */
+        val flowOffload: Boolean = false,
+        /** The SoC has an offload engine the flow table can use — MT7621 and MediaTek Filogic. */
+        val hwOffload: Boolean = false,
     )
 
     private fun uciBool(value: String?): Boolean = value == "1" || value == "true" || value == "yes" || value == "on"
@@ -2241,6 +2386,8 @@ object Parsers {
                     forward = opt(section, "forward") ?: "REJECT",
                     synFlood = uciBool(opt(section, "syn_flood")),
                     dropInvalid = uciBool(opt(section, "drop_invalid")),
+                    flowOffloading = uciBool(opt(section, "flow_offloading")),
+                    flowOffloadingHw = uciBool(opt(section, "flow_offloading_hw")),
                 )
                 "zone" -> zones += FwZone(
                     section = section,
@@ -2306,11 +2453,35 @@ object Parsers {
         val engine = parts["engine"].orEmpty().trim().ifEmpty { "fw3" }
         val reloaded = parts["reloaded"]?.trim()?.toLongOrNull()
         val now = parts["now"]?.trim()?.toLongOrNull()
+        val offload = parts["offload"].orEmpty().lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val target = offload.firstOrNull { it != "software" }.orEmpty()
         return FwEngine(
             running = running,
             engine = engine,
             reloadedAgoSec = if (reloaded != null && now != null && now >= reloaded) now - reloaded else null,
+            flowOffload = "software" in offload,
+            hwOffload = hardwareOffloadTargets.any { target.startsWith(it) },
         )
+    }
+
+    /** OpenWrt targets whose SoC can offload flows in hardware. */
+    private val hardwareOffloadTargets = listOf("ramips/mt7621", "mediatek/")
+
+    /**
+     * [Commands.PHY_CAPS] → phy name → whether it can beamform at all. iw lists
+     * "SU Beamformer" / "MU Beamformer" under a radio's VHT (or HE) capabilities; a radio
+     * without either — every 2.4 GHz-only ath9k, say — has no switch worth showing.
+     */
+    fun phyBeamforming(text: String): Map<String, Boolean> {
+        val out = LinkedHashMap<String, Boolean>()
+        var phy: String? = null
+        text.lineSequence().map { it.trim() }.forEach { line ->
+            when {
+                line.startsWith("# ") -> phy = line.removePrefix("# ").trim().also { out[it] = false }
+                phy != null && (line == "SU Beamformer" || line == "MU Beamformer") -> out[phy!!] = true
+            }
+        }
+        return out
     }
 
     /**

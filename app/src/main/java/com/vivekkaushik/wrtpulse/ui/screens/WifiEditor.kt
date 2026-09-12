@@ -59,6 +59,7 @@ fun RadioScreen(store: WifiStore, radio: WifiRadio, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val channel = store.value(radio.section, "channel", radio.channel)
     val htmode = store.value(radio.section, "htmode", radio.htmode)
+    val txpower = store.value(radio.section, "txpower", radio.txpower)
     val on = store.radioEnabled(radio.section)
     val savedDisabled = if (radio.disabled) "1" else "0"
 
@@ -121,13 +122,36 @@ fun RadioScreen(store: WifiStore, radio: WifiRadio, onBack: () -> Unit) {
                     }
                     ChannelSelect(
                         value = ChannelPlan.widthLabel(htmode),
-                        options = ChannelPlan.widths(radio.htmode, radio.band).map { ChannelPlan.widthLabel(it) },
+                        options = ChannelPlan.widths(radio.htmode, radio.band, store.supportedWidths[radio.section])
+                            .map { ChannelPlan.widthLabel(it) },
                         highlight = store.staged.containsKey("${radio.section}.htmode"),
                         onPick = { picked ->
-                            ChannelPlan.widths(radio.htmode, radio.band)
+                            ChannelPlan.widths(radio.htmode, radio.band, store.supportedWidths[radio.section])
                                 .firstOrNull { ChannelPlan.widthLabel(it) == picked }
                                 ?.let { store.stage(radio.section, "htmode", radio.htmode, it) }
                         },
+                    )
+                }
+            }
+            TxPowerRow(store, radio, txpower)
+            // Only where the chip reports SU/MU beamformer capability; a switch the driver
+            // would ignore is worse than none.
+            if (store.supportsBeamforming[radio.section] == true) {
+                val bf = store.beamforming(radio)
+                ToggleCard {
+                    ToggleRow(
+                        "Beamforming",
+                        if (bf) "Transmissions are steered toward each client · su/mu_beamformer, beamformee"
+                        else "Off — every frame is sent omnidirectionally",
+                        bf,
+                        divider = false,
+                    ) { store.setBeamforming(radio, !bf) }
+                }
+                if (store.beamformOptions(radio).any { store.staged.containsKey("${radio.section}.$it") }) {
+                    Text(
+                        "Takes effect when the radio restarts on apply.",
+                        style = sans(10.5f, 400, Wrt.TextDim),
+                        modifier = Modifier.padding(start = 2.dp),
                     )
                 }
             }
@@ -154,6 +178,46 @@ private fun bandHeader(band: String) = when (band) {
 private fun widthLabel(htmode: String): String {
     val digits = htmode.dropWhile { !it.isDigit() }
     return if (digits.isEmpty()) "—" else "$digits MHz"
+}
+
+/**
+ * TX power: "Auto" is the option's absence — the driver's maximum for channel and country —
+ * and the fixed values are the ones the driver listed. What it is actually transmitting at is
+ * shown beside the choice, because it can be lower than what was asked: an ath9k radio asked
+ * for 26 dBm stayed at 18, capped by its calibration data, and nothing in uci moves that.
+ */
+@Composable
+private fun TxPowerRow(store: WifiStore, radio: WifiRadio, txpower: String) {
+    val applied = store.ifnames[radio.section]?.let { store.live[it]?.txPowerDbm }
+    val options = ChannelPlan.txpowerOptions(store.txpowerAccepted[radio.section].orEmpty())
+    val key = "${radio.section}.txpower"
+    Column(Modifier.padding(top = 12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            SectionLabel("TX POWER", size = 9.5f)
+            if (store.staged.containsKey(key)) StatusDot(Wrt.Accent, 5.dp)
+        }
+        val labels = listOf("Auto (max)") + options.map { "$it dBm" }
+        ChannelSelect(
+            value = if (txpower.isEmpty()) "Auto" + (applied?.let { " · $it dBm" } ?: "") else "$txpower dBm",
+            options = labels,
+            highlight = store.staged.containsKey(key),
+            onPick = { picked ->
+                val value = picked.removeSuffix(" dBm").takeIf { picked != "Auto (max)" }.orEmpty()
+                store.stage(radio.section, "txpower", radio.txpower, value)
+            },
+        )
+        val asked = txpower.toIntOrNull()
+        when {
+            options.isEmpty() && txpower.isEmpty() ->
+                Text("Fixed values appear once the radio is up.", style = sans(10.5f, 400, Wrt.TextDim), modifier = Modifier.padding(top = 4.dp))
+            asked != null && applied != null && applied < asked && !store.staged.containsKey(key) ->
+                Text(
+                    "Set to $asked dBm, transmitting at $applied — the driver's calibration caps it there.",
+                    style = sans(10.5f, 400, Wrt.Amber),
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+        }
+    }
 }
 
 private fun channelsFor(band: String) = when (band) {
@@ -226,6 +290,7 @@ private fun LiveChannelChartCard(store: WifiStore, radio: WifiRadio, channel: St
             Text(
                 when {
                     store.scanning -> "scanning…"
+                    cells != null && store.partial[radio.section] == true -> "${cells.size} heard · partial"
                     cells != null -> "${cells.size} neighbors heard"
                     else -> "not scanned yet"
                 },
@@ -260,7 +325,7 @@ private fun LiveChannelChartCard(store: WifiStore, radio: WifiRadio, channel: St
                 }
             }
             // The chart shows the crowding; this says what to do about it.
-            ChannelPlan.advise(radio.band, cells)?.let { advice ->
+            ChannelPlan.advise(radio.band, cells, ChannelPlan.widthOf(store.value(radio.section, "htmode", radio.htmode)))?.let { advice ->
                 Row(
                     Modifier.fillMaxWidth().padding(top = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -299,6 +364,9 @@ private fun LiveChannelChartCard(store: WifiStore, radio: WifiRadio, channel: St
                 modifier = Modifier.padding(top = 8.dp),
             )
         }
+        // After the error, not inside the chart: a failed scan has no chart and still needs
+        // the way out.
+        PartialSurveyNote(store, radio)
     }
 }
 
