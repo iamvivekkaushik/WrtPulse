@@ -15,7 +15,7 @@ default_platform(:android)
 SIGNING_ENV = %w[KEYSTORE_FILE KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD].freeze
 
 platform :android do
-  desc "Unit tests — 770 JVM tests over the parsers and stores"
+  desc "Unit tests — 860-odd JVM tests over the parsers and stores"
   lane :test do
     gradle(task: "testDebugUnitTest")
   end

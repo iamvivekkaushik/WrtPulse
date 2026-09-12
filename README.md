@@ -206,13 +206,21 @@ override the Gradle defaults.
 
 **CI.** `.github/workflows/ci.yml` runs `check` and uploads a debug APK on every push and pull
 request. `.github/workflows/release.yml` fires on a `v*` tag: it restores the keystore from
-`KEYSTORE_BASE64` (`base64 -i release.jks`), stamps `versionName` from the tag and
-`versionCode` from the run number, builds the signed AAB and APK, and attaches both to a GitHub
-Release. If a `PLAY_JSON_KEY_BASE64` secret (the Play Console service-account JSON, base64) is present it also
+`KEYSTORE_BASE64` (`base64 -i release.jks`), reads `versionName` and `versionCode` from
+`app/build.gradle.kts` — refusing a tag that disagrees with the name, or a code that did not move
+since the previous tag — builds the signed AAB and APK, and attaches both to a GitHub Release
+whose body is the release notes. If a `PLAY_JSON_KEY_BASE64` secret (the Play Console service-account JSON, base64) is present it also
 uploads the AAB straight to the production track (no internal-testing stop); without it that step is skipped, so the pipeline is
 useful before Play is set up. Secrets to add under Settings › Secrets and variables › Actions:
 `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`,
 `KEY_PASSWORD`, and optionally `PLAY_JSON_KEY_BASE64`.
+
+**Cutting a release.** Bump `versionCode` and `versionName` in `app/build.gradle.kts`, write the
+notes to `fastlane/metadata/android/en-US/changelogs/<versionCode>.txt` (under 500 characters —
+Play rejects longer; copy them to `default.txt` too, which is the fallback for any version without
+its own file), commit, and tag `v<versionName>`. The one file then goes to both places: `supply`
+uploads it as the Play "What's new", and the GitHub Release uses it as its body, with GitHub's
+generated commit list underneath.
 
 ## Website & privacy policy
 

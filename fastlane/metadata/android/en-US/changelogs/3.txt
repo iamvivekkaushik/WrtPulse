@@ -1,0 +1,7 @@
+• Wired WAN: turn a switch port into the internet uplink from Network › WAN › Add wired uplink, with a timed rollback if the router goes quiet.
+
+• Static routes: Network › Static routes adds, edits and deletes config routes and shows the live kernel table beside them.
+
+• Speedtest moves 20 MB each way for a steadier number. PPPoE is offered again where the ppp plugin is installed.
+
+• About screen (System, or ⓘ on the router list): version and open-source libraries.

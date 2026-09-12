@@ -86,7 +86,13 @@ jobs:
           fi
           echo "name=$name" >> "$GITHUB_OUTPUT"
           echo "code=$code" >> "$GITHUB_OUTPUT"
-          echo "Building $name ($code)"
+          # The release notes are the same file Play gets: changelogs/<versionCode>.txt, or
+          # default.txt when a version has none — so the GitHub Release and the store listing
+          # never tell two stories.
+          notes="fastlane/metadata/android/en-US/changelogs/$code.txt"
+          [[ -f "$notes" ]] || notes="fastlane/metadata/android/en-US/changelogs/default.txt"
+          echo "notes=$notes" >> "$GITHUB_OUTPUT"
+          echo "Building $name ($code), notes from $notes"
 
       - name: Restore signing keystore
         env:
@@ -183,6 +189,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          # The changelog first, GitHub's generated commit list after it.
+          body_path: ${{ steps.version.outputs.notes }}
           generate_release_notes: true
           files: |
             app/build/outputs/apk/release/*.apk
