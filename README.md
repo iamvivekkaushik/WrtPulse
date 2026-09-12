@@ -2,6 +2,9 @@
 
 An Android app for managing OpenWrt routers over SSH.
 
+**Get it on Google Play:** <https://play.google.com/store/apps/details?id=com.vivekkaushik.wrtpulse>
+— or take the APK from the latest [GitHub Release](../../releases/latest).
+
 No agent is installed on the router, no cloud service sits in the middle, and nothing is
 scraped out of LuCI. The app opens an SSH session to the router and runs the same commands
 you would type yourself — `ubus`, `uci`, `iwinfo`, `logread`, `apk`/`opkg`, `sysupgrade` —
