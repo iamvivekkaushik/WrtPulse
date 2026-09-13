@@ -258,6 +258,8 @@ class ConfigArchiveNameTest {
         assertNotEquals(ConfigArchive.tag(home), ConfigArchive.tag(office))
         // A legacy router on a non-default port was filed by host too.
         assertEquals("10.0.0.1", ConfigArchive.tag(com.vivekkaushik.wrtpulse.net.SshTarget("10.0.0.1", 2222, "root", identity = "10.0.0.1:2222")))
+        // A legacy router that moved keeps its shelf: the identity names the old host, not the address.
+        assertEquals("192.168.1.1", ConfigArchive.tag(com.vivekkaushik.wrtpulse.net.SshTarget("192.168.2.2", 22, "root", identity = "192.168.1.1:22")))
         // The tag round-trips through the file name unchanged.
         assertEquals("3f0a-home" to 1_756_500_000L, ConfigArchive.parseName(ConfigArchive.fileName(ConfigArchive.tag(home), 1_756_500_000)))
     }

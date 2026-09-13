@@ -6,6 +6,7 @@ import com.vivekkaushik.wrtpulse.net.SshClient
 import com.vivekkaushik.wrtpulse.net.SshConnection
 import com.vivekkaushik.wrtpulse.net.SshTarget
 import com.vivekkaushik.wrtpulse.ops.Parsers
+import com.vivekkaushik.wrtpulse.ops.WifiNetwork
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -58,11 +59,57 @@ class WifiStoreTest {
         assertEquals("11", r0.channel)
         assertEquals("HE40", r0.htmode)
 
-        assertEquals(2, networks.size) // mesh skipped
+        // The mesh point is kept now, as the backhaul row the Mesh page manages; its id is
+        // where an AP's SSID would be.
+        assertEquals(3, networks.size)
+        val mesh = networks.first { it.section == "mesh0" }
+        assertTrue(mesh.isMesh)
         val guest = networks.first { it.ssid == "Casa-Guest" }
         assertEquals("@wifi-iface[1]", guest.section)
         assertTrue(guest.disabled)
         assertEquals("psk2", guest.encryption)
+    }
+
+    @Test
+    fun `fast roaming on a draft writes the hand-off options with hostapd's mobility domain`() {
+        val s = store()
+        s.radios.add(com.vivekkaushik.wrtpulse.ops.WifiRadio("radio0", "5G", "36", "VHT80", disabled = false))
+        s.addDraft(listOf("radio0"), "ap", "Casa", "psk2", "hunter22", ft = true)
+        val ops = s.ops()
+        assertTrue(ops.any { it.endsWith(".ieee80211r='1'") })
+        assertTrue(ops.any { it.endsWith(".mobility_domain='1113'") })
+        assertTrue(ops.any { it.endsWith(".ft_psk_generate_local='1'") })
+        assertTrue(ops.any { it.endsWith(".bss_transition='1'") })
+        // An open network cannot carry it, whatever the toggle said.
+        val open = store()
+        open.addDraft(listOf("radio0"), "ap", "Open", "none", "", ft = true)
+        assertTrue(open.ops().none { it.contains("ieee80211r") })
+    }
+
+    @Test
+    fun `fast roaming on a saved ap is six sets, and off is six deletes`() {
+        val s = store()
+        val net = WifiNetwork("home", "radio0", "Casa", "psk2", "hunter22", disabled = false, network = "lan")
+        s.networks.add(net)
+        s.stageFastTransition(net, on = true)
+        assertEquals(6, s.ops().size)
+        assertTrue(s.ops().contains("set wireless.home.mobility_domain='1113'"))
+        s.revert()
+        val on = net.copy(ieee80211r = true, mobilityDomain = "1113")
+        s.networks.clear(); s.networks.add(on)
+        s.stageFastTransition(on, on = false)
+        assertTrue(s.ops().contains("delete wireless.home.ieee80211r"))
+        assertTrue(s.ops().contains("delete wireless.home.mobility_domain"))
+        assertTrue(s.ops().contains("delete wireless.home.bss_transition"))
+        assertTrue(s.ops().none { it.startsWith("set ") })
+    }
+
+    /** The mesh point's empty SSID once blocked every apply on a primary. */
+    @Test
+    fun `a mesh point is not a network without a name`() {
+        val s = store()
+        s.networks.add(WifiNetwork("wrtpulse_mesh", "radio1", "", "sae", "meshkey-meshkey", disabled = false, mode = "mesh", network = "lan", meshId = "x-mesh"))
+        assertTrue(s.problems().isEmpty())
     }
 
     @Test

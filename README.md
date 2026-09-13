@@ -17,7 +17,7 @@ cannot, the app does not pretend otherwise.
 |---|---|
 | **Dashboard** | CPU, RAM, flash, load, uptime and live throughput, one batched command per second. The upstream card follows whichever interface actually holds the default route, so it is right whether the WAN is a cable or a Wi-Fi client. Reboot and a speed test live here. |
 | **Clients** | Every device on the router, wireless and wired, with signal, lease, and per-client usage when `nlbwmon` is installed. Rename, block, wake-on-LAN, and DHCP reservations. |
-| **Network** | **LAN & local network** — the subnet, the DHCP server on it, static leases, and the switch VLANs behind it. **Internet & WAN gateways** — the uplinks, their port and VLAN tag, the IPv4 protocol, IPv6 and prefix delegation, and a connection test. Radios and wireless interfaces. Add or edit APs and station (client) links, change channel, width, encryption and SSID. Every change is staged, shown as a diff, and applied in one `uci batch`. Neighbour scans suggest the least busy channel. |
+| **Network** | **LAN & local network** — the subnet, the DHCP server on it, static leases, and the switch VLANs behind it. **Internet & WAN gateways** — the uplinks, their port and VLAN tag, the IPv4 protocol, IPv6 and prefix delegation, and a connection test. Radios and wireless interfaces. Add or edit APs and station (client) links, change channel, width, encryption and SSID. Every change is staged, shown as a diff, and applied in one `uci batch`. Neighbour scans suggest the least busy channel. **Mesh** — seamless hand-off across your SSIDs and your other OpenWrt routers as nodes, wired or over 802.11s. |
 | **Terminal** | A real SSH shell with a VT screen model — cursor addressing, scrollback, selection and paste — and multiple tabs on one connection. |
 | **System** | Live logs (`logread -f`), packages, services, firmware, backup & restore, regulatory domain, and SSH keys. |
 
@@ -45,6 +45,27 @@ address. The one change that ends the session issuing it — moving the router's
 is allowed, and says so before the fact: the connection dies with the reload, the phone keeps
 a lease on the old subnet until it renews, the saved router entry follows the router to its
 new address, and that address is a first contact for host keys.
+
+### Mesh, in more detail
+
+- **Hand-off** — 802.11r fast transition and 802.11k/v steering on every SSID the LAN carries,
+  with the mobility domain derived the way hostapd derives its own default, so a node set up by
+  hand still agrees. Open and WPA1-mixed SSIDs get steering only and say why.
+- **Nodes** — any other saved OpenWrt router becomes a node of the one in hand: the classic
+  dumb AP (static address below the primary's DHCP pool, gateway and DNS pointed at the primary,
+  DHCP, DNS and firewall off, the WAN socket folded into the LAN on DSA, swconfig and
+  separate-netdev boards alike) carrying the primary's SSIDs with hand-off. The join runs on
+  the node while the app is connected to it, from a profile the primary's Mesh page sealed into
+  its saved row — a fresh box rejects SSH on its WAN side, so it cannot be reached the other way.
+- **Wireless backhaul** — an 802.11s point on the primary's 5 GHz radio, pinned to a fixed
+  non-DFS channel, that wireless nodes join and relay for each other. The stock `wpad-basic-*`
+  cannot do 802.11s; the page swaps in `wpad-mesh-*` (one apk transaction, or a download-first
+  opkg sequence that keeps the old build if the new one will not install) and waits for the
+  radios to come back.
+- **Nothing to chase** — the app installs its key first, saves a backup to the phone, writes
+  the node in one batch under a 180-second rollback the node enforces itself, then finds the
+  node at its new address once the phone has hopped to the home Wi-Fi and confirms. Only
+  after that do the services go off. Leave mesh restores the backup and reboots.
 
 ### Internet & WAN gateways, in more detail
 
@@ -254,4 +275,6 @@ to and including the router's `tar -tzf` listing has. The firmware flash itself,
 watch after it, have been built and gated but not yet run end to end on a live router —
 everything up to and including `sysupgrade -T` has.
 
-There is no license file yet, so default copyright applies.
+The mesh join and leave are unit-tested end to end over captured configs (DSA, filtering
+bridge, swconfig, separate WAN netdev) and the wpad swap was simulated against a live router,
+but neither has yet been run against a second physical router.

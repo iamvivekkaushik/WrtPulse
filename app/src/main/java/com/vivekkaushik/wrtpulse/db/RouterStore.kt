@@ -5,6 +5,7 @@ import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
@@ -21,7 +22,7 @@ import java.util.UUID
  * One saved router. The password is never stored as text — [credential] is an
  * AES-GCM blob sealed by a Keystore key, opened only after the biometric gate.
  */
-@Entity(tableName = "routers")
+@Entity(tableName = "routers", indices = [Index(value = ["identity"], unique = true)])
 data class RouterEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,          // display name: hostname, else model, else host
@@ -38,7 +39,18 @@ data class RouterEntity(
      * existed carry "host:port", the scope their pins were already stored under.
      */
     @ColumnInfo(defaultValue = "") val identity: String = "$host:$port",
+    /** Set on a mesh node: the identity of the primary it belongs to. */
+    val meshPrimary: String? = null,
+    /** "wired" or "wireless" — how a node reaches its primary. */
+    val meshBackhaul: String? = null,
+    /** The archive taken just before this router became a node, which Leave mesh restores. */
+    val meshSnapshot: String? = null,
+    /** The MAC of a node's mesh point, so the primary's peer list can name it. */
+    val meshMac: String? = null,
+    /** On a primary: the sealed [com.vivekkaushik.wrtpulse.ops.MeshProfile] nodes are built from. */
+    val meshProfile: ByteArray? = null,
 ) {
+    val isMeshNode: Boolean get() = meshPrimary != null
     /** The connection this row describes, carrying its identity so its own pins apply. */
     val sshTarget: SshTarget get() = SshTarget(host, port, username, identity)
 
@@ -63,8 +75,13 @@ data class RouterEntity(
             summary == other.summary &&
             lastSeenEpoch == other.lastSeenEpoch &&
             identity == other.identity &&
+            meshPrimary == other.meshPrimary &&
+            meshBackhaul == other.meshBackhaul &&
+            meshSnapshot == other.meshSnapshot &&
+            meshMac == other.meshMac &&
             credential.contentEquals(other.credential) &&
-            privateKey.contentEquals(other.privateKey)
+            privateKey.contentEquals(other.privateKey) &&
+            meshProfile.contentEquals(other.meshProfile)
     }
 
     override fun hashCode(): Int {
@@ -79,6 +96,11 @@ data class RouterEntity(
         result = 31 * result + identity.hashCode()
         result = 31 * result + (credential?.contentHashCode() ?: 0)
         result = 31 * result + (privateKey?.contentHashCode() ?: 0)
+        result = 31 * result + (meshPrimary?.hashCode() ?: 0)
+        result = 31 * result + (meshBackhaul?.hashCode() ?: 0)
+        result = 31 * result + (meshSnapshot?.hashCode() ?: 0)
+        result = 31 * result + (meshMac?.hashCode() ?: 0)
+        result = 31 * result + (meshProfile?.contentHashCode() ?: 0)
         return result
     }
 
@@ -144,9 +166,28 @@ interface RouterDao {
 
     @Query("DELETE FROM routers WHERE id = :id")
     suspend fun delete(id: Long)
+
+    /** The nodes of one primary, by its identity. */
+    @Query("SELECT * FROM routers WHERE meshPrimary = :primary ORDER BY name")
+    suspend fun nodesOf(primary: String): List<RouterEntity>
+
+    /** Marks a row as a node of [primary]; nulls across the board make it a plain router again. */
+    @Query(
+        "UPDATE routers SET meshPrimary = :primary, meshBackhaul = :backhaul, " +
+            "meshSnapshot = :snapshot, meshMac = :mac WHERE id = :id"
+    )
+    suspend fun setMesh(id: Long, primary: String?, backhaul: String?, snapshot: String?, mac: String?)
+
+    /** The profile a primary's nodes are built from; null forgets it. */
+    @Query("UPDATE routers SET meshProfile = :profile WHERE id = :id")
+    suspend fun setMeshProfile(id: Long, profile: ByteArray?)
+
+    /** A node that joined with a freshly installed key keeps it, password gone. */
+    @Query("UPDATE routers SET privateKey = :privateKey, credential = NULL WHERE id = :id")
+    suspend fun setPrivateKey(id: Long, privateKey: ByteArray)
 }
 
-@Database(entities = [RouterEntity::class, ClientName::class], version = 4, exportSchema = false)
+@Database(entities = [RouterEntity::class, ClientName::class], version = 6, exportSchema = false)
 abstract class WrtDb : RoomDatabase() {
     abstract fun routers(): RouterDao
     abstract fun clientNames(): ClientNameDao
@@ -178,9 +219,40 @@ abstract class WrtDb : RoomDatabase() {
             }
         }
 
+        /** Mesh membership and the primary's profile: five nullable columns, no backfill. */
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE routers ADD COLUMN meshPrimary TEXT")
+                db.execSQL("ALTER TABLE routers ADD COLUMN meshBackhaul TEXT")
+                db.execSQL("ALTER TABLE routers ADD COLUMN meshSnapshot TEXT")
+                db.execSQL("ALTER TABLE routers ADD COLUMN meshMac TEXT")
+                db.execSQL("ALTER TABLE routers ADD COLUMN meshProfile BLOB")
+            }
+        }
+
+        /**
+         * Identity is what tells two saved routers apart — the session, the host-key pins and
+         * the mesh rows all key on it — so two rows sharing one is two routers the app cannot
+         * tell apart: both light up as connected, and a write meant for one lands on the other.
+         * The index makes that impossible from here on; first, any duplicates that already
+         * exist get a fresh identity, the row seen most recently keeping the old one (and its
+         * pins). The others confirm a fingerprint once more when next opened.
+         */
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "UPDATE routers SET identity = lower(hex(randomblob(16))) WHERE id IN (" +
+                        "SELECT r.id FROM routers r WHERE EXISTS (SELECT 1 FROM routers o " +
+                        "WHERE o.identity = r.identity AND o.id != r.id AND " +
+                        "(o.lastSeenEpoch > r.lastSeenEpoch OR (o.lastSeenEpoch = r.lastSeenEpoch AND o.id < r.id))))"
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_routers_identity ON routers(identity)")
+            }
+        }
+
         fun build(context: Context): WrtDb =
             Room.databaseBuilder(context, WrtDb::class.java, "wrtpulse.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .build()
     }
 }

@@ -56,6 +56,7 @@ import com.vivekkaushik.wrtpulse.data.TerminalSessions
 import com.vivekkaushik.wrtpulse.data.WifiStore
 import com.vivekkaushik.wrtpulse.db.RouterEntity
 import com.vivekkaushik.wrtpulse.net.SshKeys
+import com.vivekkaushik.wrtpulse.net.RouterSession
 import com.vivekkaushik.wrtpulse.net.WrtRuntime
 import com.vivekkaushik.wrtpulse.ui.MainTab
 import com.vivekkaushik.wrtpulse.ui.WrtBottomNav
@@ -144,6 +145,11 @@ private fun WrtPulseApp() {
     // The Keystore blob is only opened after the user passes the screen-lock gate, once per launch.
     var unlocked by remember { mutableStateOf(false) }
     var connectingIdentity by remember { mutableStateOf<String?>(null) }
+    // The primary the join in progress targets, so the persisted row can name it.
+    var joiningPrimary by remember { mutableStateOf<String?>(null) }
+    // Set by the add-a-node guide: once the app connects to the next router, its Network tab
+    // opens the join for this primary by itself.
+    var pendingJoinPrimary by remember { mutableStateOf<String?>(null) }
     val prefs = remember { context.getSharedPreferences("wrtpulse", android.content.Context.MODE_PRIVATE) }
     var biometricEnabled by remember { mutableStateOf(prefs.getBoolean("biometric_gate", true)) }
 
@@ -178,6 +184,9 @@ private fun WrtPulseApp() {
     val resetStore = remember(session) {
         session?.let { ResetStore(it, File(context.filesDir, "backups")) }
     }
+    // The mesh page reads the router like the wireless screen does, plus a ping per node. Read
+    // when the page opens; its profile is sealed into the saved row after every read.
+    val meshStore = remember(session) { session?.let { com.vivekkaushik.wrtpulse.data.MeshStore(it) } }
     LaunchedEffect(backupStore) {
         backupStore?.refreshLocal()
         // "Snapshot before every Apply" (design screen 38). The preference outlives the
@@ -200,6 +209,25 @@ private fun WrtPulseApp() {
     }
     val sshKeyStore = remember(session, appPublicLine) {
         session?.let { SshKeyStore(it, appPublicLine) }
+    }
+    LaunchedEffect(meshStore, savedEntity?.id) {
+        val identity = savedEntity?.identity ?: return@LaunchedEffect
+        // Written only when something in it changed: the store re-reads every few seconds,
+        // and a fresh sealed blob each time would re-emit the saved list just as often.
+        var lastProfile: String? = null
+        meshStore?.profileSink = { profile ->
+            val key = profile.copy(capturedEpoch = 0).toJson()
+            if (key != lastProfile) {
+                // A node's row never carries a profile: it is not a primary, whatever its SSIDs
+                // say. Read fresh, since the row in hand may predate the join that made it a node.
+                val dao = WrtRuntime.db.routers()
+                val row = runCatching { dao.byIdentity(identity) }.getOrNull()
+                if (row != null && row.meshPrimary == null) {
+                    val sealed = WrtRuntime.vault.seal(profile.toJson().toByteArray(Charsets.UTF_8))
+                    if (runCatching { dao.setMeshProfile(row.id, sealed) }.isSuccess) lastProfile = key
+                }
+            }
+        }
     }
     var logsStarted by remember(session) { mutableStateOf(false) }
     // Polling pauses while the app is in the background; the terminal shell stays attached.
@@ -267,7 +295,7 @@ private fun WrtPulseApp() {
             onConnected = {
                 connectingIdentity = null
                 currentRouter = flow.routerName
-                tab = MainTab.Dashboard
+                tab = if (pendingJoinPrimary != null) MainTab.Network else MainTab.Dashboard
                 dest = Dest.Main
                 scope.launch {
                     runCatching { WrtRuntime.db.routers().touch(entity.id, System.currentTimeMillis() / 1000) }
@@ -275,6 +303,23 @@ private fun WrtPulseApp() {
             },
             onKeyChanged = { connectingIdentity = null; hostKeyRouter = entity.host; dest = Dest.HostKey },
         )
+    }
+
+    /**
+     * A second, short-lived session to a saved router on its own credentials — how the mesh
+     * page reaches a node, or a node reaches its primary, without touching the session the
+     * app is driving. One dial, a short timeout, and the caller closes it. Null when the row
+     * has nothing to sign in with.
+     */
+    fun sideSession(entity: RouterEntity): RouterSession? {
+        val keyPem = runCatching { entity.privateKey?.let { WrtRuntime.vault.open(it) } }.getOrNull()
+        val secret = runCatching { entity.credential?.let { WrtRuntime.vault.open(it) } }.getOrNull()
+        val auth: (suspend () -> com.vivekkaushik.wrtpulse.net.SshAuth) = when {
+            keyPem != null -> ({ com.vivekkaushik.wrtpulse.net.SshAuth.PrivateKey(keyPem.copyOf()) })
+            secret != null -> ({ com.vivekkaushik.wrtpulse.net.SshAuth.Password(String(secret, Charsets.UTF_8).toCharArray()) })
+            else -> return null
+        }
+        return RouterSession(entity.sshTarget, WrtRuntime.client, auth, maxAttempts = 1, connectTimeoutMs = 6_000)
     }
 
     fun connectSaved(entity: RouterEntity) {
@@ -323,7 +368,11 @@ private fun WrtPulseApp() {
                     routerSummary = flow.board?.let { b ->
                         listOf(flow.routerName, b.summary).filter { it.isNotBlank() }.joinToString(" · ")
                     },
-                    onFinish = { currentRouter = flow.routerName; tab = MainTab.Dashboard; dest = Dest.Main },
+                    onFinish = {
+                        currentRouter = flow.routerName
+                        tab = if (pendingJoinPrimary != null) MainTab.Network else MainTab.Dashboard
+                        dest = Dest.Main
+                    },
                 )
                 Dest.Boot -> Box(Modifier.fillMaxSize().background(Wrt.BgScreen))
                 Dest.RouterList -> if (aboutFromList) {
@@ -342,6 +391,8 @@ private fun WrtPulseApp() {
                         }
                     },
                     onOpenSaved = { e ->
+                        // A tap on the list is the user's own choice of router, not the guide's.
+                        pendingJoinPrimary = null
                         if (WrtRuntime.session?.isConnected == true && WrtRuntime.session?.target?.identity == e.identity) {
                             currentRouter = e.name
                             tab = MainTab.Dashboard
@@ -350,7 +401,7 @@ private fun WrtPulseApp() {
                             connectSaved(e)
                         }
                     },
-                    onAdd = { flow.startNew(); dest = Dest.Onboarding1 },
+                    onAdd = { pendingJoinPrimary = null; flow.startNew(); dest = Dest.Onboarding1 },
                     onEdit = { e, name, host, port ->
                         scope.launch {
                             runCatching {
@@ -455,6 +506,144 @@ private fun WrtPulseApp() {
                                         }
                                     },
                                     onFullScreen = { networkFullScreen = it },
+                                    meshHooks = com.vivekkaushik.wrtpulse.ui.screens.MeshHooks(
+                                        store = meshStore,
+                                        backup = backupStore,
+                                        saved = savedRouters.orEmpty(),
+                                        current = savedEntity,
+                                        newJoin = { primary ->
+                                            joiningPrimary = primary.identity
+                                            val live = WrtRuntime.session
+                                            val row = savedEntity
+                                            val profile = primary.meshProfile?.let { blob ->
+                                                runCatching { String(WrtRuntime.vault.open(blob), Charsets.UTF_8) }.getOrNull()
+                                            }?.let { com.vivekkaushik.wrtpulse.ops.MeshProfile.fromJson(it) }
+                                            if (live == null || row == null || profile == null) null
+                                            else com.vivekkaushik.wrtpulse.data.MeshJoin(
+                                                session = live,
+                                                client = WrtRuntime.client,
+                                                initialProfile = profile,
+                                                entity = row,
+                                                backups = File(context.filesDir, "backups"),
+                                                existingKeyPem = runCatching { row.privateKey?.let { WrtRuntime.vault.open(it) } }.getOrNull(),
+                                                existingNodes = savedRouters.orEmpty().count { it.meshPrimary == primary.identity },
+                                            )
+                                        },
+                                        // The row follows the node: its new address, its mesh
+                                        // membership, and the key the join installed. A rollback
+                                        // moves it back; the key stays, since authorized_keys is
+                                        // not part of what the node restores.
+                                        persist = { outcome ->
+                                            val row = savedEntity ?: return@MeshHooks
+                                            val dao = WrtRuntime.db.routers()
+                                            runCatching {
+                                                dao.rehost(row.id, outcome.host, row.port)
+                                                outcome.installedKeyPem?.let { dao.setPrivateKey(row.id, WrtRuntime.vault.seal(it)) }
+                                                if (outcome.joined) {
+                                                    dao.setMesh(row.id, joiningPrimary, outcome.backhaul.uci, outcome.snapshot, outcome.meshMac)
+                                                } else {
+                                                    dao.setMesh(row.id, null, null, null, null)
+                                                }
+                                            }
+                                        },
+                                        // The node answers at its new address now. The old
+                                        // session died with the reload; the row already points
+                                        // at the new place, so the ordinary reconnect finds it.
+                                        onJoined = { row ->
+                                            scope.launch {
+                                                runCatching { WrtRuntime.session?.disconnect() }
+                                                WrtRuntime.session = null
+                                                networkFullScreen = false
+                                                tab = MainTab.Dashboard
+                                                val fresh = runCatching { WrtRuntime.db.routers().byIdentity(row.identity) }.getOrNull() ?: row
+                                                dest = Dest.RouterList
+                                                connectSaved(fresh)
+                                            }
+                                        },
+                                        // Like the LAN move: the router is rebooting to its old
+                                        // config at its old address, so the entry follows and
+                                        // the user reconnects from the list.
+                                        onLeft = { lan ->
+                                            val row = savedEntity
+                                            scope.launch {
+                                                row?.let {
+                                                    val dao = WrtRuntime.db.routers()
+                                                    runCatching { dao.setMesh(it.id, null, null, null, null) }
+                                                    if (lan != null) runCatching { dao.rehost(it.id, lan, it.port) }
+                                                }
+                                                if (lan != null) {
+                                                    runCatching { WrtRuntime.session?.disconnect() }
+                                                    WrtRuntime.session = null
+                                                    networkFullScreen = false
+                                                    returnToMain = false
+                                                    tab = MainTab.Dashboard
+                                                    dest = Dest.RouterList
+                                                }
+                                            }
+                                        },
+                                        onOpenRouter = { e ->
+                                            if (WrtRuntime.session?.target?.identity != e.identity) {
+                                                networkFullScreen = false
+                                                connectSaved(e)
+                                            }
+                                        },
+                                        onConnectToJoin = { node, primary ->
+                                            pendingJoinPrimary = primary.identity
+                                            networkFullScreen = false
+                                            dest = Dest.RouterList
+                                            connectSaved(node)
+                                        },
+                                        onAddRouterToJoin = { primary ->
+                                            pendingJoinPrimary = primary.identity
+                                            networkFullScreen = false
+                                            returnToMain = true
+                                            flow.startNew()
+                                            dest = Dest.Onboarding1
+                                        },
+                                        // Only a router other than the primary itself can join it.
+                                        pendingJoin = pendingJoinPrimary
+                                            ?.takeIf { it != savedEntity?.identity }
+                                            ?.let { id -> savedRouters?.firstOrNull { it.identity == id } },
+                                        consumePendingJoin = { pendingJoinPrimary = null },
+                                        // The snapshot Leave mesh would restore: the newest
+                                        // archive of this router on the phone, which for a join
+                                        // this app ran is the one taken just before it.
+                                        markNode = { node, primary, backhaul, mac ->
+                                            val tag = com.vivekkaushik.wrtpulse.data.ConfigArchive.tag(node.sshTarget)
+                                            val snapshot = backupStore?.local?.firstOrNull { it.tag == tag }?.file?.name
+                                            val dao = WrtRuntime.db.routers()
+                                            runCatching {
+                                                dao.setMesh(node.id, primary.identity, backhaul.uci, snapshot, mac)
+                                                dao.setMeshProfile(node.id, null)
+                                            }
+                                        },
+                                        adoptPeer = { node, mac ->
+                                            runCatching {
+                                                WrtRuntime.db.routers().setMesh(node.id, node.meshPrimary, node.meshBackhaul, node.meshSnapshot, mac)
+                                            }
+                                        },
+                                        // A short-lived session to the primary, on its own saved
+                                        // credentials, with one dial and a short timeout: from
+                                        // behind the node's WAN cable it answers; otherwise this
+                                        // gives up in seconds and the stored copy stands.
+                                        openNode = { node -> sideSession(node) },
+                                        refreshProfile = { primary ->
+                                            val probe = sideSession(primary)
+                                            if (probe == null) null else {
+                                                var got: com.vivekkaushik.wrtpulse.ops.MeshProfile? = null
+                                                val reader = com.vivekkaushik.wrtpulse.data.MeshStore(probe)
+                                                reader.nodeEntities = savedRouters.orEmpty().filter { it.meshPrimary == primary.identity }
+                                                reader.profileSink = { got = it }
+                                                runCatching { reader.load() }
+                                                runCatching { probe.disconnect() }
+                                                got?.let { fresh ->
+                                                    val sealed = WrtRuntime.vault.seal(fresh.toJson().toByteArray(Charsets.UTF_8))
+                                                    runCatching { WrtRuntime.db.routers().setMeshProfile(primary.id, sealed) }
+                                                }
+                                                got
+                                            }
+                                        },
+                                    ),
                                 )
                                 MainTab.Clients -> ClientsScreen(
                                     ticker = ticker,
@@ -627,10 +816,15 @@ private fun WrtPulseApp() {
                 )
             }
             SheetHost(visible = showDiff, onDismiss = { showDiff = false }) {
+                val nodeCount = savedRouters.orEmpty().count { it.meshPrimary == savedEntity?.identity }
                 DiffSheetContent(
                     store = wifiStore,
                     routerName = currentRouter,
                     clientCount = inventory?.clients?.size?.takeIf { it > 0 },
+                    meshNote = nodeCount.takeIf { it > 0 }?.let {
+                        "$it mesh node${if (it == 1) "" else "s"} carr${if (it == 1) "ies" else "y"} this router's SSIDs. " +
+                            "After applying, push the change to ${if (it == 1) "it" else "them"} from Network · Mesh."
+                    },
                     onApply = {
                         if (wifiStore != null) {
                             // Read before applying: apply() clears the pending set.

@@ -31,6 +31,8 @@ class RouterSession(
     private val client: SshClient,
     private val credentials: suspend () -> SshAuth,
     private val maxAttempts: Int = 5,
+    /** How long one dial may take. Short for a probe at an address that may not be up yet. */
+    private val connectTimeoutMs: Long = 12_000,
 ) {
     private val mutex = Mutex()
     private var connection: SshConnection? = null
@@ -56,7 +58,7 @@ class RouterSession(
                 if (attempt == 1) ConnectionState.Connecting
                 else ConnectionState.Reconnecting(attempt, maxAttempts)
             try {
-                val fresh = client.connect(target, credentials())
+                val fresh = client.connect(target, credentials(), connectTimeoutMs)
                 connection = fresh
                 _state.value = ConnectionState.Connected(runCatching { fresh.ping() }.getOrDefault(0L))
                 return fresh

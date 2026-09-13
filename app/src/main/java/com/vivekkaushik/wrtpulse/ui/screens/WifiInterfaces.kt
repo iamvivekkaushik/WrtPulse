@@ -791,6 +791,7 @@ fun ApFormScreen(
     var network by remember { mutableStateOf(existing?.network?.ifEmpty { "lan" } ?: draft?.network ?: "lan") }
     var hidden by remember { mutableStateOf(existing?.hidden ?: draft?.hidden ?: false) }
     var isolate by remember { mutableStateOf(existing?.isolate ?: draft?.isolate ?: false) }
+    var ft by remember { mutableStateOf(existing?.ieee80211r ?: draft?.ft ?: false) }
     var reveal by remember { mutableStateOf(false) }
     // Creating a network on a dead radio is almost never what anyone means, so the fix is
     // pre-selected — but it is staged like everything else and shows up in the diff.
@@ -947,14 +948,25 @@ fun ApFormScreen(
                 enable = enableRadios,
                 editing = existing != null,
             ) { enableRadios = !enableRadios }
+            val ftPossible = com.vivekkaushik.wrtpulse.ops.MeshOps.roamingCapable(security)
             ToggleCard {
                 ToggleRow("Hidden SSID", null, hidden, divider = true) { hidden = !hidden }
                 ToggleRow(
                     "Client isolation",
                     "Devices on this SSID can't see each other",
                     isolate,
-                    divider = false,
+                    divider = true,
                 ) { isolate = !isolate }
+                ToggleRow(
+                    "Fast roaming (802.11r)",
+                    if (ftPossible) {
+                        "Hands clients off to any other AP or mesh node with this SSID and password instead of dropping them. A few very old smart-home devices refuse an SSID with it on."
+                    } else {
+                        "Needs WPA2-PSK or WPA3: an open or WPA1-mixed network cannot do the hand-off."
+                    },
+                    ft && ftPossible,
+                    divider = false,
+                ) { if (ftPossible) ft = !ft }
             }
             Text(
                 if (editing) "$ uci set wireless.${existing?.section ?: "<new>"}.…"
@@ -989,6 +1001,10 @@ fun ApFormScreen(
                         store.stage(existing.section, "network", existing.network, network)
                         store.stage(existing.section, "hidden", if (existing.hidden) "1" else "0", if (hidden) "1" else "0")
                         store.stage(existing.section, "isolate", if (existing.isolate) "1" else "0", if (isolate) "1" else "0")
+                        // Only touched when it changes, or when a renamed SSID moves its domain.
+                        if (ft != existing.ieee80211r || (ft && ssid != existing.ssid)) {
+                            store.stageFastTransition(existing, ft, ssid)
+                        }
                     }
                     else -> {
                         draft?.let { store.removeDraft(it.id) }
@@ -1001,6 +1017,7 @@ fun ApFormScreen(
                             hidden = hidden,
                             isolate = isolate,
                             network = network,
+                            ft = ft,
                         )
                     }
                 }
@@ -1507,6 +1524,11 @@ fun NetworkHomeScreen(
     firewall: com.vivekkaushik.wrtpulse.data.FirewallStore? = null,
     onOpenRoutes: () -> Unit = {},
     routes: com.vivekkaushik.wrtpulse.data.RouteStore? = null,
+    onOpenMesh: () -> Unit = {},
+    mesh: com.vivekkaushik.wrtpulse.data.MeshStore? = null,
+    /** The connected router's saved row, for the mesh card to say node or primary. */
+    meshRow: com.vivekkaushik.wrtpulse.db.RouterEntity? = null,
+    meshNodeCount: Int = 0,
 ) {
     // The LAN card's chips are read state, so the tab's landing page is what pays for the
     // round trip — by the time the LAN screen opens, its data is already there.
@@ -1726,8 +1748,47 @@ fun NetworkHomeScreen(
                 if (routes != null && routes.pendingCount > 0) StatusDot(Wrt.Accent, 6.dp)
                 Icon(WrtIcons.ChevronRight, null, Modifier.size(14.dp), tint = Wrt.TextDim)
             }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, Wrt.BorderCard, RoundedCornerShape(14.dp))
+                    .background(Wrt.BgCard, RoundedCornerShape(14.dp))
+                    .clickable(onClick = onOpenMesh)
+                    .padding(horizontal = 14.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Icon(WrtIcons.Mesh, null, Modifier.size(19.dp), tint = Wrt.Accent)
+                Column(Modifier.weight(1f)) {
+                    Text("Mesh", style = sans(14.5f, 650))
+                    Text(
+                        meshSummary(mesh, meshRow, meshNodeCount),
+                        style = mono(10.5f, 500, Wrt.TextDim),
+                        modifier = Modifier.padding(top = 3.dp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Icon(WrtIcons.ChevronRight, null, Modifier.size(14.dp), tint = Wrt.TextDim)
+            }
         }
     }
+}
+
+/** "node of Attic" / "2 nodes · hand-off on" — the section's shape before going in. */
+private fun meshSummary(
+    mesh: com.vivekkaushik.wrtpulse.data.MeshStore?,
+    row: com.vivekkaushik.wrtpulse.db.RouterEntity?,
+    nodes: Int,
+): String {
+    if (mesh == null) return "not connected"
+    if (row?.isMeshNode == true) return "this router is a node · ${row.meshBackhaul ?: ""} backhaul".trim()
+    if (!mesh.loaded) return mesh.error ?: "nodes · hand-off · mesh link"
+    val parts = mutableListOf<String>()
+    parts += if (nodes == 0) "no nodes" else "$nodes node${if (nodes == 1) "" else "s"}"
+    parts += if (mesh.roamingOn) "hand-off on" else "hand-off off"
+    if (mesh.meshIface != null) parts += if (mesh.meshUp) "mesh link up" else "mesh link down"
+    return parts.joinToString(" · ")
 }
 
 /** "3 routes · 2 in kernel" — the section's shape before going in. */
@@ -1845,6 +1906,13 @@ private sealed interface WifiRoute {
     data class ClientScan(val radio: String) : WifiRoute
     data class ClientJoin(val radio: String, val cell: ScanCell?, val section: String?, val draftId: Int?) : WifiRoute
     data class ApForm(val radio: String, val section: String?, val draftId: Int?) : WifiRoute
+    /** The mesh page: nodes, hand-off, the mesh link — a hub, so the tab bar stays. */
+    data object Mesh : WifiRoute
+    /** The join wizard, over the whole screen. */
+    data class MeshJoin(val primary: String) : WifiRoute
+    data object MeshLeave : WifiRoute
+    /** The add-a-node guide on the primary, over the whole screen. */
+    data object MeshAddNode : WifiRoute
 }
 
 @Composable
@@ -1866,6 +1934,8 @@ fun WifiSection(
     onLanMoved: (String) -> Unit,
     /** Full-screen steps hide the tab bar, the way the design draws them. */
     onFullScreen: (Boolean) -> Unit,
+    /** The mesh page's stores and the app-level writes it needs; null on a demo screen. */
+    meshHooks: MeshHooks? = null,
 ) {
     // A real stack: back inside the Network tab has to step through the flow, not leave it.
     val stack = remember { mutableStateListOf<WifiRoute>(WifiRoute.Home) }
@@ -1884,11 +1954,26 @@ fun WifiSection(
     // take over the whole display.
     val fullScreen = route !is WifiRoute.Home && route !is WifiRoute.Interfaces &&
         route !is WifiRoute.Lan && route !is WifiRoute.Wan && route !is WifiRoute.Firewall &&
-        route !is WifiRoute.Routes
+        route !is WifiRoute.Routes && route !is WifiRoute.Mesh
+    // The join in progress, if any. Lives here so a recomposition of the route does not lose it.
+    var join by remember { mutableStateOf<com.vivekkaushik.wrtpulse.data.MeshJoin?>(null) }
     androidx.compose.runtime.LaunchedEffect(fullScreen) { onFullScreen(fullScreen) }
 
     // A router swap resets the flow — the sections it referred to are gone.
     androidx.compose.runtime.LaunchedEffect(store) { resetTo(WifiRoute.Home) }
+
+    // The app was sent to this router to make it a node: open the join straight away. After
+    // the reset above, so the stack is Home → Mesh → Join and back walks it sensibly.
+    androidx.compose.runtime.LaunchedEffect(meshHooks?.pendingJoin?.identity, store) {
+        val primary = meshHooks?.pendingJoin ?: return@LaunchedEffect
+        if (store == null) return@LaunchedEffect
+        meshHooks.consumePendingJoin()
+        val j = meshHooks.newJoin(primary) ?: return@LaunchedEffect
+        join = j
+        resetTo(WifiRoute.Home)
+        push(WifiRoute.Mesh)
+        push(WifiRoute.MeshJoin(primary.identity))
+    }
 
     androidx.activity.compose.BackHandler(
         enabled = uciSection != null || addingOn != null || stack.size > 1,
@@ -1909,6 +1994,8 @@ fun WifiSection(
     fun openEdit(section: String?, draftId: Int?, radioHint: String?) {
         if (store == null) return
         val net = section?.let { s -> store.networks.firstOrNull { it.section == s } }
+        // The mesh backhaul is managed from the Mesh page; here it only shows its lines.
+        if (net?.isMesh == true) { uciSection = net.section; return }
         val draft = draftId?.let { id -> store.drafts.firstOrNull { it.id == id } }
         val radio = net?.device ?: draft?.devices?.firstOrNull() ?: radioHint ?: radios.firstOrNull()?.section
         if (radio == null) return
@@ -1938,7 +2025,49 @@ fun WifiSection(
             onOpenFirewall = { push(WifiRoute.Firewall) },
             onOpenRoutes = { push(WifiRoute.Routes) },
             routes = routes,
+            onOpenMesh = { push(WifiRoute.Mesh) },
+            mesh = meshHooks?.store,
+            meshRow = meshHooks?.current,
+            meshNodeCount = meshHooks?.let { h ->
+                h.saved.count { it.meshPrimary == h.store?.identity } + (h.store?.strayPeers()?.size ?: 0)
+            } ?: 0,
         )
+        is WifiRoute.Mesh -> if (meshHooks != null) MeshScreen(
+            hooks = meshHooks,
+            latencyMs = liveLatencyMs ?: ticker.latencyMs,
+            routerName = routerName,
+            onBack = { pop() },
+            onJoin = { primary ->
+                val j = meshHooks.newJoin(primary)
+                if (j != null) { join = j; push(WifiRoute.MeshJoin(primary.identity)) }
+            },
+            onLeave = { push(WifiRoute.MeshLeave) },
+            onAddNode = { push(WifiRoute.MeshAddNode) },
+        ) else pop()
+        is WifiRoute.MeshAddNode -> if (meshHooks != null) AddNodeScreen(meshHooks, onBack = { pop() }) else pop()
+        is WifiRoute.MeshJoin -> {
+            val j = join
+            if (j == null || meshHooks == null) pop() else JoinMeshScreen(
+                join = j,
+                hooks = meshHooks,
+                persist = meshHooks.persist,
+                onBack = { join = null; pop() },
+                onFinished = {
+                    val row = meshHooks.current
+                    join = null
+                    if (j.done && row != null) meshHooks.onJoined(row) else resetTo(WifiRoute.Mesh)
+                },
+            )
+        }
+        is WifiRoute.MeshLeave -> {
+            val row = meshHooks?.current
+            if (row == null) pop() else LeaveMeshScreen(
+                backup = meshHooks.backup,
+                entity = row,
+                onBack = { pop() },
+                onLeft = { lan -> meshHooks.onLeft(lan) },
+            )
+        }
         is WifiRoute.Routes -> RoutesSection(
             store = routes,
             latencyMs = liveLatencyMs ?: ticker.latencyMs,

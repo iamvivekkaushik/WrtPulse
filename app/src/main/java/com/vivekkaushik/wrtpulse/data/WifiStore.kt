@@ -38,6 +38,8 @@ data class DraftIface(
     val isolate: Boolean = false,
     /** Client only: the firewall zone its network joins. Empty means leave it out of one. */
     val zone: String = "",
+    /** AP only: 802.11r hand-off with every other AP carrying this SSID and key. */
+    val ft: Boolean = false,
 ) {
     val isClient: Boolean get() = mode == "sta"
 }
@@ -316,6 +318,8 @@ class WifiStore(private val session: RouterSession) : Refreshable {
 
     /** Stages one option; staging the saved value back un-stages it. */
     fun stageDelete(section: String) {
+        // The mesh backhaul comes and goes from the Mesh page, where the nodes it carries are in view.
+        if (section == com.vivekkaushik.wrtpulse.ops.MeshOps.MESH_SECTION) return
         if (section !in deletions) deletions.add(section)
     }
 
@@ -366,6 +370,7 @@ class WifiStore(private val session: RouterSession) : Refreshable {
         network: String? = null,
         /** Null takes the safe default: a station with no zone is an uplink to nowhere. */
         zone: String? = null,
+        ft: Boolean = false,
     ): DraftIface {
         val trimmed = ssid.trim()
         val taken = (networks.map { it.section } + radios.map { it.section } +
@@ -390,6 +395,7 @@ class WifiStore(private val session: RouterSession) : Refreshable {
             hidden = hidden,
             isolate = isolate,
             zone = zone ?: if (mode == "sta") "wan" else "",
+            ft = ft && mode == "ap" && com.vivekkaushik.wrtpulse.ops.MeshOps.roamingCapable(encryption),
         )
         drafts.add(draft)
         return draft
@@ -478,6 +484,39 @@ class WifiStore(private val session: RouterSession) : Refreshable {
         add("network" to draft.network)
         if (draft.hidden) add("hidden" to "1")
         if (draft.isolate) add("isolate" to "1")
+        if (draft.ft) addAll(com.vivekkaushik.wrtpulse.ops.MeshOps.roamingOptions(draft.ssid, draft.encryption))
+    }
+
+    /**
+     * Stages 802.11r (and the k/v steering that goes with it) on or off for a saved AP. The
+     * mobility domain follows the SSID the way hostapd's own default does, so this AP and a
+     * mesh node carrying the same name agree without either knowing about the other.
+     */
+    fun stageFastTransition(net: WifiNetwork, on: Boolean, ssid: String = value(net.section, "ssid", net.ssid)) {
+        val encryption = value(net.section, "encryption", net.encryption)
+        val wanted = on && com.vivekkaushik.wrtpulse.ops.MeshOps.roamingCapable(encryption)
+        val savedOn = if (net.ieee80211r) "1" else ""
+        if (wanted) {
+            com.vivekkaushik.wrtpulse.ops.MeshOps.roamingOptions(ssid, encryption).forEach { (option, v) ->
+                val saved = when (option) {
+                    "ieee80211r" -> savedOn
+                    "mobility_domain" -> net.mobilityDomain
+                    else -> ""
+                }
+                stage(net.section, option, saved, v)
+            }
+        } else {
+            // Off is the options' absence. The saved value is taken as set so the delete is
+            // emitted; deleting an option that was never there is a no-op on the router.
+            FT_OPTIONS.forEach { option ->
+                val saved = when (option) {
+                    "ieee80211r" -> savedOn
+                    "mobility_domain" -> net.mobilityDomain
+                    else -> if (net.ieee80211r) "1" else ""
+                }
+                stage(net.section, option, saved, "")
+            }
+        }
     }
 
     fun ops(): List<String> = staged.entries
@@ -590,7 +629,7 @@ class WifiStore(private val session: RouterSession) : Refreshable {
                 key = net.section,
                 section = net.section,
                 draftId = null,
-                ssid = value(net.section, "ssid", net.ssid),
+                ssid = if (net.isMesh) "Mesh link · ${net.meshId}" else value(net.section, "ssid", net.ssid),
                 isClient = net.isClient,
                 isUplink = net.isClient && zoneFor(net.network) == "wan",
                 isNew = false,
@@ -604,6 +643,11 @@ class WifiStore(private val session: RouterSession) : Refreshable {
                     // network is configured and nothing is on the air.
                     !radioOn -> listOf("${net.device} is off", encryption, placeLabel(net.network))
                         .joinToString(" · ")
+                    net.isMesh -> listOfNotNull(
+                        "802.11s backhaul",
+                        if (ifname.isEmpty()) "not up" else "${clientCounts[ifname] ?: 0} peers",
+                        "managed from Network · Mesh",
+                    ).joinToString(" · ")
                     net.isClient -> listOfNotNull(
                         "→ ${value(net.section, "ssid", net.ssid)}",
                         if (!enabled) "disabled" else signal?.let { "$it dBm" },
@@ -615,6 +659,7 @@ class WifiStore(private val session: RouterSession) : Refreshable {
                         encryption,
                         placeLabel(net.network),
                         if (value(net.section, "isolate", if (net.isolate) "1" else "0") == "1") "isolated" else null,
+                        if (net.ieee80211r) "FT" else null,
                     ).joinToString(" · ")
                 },
             )
@@ -655,6 +700,8 @@ class WifiStore(private val session: RouterSession) : Refreshable {
      * off the air — worth stopping before it runs rather than explaining afterwards.
      */
     fun problems(): List<String> = networks.mapNotNull { net ->
+        // A mesh point has a mesh id where an SSID would be, and the Mesh page owns its key.
+        if (net.isMesh) return@mapNotNull null
         val name = value(net.section, "ssid", net.ssid)
         val encryption = value(net.section, "encryption", net.encryption)
         val key = value(net.section, "key", net.key)
@@ -701,8 +748,11 @@ class WifiStore(private val session: RouterSession) : Refreshable {
 
     companion object {
         /** Options whose empty staged value means "remove it", not "set it to nothing". */
+        /** The hand-off options, which come and go together. */
+        val FT_OPTIONS = listOf("ieee80211r", "mobility_domain", "ft_over_ds", "ft_psk_generate_local", "ieee80211k", "bss_transition")
+
         private val DELETE_WHEN_EMPTY: Set<String> =
-            setOf("key", "txpower") + WifiRadio.VHT_BEAMFORM + WifiRadio.HE_BEAMFORM
+            setOf("key", "txpower") + WifiRadio.VHT_BEAMFORM + WifiRadio.HE_BEAMFORM + FT_OPTIONS
 
         /** How long to wait for a detached survey; a scan is seconds, the radio restart most of the rest. */
         private const val SURVEY_WAIT_NANOS = 90_000_000_000L

@@ -233,6 +233,13 @@ class OnboardingFlow(
                     privateKey = keyPem?.let { WrtRuntime.vault.seal(it) },
                     lastSeenEpoch = System.currentTimeMillis() / 1000,
                     identity = identity,
+                    // A reconnect is not a reason to forget what the mesh screens wrote here:
+                    // which primary this router belongs to, or the profile its nodes are built from.
+                    meshPrimary = existing?.meshPrimary,
+                    meshBackhaul = existing?.meshBackhaul,
+                    meshSnapshot = existing?.meshSnapshot,
+                    meshMac = existing?.meshMac,
+                    meshProfile = existing?.meshProfile,
                 )
             )
         }

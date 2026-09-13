@@ -99,10 +99,15 @@ object ConfigArchive {
      * keeps that name and finds what it already took.
      */
     fun tag(target: SshTarget): String {
-        val identity = target.identity
-        return if (identity == null || identity == "${target.host}:${target.port}") safeHost(target.host)
-        else safeHost(identity)
+        val identity = target.identity ?: return safeHost(target.host)
+        // A legacy identity is the address the row had when identities arrived, "host:port",
+        // and its archives are named by that host. The row can move — a subnet change, a mesh
+        // join — and the identity stays, so the name comes from the identity, not the address.
+        LEGACY.matchEntire(identity)?.let { return safeHost(it.groupValues[1]) }
+        return safeHost(identity)
     }
+
+    private val LEGACY = Regex("^([A-Za-z0-9.\\-]+):(\\d+)$")
 
     /** `wrtpulse-<tag>-<epoch>.tar.gz`, [tag] being what [tag] returns. */
     fun fileName(tag: String, epochSeconds: Long = System.currentTimeMillis() / 1000): String =

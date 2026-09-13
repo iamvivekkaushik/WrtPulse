@@ -205,6 +205,8 @@ fun DiffSheetContent(
     clientCount: Int?,
     onApply: () -> Unit,
     onRevertAll: () -> Unit,
+    /** "2 nodes carry these SSIDs…" — set on a mesh primary, where a Wi-Fi change has a wider reach. */
+    meshNote: String? = null,
 ) {
     val opsCount = store?.opCount ?: 3
     val changeCount = store?.pendingCount ?: 3
@@ -273,7 +275,7 @@ fun DiffSheetContent(
                 style = sans(12f, 400, Wrt.AmberText, lineHeight = 18.sp),
             )
         }
-        store?.deletionNotes()?.forEach { note ->
+        (store?.deletionNotes().orEmpty() + listOfNotNull(meshNote)).forEach { note ->
             Row(
                 Modifier
                     .fillMaxWidth()

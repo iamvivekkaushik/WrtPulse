@@ -387,8 +387,14 @@ data class WifiNetwork(
     val network: String = "",  // the uci network it is bridged to: "lan", "wwan", ...
     val hidden: Boolean = false,
     val isolate: Boolean = false,
+    /** 802.11r on this AP — what the mesh screen turns on for seamless hand-off. */
+    val ieee80211r: Boolean = false,
+    val mobilityDomain: String = "",
+    /** An 802.11s point's mesh id; the SSID field is empty on such a section. */
+    val meshId: String = "",
 ) {
     val isClient: Boolean get() = mode == "sta"
+    val isMesh: Boolean get() = mode == "mesh"
 }
 
 /** Cumulative per-host byte counters from `nlbw -c json`, client's perspective. */
@@ -644,6 +650,12 @@ data class LogEntry(
 
 /** One `ip neigh show` entry that has a MAC. */
 data class Neigh(val ip: String, val dev: String, val mac: String, val state: String)
+
+/** One wireless netdev as `iw dev` lists it: name, MAC and type (`AP`, `managed`, `mesh point`). */
+data class IwDev(val ifname: String, val mac: String, val type: String)
+
+/** One peer of a mesh point, from `iw dev <iface> station dump`. */
+data class MeshPeer(val iface: String, val mac: String, val signalDbm: Int?, val established: Boolean)
 
 /** One associated wireless station from `iwinfo <iface> assoclist`. */
 data class Station(
@@ -1592,9 +1604,10 @@ object Parsers {
                         .associateWith { opt(section, it).orEmpty() }
                         .filterValues { it.isNotEmpty() },
                 )
-                // ap and sta only: mesh/adhoc/monitor have no SSID card to draw.
+                // ap, sta and mesh: adhoc/monitor have no card to draw. A mesh point is kept
+                // so the backhaul the mesh screen wrote shows up as a locked row.
                 "wifi-iface" -> (opt(section, "mode") ?: "ap").let { mode ->
-                    if (mode == "ap" || mode == "sta") networks += WifiNetwork(
+                    if (mode == "ap" || mode == "sta" || mode == "mesh") networks += WifiNetwork(
                         section = section,
                         device = opt(section, "device").orEmpty(),
                         ssid = opt(section, "ssid").orEmpty(),
@@ -1605,6 +1618,9 @@ object Parsers {
                         network = opt(section, "network").orEmpty(),
                         hidden = opt(section, "hidden") == "1",
                         isolate = opt(section, "isolate") == "1",
+                        ieee80211r = opt(section, "ieee80211r") == "1",
+                        mobilityDomain = opt(section, "mobility_domain").orEmpty(),
+                        meshId = opt(section, "mesh_id").orEmpty(),
                     )
                 }
             }
@@ -1695,6 +1711,58 @@ object Parsers {
         flush()
         return stations
     }
+
+    /** [Commands.WIFI_MACS] → every wireless netdev with its MAC and type. */
+    fun iwDevs(text: String): List<IwDev> {
+        val out = mutableListOf<IwDev>()
+        var name: String? = null
+        var mac = ""
+        var type = ""
+        fun flush() { name?.let { out += IwDev(it, mac, type) }; name = null; mac = ""; type = "" }
+        text.lineSequence().map { it.trim() }.forEach { line ->
+            when {
+                line.startsWith("Interface ") -> { flush(); name = line.removePrefix("Interface ").trim() }
+                line.startsWith("addr ") -> mac = line.removePrefix("addr ").trim().lowercase()
+                line.startsWith("type ") -> type = line.removePrefix("type ").trim()
+            }
+        }
+        flush()
+        return out
+    }
+
+    /**
+     * [Commands.MESH_PEERS] → the peers of every mesh point. `iw station dump` prints one
+     * `Station <mac> (on <iface>)` header per peer, then its `signal:` and `mesh plink:` lines.
+     */
+    fun meshPeers(text: String): List<MeshPeer> {
+        val out = mutableListOf<MeshPeer>()
+        var iface = ""
+        var mac: String? = null
+        var signal: Int? = null
+        var established = false
+        fun flush() { mac?.let { out += MeshPeer(iface, it, signal, established) }; mac = null; signal = null; established = false }
+        text.lineSequence().map { it.trim() }.forEach { line ->
+            when {
+                line.startsWith("#") -> { flush(); iface = line.removePrefix("#").trim() }
+                line.startsWith("Station ") -> {
+                    flush()
+                    mac = MAC_ANY.find(line)?.value?.lowercase()
+                    Regex("\\(on (\\S+)\\)").find(line)?.groupValues?.get(1)?.let { iface = it }
+                }
+                line.startsWith("signal:") -> signal = Regex("(-?\\d+)").find(line.removePrefix("signal:"))?.value?.toIntOrNull()
+                line.startsWith("mesh plink:") -> established = line.removePrefix("mesh plink:").trim().equals("ESTAB", true)
+            }
+        }
+        flush()
+        return out
+    }
+
+    /** [Commands.pingHosts] output → address to round trip in ms, null when it did not answer. */
+    fun pingResults(text: String): Map<String, Double?> = text.lineSequence().mapNotNull { line ->
+        val f = line.trim().split(Regex("\\s+"))
+        if (f.size < 2 || f[0].isEmpty()) return@mapNotNull null
+        f[0] to f[1].toDoubleOrNull()
+    }.toMap()
 
     private fun rateOf(line: String) =
         Regex("([\\d.]+)\\s*MBit/s").find(line)?.groupValues?.get(1)?.toDoubleOrNull() ?: 0.0

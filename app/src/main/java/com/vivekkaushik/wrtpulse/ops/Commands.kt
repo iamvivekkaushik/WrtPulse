@@ -1223,4 +1223,155 @@ object Commands {
         "uci set dropbear.@dropbear[0].RootPasswordAuth='off'; " +
         "uci commit dropbear; /etc/init.d/dropbear restart"
 
+    // ── Mesh ──────────────────────────────────────────────────────────────────
+    // A primary is read like the wireless screen plus what the nodes need to know; a node is
+    // written in one batch under a rollback like the WAN's, because the batch moves the
+    // node's own address and the app has to find it again afterwards.
+
+    const val MESH_DIR = "/tmp/wrtpulse-mesh"
+
+    /** Whether the installed wpa_supplicant was built with 802.11s. `wpad-basic-*` was not. */
+    const val MESH_CAPABLE = "wpa_supplicant -vmesh >/dev/null 2>&1 && echo yes || echo no"
+
+    /** The wpad variant installed — `wpad-basic-mbedtls`, `wpad-mesh-openssl`, bare `wpad`. */
+    const val WPAD_NAME =
+        "(opkg list-installed 2>/dev/null || apk list -I 2>/dev/null) | grep -oE '^wpad(-[a-z]+)*' | head -n1"
+
+    /** Every mesh point that is up, as `# <ifname>` followed by its `iw station dump`. */
+    const val MESH_PEERS =
+        "for i in \$(iw dev 2>/dev/null | awk '/Interface/{print \$2}'); do " +
+        "if iw dev \$i info 2>/dev/null | grep -q 'type mesh'; then echo \"# \$i\"; " +
+        "iw dev \$i station dump 2>/dev/null; fi; done"
+
+    /** Every wireless netdev with its MAC and type — `iw dev` cut to the lines that matter. */
+    const val WIFI_MACS = "iw dev 2>/dev/null | grep -E 'Interface|addr|type'"
+
+    /** Free overlay space, the same line the package screen reads. */
+    const val OVERLAY_FREE = "df -k /overlay 2>/dev/null | tail -n1"
+
+    /**
+     * One ping per node, all at once: five nodes that are off cost one second, not five.
+     * Prints `<ip> <rtt-ms>` or `<ip> -` per address. Addresses come from the app's own
+     * saved rows and are confined to the characters an address can carry before they get here.
+     */
+    fun pingHosts(ips: List<String>): String {
+        val safe = ips.filter { it.isNotEmpty() && it.all { c -> c.isLetterOrDigit() || c in ".:-" } }
+        if (safe.isEmpty()) return "true"
+        return safe.joinToString(" ") { ip ->
+            "(r=\$(ping -c1 -W1 '$ip' 2>/dev/null | sed -n 's/.*time=\\([0-9.]*\\).*/\\1/p' | head -n1); " +
+                "echo \"$ip \${r:--}\") &"
+        } + " wait"
+    }
+
+    /** Everything the mesh screen reads on a primary, in one round trip. */
+    fun meshState(nodeIps: List<String>): String = listOf(
+        "echo $SECTION uci" to WIRELESS_CONFIG,
+        "echo $SECTION status" to "ubus call network.wireless status 2>/dev/null || echo '{}'",
+        "echo $SECTION net" to NETWORK_CONFIG,
+        "echo $SECTION dhcp" to "uci show dhcp 2>/dev/null",
+        "echo $SECTION iwinfo" to IWINFO,
+        "echo $SECTION capable" to MESH_CAPABLE,
+        "echo $SECTION wpad" to WPAD_NAME,
+        "echo $SECTION pm" to DETECT_PACKAGE_MANAGER,
+        "echo $SECTION peers" to MESH_PEERS,
+        "echo $SECTION macs" to WIFI_MACS,
+        "echo $SECTION leases" to "cat /tmp/dhcp.leases 2>/dev/null",
+        "echo $SECTION neigh" to "ip neigh show",
+        "echo $SECTION df" to OVERLAY_FREE,
+        "echo $SECTION board" to BOARD,
+        "echo $SECTION ping" to pingHosts(nodeIps),
+    ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    /** Everything the join wizard needs to know about the router that is about to become a node. */
+    val MESH_NODE_STATE: String = listOf(
+        "echo $SECTION net" to NETWORK_CONFIG,
+        "echo $SECTION dhcp" to "uci show dhcp 2>/dev/null",
+        "echo $SECTION uci" to WIRELESS_CONFIG,
+        "echo $SECTION status" to "ubus call network.wireless status 2>/dev/null || echo '{}'",
+        "echo $SECTION board" to BOARD_SWITCH,
+        "echo $SECTION swconfig" to SWCONFIG,
+        "echo $SECTION links" to NETDEVS,
+        "echo $SECTION dump" to "ubus call network.interface dump 2>/dev/null || echo '{}'",
+        "echo $SECTION capable" to MESH_CAPABLE,
+        "echo $SECTION wpad" to WPAD_NAME,
+        "echo $SECTION pm" to DETECT_PACKAGE_MANAGER,
+        "echo $SECTION df" to OVERLAY_FREE,
+        "echo $SECTION macs" to WIFI_MACS,
+        "echo $SECTION system" to BOARD,
+    ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    /**
+     * Replaces the wpad build with the one that has 802.11s, detached, because the swap
+     * restarts every radio and takes the link with it. apk does it as one transaction that
+     * also pulls the matching hostapd-common; opkg downloads first so the box is never left
+     * with no wpad at all, and puts the old one back if the new one will not install.
+     * Writes `ok` or `failed` to `$MESH_DIR/swap` when done, which the app polls.
+     */
+    fun wpadSwap(remove: String, install: String, manager: String): String {
+        require(safePackageName(remove) && safePackageName(install)) { "package name" }
+        val safeRemove = remove
+        val safeInstall = install
+        val swap = if (manager == "apk") {
+            "apk update >>$MESH_DIR/swap.log 2>&1; apk add '$safeInstall' '!$safeRemove' >>$MESH_DIR/swap.log 2>&1"
+        } else {
+            "cd /tmp && opkg update >>$MESH_DIR/swap.log 2>&1 && opkg download '$safeInstall' >>$MESH_DIR/swap.log 2>&1 && " +
+                "opkg remove '$safeRemove' >>$MESH_DIR/swap.log 2>&1 && " +
+                "(opkg install /tmp/${safeInstall}_*.ipk >>$MESH_DIR/swap.log 2>&1 || " +
+                "opkg install '$safeRemove' >>$MESH_DIR/swap.log 2>&1); rm -f /tmp/${safeInstall}_*.ipk"
+        }
+        return "mkdir -p $MESH_DIR && rm -f $MESH_DIR/swap && (" +
+            "$swap; [ -x /etc/init.d/wpad ] && /etc/init.d/wpad restart; wifi down; sleep 2; wifi up; sleep 3; " +
+            "if wpa_supplicant -vmesh >/dev/null 2>&1; then echo ok > $MESH_DIR/swap; else echo failed > $MESH_DIR/swap; fi" +
+            ") >/dev/null 2>&1 & echo scheduled"
+    }
+
+    /** What the swap wrote, or `pending` while it is still running. */
+    const val SWAP_STATE = "cat $MESH_DIR/swap 2>/dev/null || echo pending; tail -n 3 $MESH_DIR/swap.log 2>/dev/null"
+
+    /**
+     * The node batch under a rollback. Like [wanApply], but the reload is detached and the reply
+     * comes back before the address moves; the restorer reloads everything it puts back —
+     * network, wireless, dnsmasq's pool and the hostname — since a node's batch touches all of
+     * them. Nothing here disables a service; that waits for [NODE_CONFIRM] so a rollback has
+     * nothing to switch back on.
+     */
+    fun nodeApply(operations: List<String>, packages: List<String>, seconds: Int): String = buildString {
+        val pkgs = packages.ifEmpty { listOf("network") }
+        // The copies are taken in the foreground, before anything is committed: a snapshot
+        // racing the commit it protects against is no snapshot. A failed copy ends the script
+        // with nothing written.
+        append("mkdir -p $MESH_DIR && ")
+        pkgs.forEach { append("cp /etc/config/$it $MESH_DIR/$it && ") }
+        append("rm -f $MESH_DIR/confirm $MESH_DIR/last || exit 1\n")
+        append("(sleep $seconds; [ -f $MESH_DIR/confirm ] && exit 0; ")
+        pkgs.forEach { append("cp $MESH_DIR/$it /etc/config/$it; ") }
+        append("/etc/init.d/network reload; wifi reload; ")
+        append("[ -x /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq restart; $ODHCPD_RELOAD; ")
+        append("/etc/init.d/system reload; ")
+        append("echo rolled-back > $MESH_DIR/last) ")
+        append(">/dev/null 2>&1 &\n")
+        append("uci batch <<'WRTPULSE_EOF'\n")
+        operations.forEach { append(it).append('\n') }
+        append("WRTPULSE_EOF\n")
+        append(pkgs.joinToString(" && ") { "uci commit $it" })
+        // The reply cannot come back over a link this reload is about to re-address.
+        append(" && (sleep 1; /etc/init.d/network reload; wifi reload; /etc/init.d/system reload) >/dev/null 2>&1 & echo scheduled")
+    }
+
+    /** Disarms the node's rollback. Its own tiny command, so a slow service stop cannot cut it off. */
+    const val NODE_CONFIRM = "mkdir -p $MESH_DIR && touch $MESH_DIR/confirm && echo confirmed"
+
+    /** Whether the node put its old config back while the app was finding it. */
+    const val NODE_ROLLBACK_STATE =
+        "cat $MESH_DIR/last 2>/dev/null; [ -f $MESH_DIR/confirm ] && echo confirmed || echo pending"
+
+    /**
+     * What a node stops doing: the primary serves addresses, names and the firewall for the
+     * whole LAN, and a second dnsmasq on the same wire hands out a second set of answers.
+     */
+    const val NODE_SERVICES_OFF =
+        "for s in firewall dnsmasq odhcpd; do [ -x /etc/init.d/\$s ] && " +
+        "{ /etc/init.d/\$s disable; /etc/init.d/\$s stop; } >/dev/null 2>&1; done; " +
+        "/etc/init.d/system reload >/dev/null 2>&1; echo done"
+
 }

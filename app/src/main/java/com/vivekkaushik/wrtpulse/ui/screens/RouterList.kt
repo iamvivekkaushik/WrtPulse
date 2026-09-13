@@ -89,6 +89,7 @@ fun RouterEntity.asRouter(connectedIdentity: String?, connectingIdentity: String
         wanIp = null,
         detail = (if (privateKey != null) "key · " else "") +
             (if (status == RouterStatus.Online) "connected" else agoLabel(lastSeenEpoch)),
+        meshNode = isMeshNode,
         switcherDetail = listOf(host, summary.substringBefore(" · ")).filter { it.isNotBlank() }.joinToString(" · "),
         latencyMs = null,
     )
@@ -402,6 +403,13 @@ internal fun routerAddressNotes(
  * session outlives its entry.
  */
 internal fun forgetRouterNotes(entity: RouterEntity, connectedIdentity: String?): List<String> = buildList {
+    if (entity.isMeshNode) {
+        add(
+            "This router is a mesh node. Its pre-mesh backup is filed under this entry; delete the " +
+                "entry and Leave mesh can no longer find it. Leave the mesh from Network · Mesh first " +
+                "if you want the router back the way it was."
+        )
+    }
     if (entity.privateKey != null) {
         add(
             "The app's SSH key stays in this router's authorized_keys. Remove it from " +
@@ -449,10 +457,24 @@ private fun RouterCard(r: Router, onClick: () -> Unit, modifier: Modifier = Modi
         )
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(r.name, style = sans(14.5f, 650, if (offline) Wrt.TextSecondary else Wrt.TextPrimary))
+                Text(
+                    r.name,
+                    style = sans(14.5f, 650, if (offline) Wrt.TextSecondary else Wrt.TextPrimary),
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                // An address never wraps: the column it sits in gives way to the name instead.
                 MonoTag(r.tag, color = if (offline) Wrt.TextDim else Wrt.TextTertiary, border = if (offline) Wrt.BorderFaint else Wrt.BorderInput, size = 8.5f)
+                if (r.meshNode) MonoTag("NODE", color = Wrt.Accent, border = Wrt.Accent.copy(alpha = 0.45f), size = 8f)
             }
-            Text(r.model, style = sans(11.5f, 400, Wrt.TextDim), modifier = Modifier.padding(top = 4.dp))
+            Text(
+                r.model,
+                style = sans(11.5f, 400, Wrt.TextDim),
+                modifier = Modifier.padding(top = 4.dp),
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
         }
         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -467,7 +489,7 @@ private fun RouterCard(r: Router, onClick: () -> Unit, modifier: Modifier = Modi
                 )
             }
             if (r.wanIp != null) Text(r.wanIp, style = mono(11f, 500, Wrt.TextTertiary))
-            Text(r.detail, style = sans(11f, 400, Wrt.TextDim))
+            Text(r.detail, style = sans(11f, 400, Wrt.TextDim), maxLines = 1)
         }
     }
 }

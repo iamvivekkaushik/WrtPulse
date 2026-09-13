@@ -174,6 +174,14 @@ object WrtIcons {
         "M4 9.5a12 12 0 0116 0", "M7 13a8 8 0 0110 0", "M10 16.5a4 4 0 014 0",
         "M12 18.3 A1.1 1.1 0 1 1 11.99 18.3 Z",
     )
+    /** Three nodes joined in a triangle — the mesh, as distinct from one radio's waves. */
+    val Mesh = stroked(
+        "mesh", 1.7f,
+        "M12 5.5 A2.2 2.2 0 1 1 11.99 5.5 Z",
+        "M5.5 17.5 A2.2 2.2 0 1 1 5.49 17.5 Z",
+        "M18.5 17.5 A2.2 2.2 0 1 1 18.49 17.5 Z",
+        "M10.95 7.43 6.55 15.57", "M13.05 7.43 17.45 15.57", "M7.7 17.5h8.6",
+    )
     val IotWifi = stroked(
         "iotWifi", 1.7f,
         "M12 3a6 6 0 0 0-4 10.5c.7.7 1 1.5 1 2.5h6c0-1 .3-1.8 1-2.5A6 6 0 0 0 12 3Z",

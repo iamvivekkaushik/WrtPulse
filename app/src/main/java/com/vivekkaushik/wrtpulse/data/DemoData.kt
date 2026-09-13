@@ -14,6 +14,8 @@ data class Router(
     val detail: String,      // third line on the list card ("23 clients", "snapshot r26550", "last seen 2 d ago")
     val switcherDetail: String,
     val latencyMs: Int?,     // null while not connected
+    /** A mesh node of another saved router: a small tag on the card, not words in the status. */
+    val meshNode: Boolean = false,
 )
 
 data class Client(
