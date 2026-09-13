@@ -225,7 +225,7 @@ fun BackupScreen(
                 store.local.forEachIndexed { index, backup ->
                     BackupRow(
                         backup = backup,
-                        otherRouter = backup.host != store.safeHost,
+                        otherRouter = backup.tag != store.tag,
                         confirmDelete = confirmDelete == backup.name,
                         onShare = { shareBackup(context, backup.file) },
                         onSave = { saving = backup; saver.launch(backup.name) },

@@ -341,6 +341,13 @@ fun OnboardingFingerprintScreen(flow: OnboardingFlow, onConfirm: () -> Unit, onB
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
+            if (flow.sameAddress.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    sameAddressNote(flow.sameAddress, target.host),
+                    style = sans(11.5f, 500, Wrt.AmberText, lineHeight = 17.sp),
+                )
+            }
             if (flow.error != null) {
                 Spacer(Modifier.height(12.dp))
                 ErrorCard(flow.error!!)
@@ -351,6 +358,20 @@ fun OnboardingFingerprintScreen(flow: OnboardingFlow, onConfirm: () -> Unit, onB
         Spacer(Modifier.height(8.dp))
         GhostButton("Not mine — go back", onClick = onBack)
     }
+}
+
+/**
+ * The first-contact screen's warning when a saved router already answers at this address
+ * with a different key. Confirming here saves a second entry, which is right for a second
+ * router on another network and wrong for the same board after a reflash — and only the
+ * person holding the phone knows which this is.
+ */
+internal fun sameAddressNote(names: List<String>, host: String): String {
+    val who = names.joinToString(", ") { "\u201c$it\u201d" }
+    val verb = if (names.size == 1) "is" else "are"
+    return "$who $verb also saved at $host, with a different key. If this is that router " +
+        "after a reset or reflash, go back and open it from your list instead so the " +
+        "changed key is reviewed rather than saved as a new router."
 }
 
 @Composable

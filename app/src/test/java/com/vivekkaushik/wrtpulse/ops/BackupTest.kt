@@ -7,6 +7,7 @@ import com.vivekkaushik.wrtpulse.data.RestoreCandidate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -239,6 +240,26 @@ class ConfigArchiveNameTest {
         assertNull(ConfigArchive.parseName("notes.txt"))
         assertNull(ConfigArchive.parseName("wrtpulse-host-abc.tar.gz"))
         assertNull(ConfigArchive.parseName("backup-192.168.2.1-1756500000.tar.gz"))
+    }
+
+    /**
+     * Two routers on one address must not share a backup shelf, so archives are filed by the
+     * saved router's identity. Routers saved before identities existed — identity "host:port"
+     * — were filed by host, and keep that name so their archives are still theirs.
+     */
+    @Test
+    fun `archives are filed by identity, and legacy routers keep their host name`() {
+        val legacy = com.vivekkaushik.wrtpulse.net.SshTarget("192.168.1.1", 22, "root", identity = "192.168.1.1:22")
+        val home = com.vivekkaushik.wrtpulse.net.SshTarget("192.168.1.1", 22, "root", identity = "3f0a-home")
+        val office = com.vivekkaushik.wrtpulse.net.SshTarget("192.168.1.1", 22, "root", identity = "9c2b-office")
+        assertEquals("192.168.1.1", ConfigArchive.tag(legacy))
+        assertEquals("192.168.1.1", ConfigArchive.tag(com.vivekkaushik.wrtpulse.net.SshTarget("192.168.1.1")))
+        assertEquals("3f0a-home", ConfigArchive.tag(home))
+        assertNotEquals(ConfigArchive.tag(home), ConfigArchive.tag(office))
+        // A legacy router on a non-default port was filed by host too.
+        assertEquals("10.0.0.1", ConfigArchive.tag(com.vivekkaushik.wrtpulse.net.SshTarget("10.0.0.1", 2222, "root", identity = "10.0.0.1:2222")))
+        // The tag round-trips through the file name unchanged.
+        assertEquals("3f0a-home" to 1_756_500_000L, ConfigArchive.parseName(ConfigArchive.fileName(ConfigArchive.tag(home), 1_756_500_000)))
     }
 }
 

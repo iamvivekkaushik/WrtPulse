@@ -38,8 +38,24 @@ class OnboardingFlow(
     var password by mutableStateOf("")
     var gateway by mutableStateOf<String?>(null)
 
+    /**
+     * Which saved router this attempt belongs to — the scope its host key is pinned under, and
+     * the row [persist] writes. A fresh add gets a new one; opening a saved router takes the
+     * row's. See [SshTarget.identity] for why the address cannot play this part.
+     */
+    var identity: String = RouterEntity.newIdentity()
+        private set
+
     /** Set when connecting a saved router that has a stored key, or after installing one. */
     var keyPem: ByteArray? = null
+
+    /**
+     * Saved routers that also answer at this address but hold a different key, by name. The
+     * first-contact screen shows them: a router someone reflashed and then re-added by
+     * address would otherwise be saved a second time without a word about the old entry.
+     */
+    var sameAddress by mutableStateOf<List<String>>(emptyList())
+        private set
 
     var busy by mutableStateOf(false)
         private set
@@ -57,7 +73,25 @@ class OnboardingFlow(
             host = host.trim(),
             port = port.trim().toIntOrNull() ?: 22,
             username = username.trim().ifEmpty { "root" },
+            identity = identity,
         )
+
+    /** "Add router": a blank form under a new identity. */
+    fun startNew() {
+        identity = RouterEntity.newIdentity()
+        keyPem = null
+        password = ""
+        sameAddress = emptyList()
+    }
+
+    /** Open a saved router: its address, its user, and its identity so its own pins apply. */
+    fun startSaved(entity: RouterEntity) {
+        identity = entity.identity
+        host = entity.host
+        port = entity.port.toString()
+        username = entity.username
+        sameAddress = emptyList()
+    }
 
     val routerName: String
         get() = board?.hostname?.takeIf { it.isNotBlank() }
@@ -76,7 +110,25 @@ class OnboardingFlow(
                 probed = presented
                 val saved = hostKeys.saved(t, presented.type)
                 when {
-                    saved == null -> onFirstContact()
+                    saved == null -> {
+                        // Nothing pinned under this identity. Before calling it a first
+                        // contact, ask whether a saved router at this address already holds
+                        // this very key: then it is that router, typed in again, and it
+                        // must not be saved twice — nor asked to confirm a fingerprint it
+                        // confirmed once already.
+                        val here = runCatching {
+                            WrtRuntime.db.routers().atAddress(t.host, t.port, t.username)
+                        }.getOrDefault(emptyList())
+                        val twin = twinOf(presented, here) { hostKeys.saved(it.sshTarget, presented.type) }
+                        if (twin != null) {
+                            identity = twin.identity
+                            openSession(target)
+                            onConnected()
+                        } else {
+                            sameAddress = here.filter { it.identity != identity }.map { it.name }
+                            onFirstContact()
+                        }
+                    }
                     saved.base64 == presented.base64 -> {
                         openSession(t)
                         onConnected()
@@ -167,7 +219,7 @@ class OnboardingFlow(
     private suspend fun persist(t: SshTarget) {
         runCatching {
             val dao = WrtRuntime.db.routers()
-            val existing = dao.find(t.host, t.port, t.username)
+            val existing = dao.byIdentity(identity)
             dao.upsert(
                 RouterEntity(
                     id = existing?.id ?: 0,
@@ -180,6 +232,7 @@ class OnboardingFlow(
                     credential = if (keyPem == null) WrtRuntime.vault.seal(password.toByteArray()) else null,
                     privateKey = keyPem?.let { WrtRuntime.vault.seal(it) },
                     lastSeenEpoch = System.currentTimeMillis() / 1000,
+                    identity = identity,
                 )
             )
         }
@@ -221,6 +274,21 @@ class OnboardingFlow(
     }
 
     companion object {
+
+        /**
+         * The saved router, among those at this address, that [presented] belongs to — or
+         * null when none holds this key, which makes the router in hand a new one.
+         *
+         * Same key, same router: a Deco that was added once and is being typed in again is
+         * found here and reused. A different key is a different router (or the same board
+         * after a reflash, which the first-contact screen says out loud), and address alone
+         * is never enough to say otherwise.
+         */
+        fun twinOf(
+            presented: HostKey,
+            atAddress: List<RouterEntity>,
+            pinned: (RouterEntity) -> HostKey?,
+        ): RouterEntity? = atAddress.firstOrNull { pinned(it)?.base64 == presented.base64 }
 
         /**
          * The name to write for a router that is already saved.

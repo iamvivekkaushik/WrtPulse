@@ -16,10 +16,14 @@ class HostKeyStore(private val file: File) {
     private val entries = linkedMapOf<String, HostKey>()
     private var loaded = false
 
-    // One entry per (host, port, key type) — the same rule known_hosts follows. A router can
+    // One entry per (router, key type) — the rule known_hosts follows, with the saved router's
+    // identity standing in for the address (see [SshTarget.identity]). A router can
     // legitimately offer ed25519 and RSA, and which one is negotiated depends on the client's
-    // available algorithms, so pinning a single key per host produces false mismatches.
-    private fun key(target: SshTarget, type: String) = "${target.host}:${target.port}:$type"
+    // available algorithms, so pinning a single key per router produces false mismatches.
+    // Entries written before identities existed are keyed "host:port:type", which is exactly
+    // what a target with no identity still resolves to, so nothing needs re-pairing.
+    private fun key(target: SshTarget, type: String) = "${target.pinScope}:$type"
+    private fun prefix(target: SshTarget) = "${target.pinScope}:"
 
     @Synchronized
     private fun load() {
@@ -55,7 +59,7 @@ class HostKeyStore(private val file: File) {
     @Synchronized
     fun savedAll(target: SshTarget): List<HostKey> {
         load()
-        val prefix = "${target.host}:${target.port}:"
+        val prefix = prefix(target)
         return entries.entries.filter { it.key.startsWith(prefix) }.map { it.value }
     }
 
@@ -74,7 +78,7 @@ class HostKeyStore(private val file: File) {
     @Synchronized
     fun forget(target: SshTarget) {
         load()
-        val prefix = "${target.host}:${target.port}:"
+        val prefix = prefix(target)
         val removed = entries.keys.filter { it.startsWith(prefix) }
         if (removed.isNotEmpty()) {
             removed.forEach(entries::remove)

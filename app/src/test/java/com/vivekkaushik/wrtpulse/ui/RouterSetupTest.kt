@@ -1,12 +1,15 @@
 package com.vivekkaushik.wrtpulse.ui
 
 import com.vivekkaushik.wrtpulse.db.RouterEntity
+import com.vivekkaushik.wrtpulse.net.HostKey
+import com.vivekkaushik.wrtpulse.net.HostKeyStore
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingFlow
 import com.vivekkaushik.wrtpulse.ui.screens.forgetRouterNotes
 import com.vivekkaushik.wrtpulse.ui.screens.routerAddress
 import com.vivekkaushik.wrtpulse.ui.screens.routerAddressNotes
 import com.vivekkaushik.wrtpulse.ui.screens.routerEditBlock
 import com.vivekkaushik.wrtpulse.ui.screens.routerName
+import com.vivekkaushik.wrtpulse.ui.screens.sameAddressNote
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertFalse
@@ -73,32 +76,32 @@ class ForgetRouterNotesTest {
 
     @Test
     fun `forgetting always says the router itself is untouched`() {
-        val notes = forgetRouterNotes(entity(), connectedHost = null)
+        val notes = forgetRouterNotes(entity(), connectedIdentity = null)
         assertTrue(notes.any { it.contains("Nothing changes on the router") })
     }
 
     /** The app cannot take its key back off the router by deleting a local row. */
     @Test
     fun `a stored key warns that it stays in authorized_keys`() {
-        val notes = forgetRouterNotes(entity(key = byteArrayOf(9)), connectedHost = null)
+        val notes = forgetRouterNotes(entity(key = byteArrayOf(9)), connectedIdentity = null)
         assertTrue(notes.any { it.contains("authorized_keys") })
     }
 
     @Test
     fun `no stored key means no key warning`() {
-        val notes = forgetRouterNotes(entity(key = null), connectedHost = null)
+        val notes = forgetRouterNotes(entity(key = null), connectedIdentity = null)
         assertFalse(notes.any { it.contains("authorized_keys") })
     }
 
     @Test
     fun `forgetting the router you are connected to says the session survives`() {
-        val notes = forgetRouterNotes(entity(host = "192.168.2.1"), connectedHost = "192.168.2.1")
+        val notes = forgetRouterNotes(entity(host = "192.168.2.1"), connectedIdentity = "192.168.2.1:22")
         assertTrue(notes.any { it.contains("session stays open") })
     }
 
     @Test
     fun `a different connected router raises no session note`() {
-        val notes = forgetRouterNotes(entity(host = "192.168.2.1"), connectedHost = "10.0.0.1")
+        val notes = forgetRouterNotes(entity(host = "192.168.2.1"), connectedIdentity = "10.0.0.1:22")
         assertFalse(notes.any { it.contains("session stays open") })
     }
 }
@@ -248,48 +251,111 @@ class RouterAddressTest {
 
     @Test
     fun `a name and an address are both required`() {
-        val e = entity()
-        assertNotNull(routerEditBlock("", "192.168.1.1", e, listOf(e)))
-        assertNotNull(routerEditBlock("home.gw", "", e, listOf(e)))
-        assertNull(routerEditBlock("home.gw", "192.168.2.1", e, listOf(e)))
+        assertNotNull(routerEditBlock("", "192.168.1.1"))
+        assertNotNull(routerEditBlock("home.gw", ""))
+        assertNull(routerEditBlock("home.gw", "192.168.2.1"))
     }
 
     /**
-     * Two rows on the same address, port and user are the same router twice, and which
-     * credential gets used then depends on list order.
+     * Two routers on two networks can both answer at 192.168.1.1. Each row carries its own
+     * credential and pinned host key, so an address another entry holds is no clash — the
+     * key tells them apart when the app connects.
      */
     @Test
-    fun `an address another entry already holds is refused`() {
-        val a = entity(id = 1, name = "home.gw", host = "192.168.1.1")
-        val b = entity(id = 2, name = "lab", host = "192.168.2.1")
-        val block = routerEditBlock("lab", "192.168.1.1", b, listOf(a, b))
-        assertNotNull(block)
-        assertTrue(block!!.contains("home.gw"))
-        // The same address on a different port is a different endpoint.
-        assertNull(routerEditBlock("lab", "192.168.1.1:2222", b, listOf(a, b)))
-        // And an entry never clashes with itself.
-        assertNull(routerEditBlock("home.gw", "192.168.1.1", a, listOf(a, b)))
+    fun `an address another entry already holds is allowed`() {
+        assertNull(routerEditBlock("lab", "192.168.1.1"))
     }
 
     /** The confusion worth heading off: this is not the screen that moves the router. */
     @Test
     fun `changing the address says what it does not do`() {
         val e = entity()
-        val notes = routerAddressNotes(e, "192.168.2.1", connectedHost = null)
+        val notes = routerAddressNotes(e, "192.168.2.1", connectedIdentity = null)
         assertTrue(notes.any { it.contains("not the router's own address") })
-        assertTrue(notes.any { it.contains("first contact") })
+        // The pin moves with the entry: no re-accepting a fingerprint, and a mismatch at the
+        // new address is a different router, said in those words.
+        assertTrue(notes.any { it.contains("moves with it") && it.contains("changed-key warning") })
+        assertFalse(notes.any { it.contains("first contact:") })
     }
 
     @Test
     fun `an unchanged address needs no warning`() {
         val e = entity()
-        assertEquals(emptyList<String>(), routerAddressNotes(e, "192.168.1.1", connectedHost = null))
+        assertEquals(emptyList<String>(), routerAddressNotes(e, "192.168.1.1", connectedIdentity = null))
     }
 
     @Test
     fun `a live session is called out as staying where it is`() {
         val e = entity()
-        val notes = routerAddressNotes(e, "192.168.2.1", connectedHost = "192.168.1.1")
+        val notes = routerAddressNotes(e, "192.168.2.1", connectedIdentity = e.identity)
         assertTrue(notes.any { it.contains("stays on 192.168.1.1") })
+    }
+
+    /** Which row is live is decided by identity, since two rows can share an address. */
+    @Test
+    fun `a session on another router at the same address does not count as this one`() {
+        val e = entity()
+        val notes = routerAddressNotes(e, "192.168.2.1", connectedIdentity = "some-other-router")
+        assertFalse(notes.any { it.contains("stays on") })
+    }
+}
+
+/**
+ * Two routers, one address. Each saved row is its own router, told apart by the host key it
+ * presents — never by where it answers.
+ */
+class RouterIdentityTest {
+
+    private fun key(body: String) = HostKey("ssh-ed25519", body, HostKeyStore.fingerprint(body.toByteArray()))
+
+    private fun row(id: Long, name: String, identity: String) = RouterEntity(
+        id = id, name = name, host = "192.168.1.1", port = 22, username = "root",
+        model = "", summary = "", credential = null, lastSeenEpoch = 0, identity = identity,
+    )
+
+    @Test
+    fun `a fresh row gets its own identity and a legacy row keeps host and port`() {
+        assertNotEquals(RouterEntity.newIdentity(), RouterEntity.newIdentity())
+        val legacy = RouterEntity(
+            id = 1, name = "home", host = "192.168.1.1", port = 2222, username = "root",
+            model = "", summary = "", credential = null, lastSeenEpoch = 0,
+        )
+        assertEquals("192.168.1.1:2222", legacy.identity)
+        assertEquals("192.168.1.1:2222", legacy.sshTarget.pinScope)
+        assertEquals("id-x", row(1, "home", "id-x").sshTarget.identity)
+    }
+
+    /** Typing a saved router's address again finds the row that holds its key. */
+    @Test
+    fun `the same key at the same address is the same router`() {
+        val home = row(1, "home", "id-home")
+        val office = row(2, "office", "id-office")
+        val pins = mapOf("id-home" to key("HOME"), "id-office" to key("OFFICE"))
+        assertEquals(office, OnboardingFlow.twinOf(key("OFFICE"), listOf(home, office)) { pins[it.identity] })
+        assertEquals(home, OnboardingFlow.twinOf(key("HOME"), listOf(home, office)) { pins[it.identity] })
+    }
+
+    /** A new key at a taken address is a new router, not the old one changing. */
+    @Test
+    fun `a different key at the same address is a different router`() {
+        val home = row(1, "home", "id-home")
+        assertNull(OnboardingFlow.twinOf(key("OTHER"), listOf(home)) { key("HOME") })
+        assertNull(OnboardingFlow.twinOf(key("OTHER"), emptyList()) { null })
+    }
+
+    @Test
+    fun `the first-contact screen names who else lives at the address`() {
+        val one = sameAddressNote(listOf("home.gw"), "192.168.1.1")
+        assertTrue(one, one.contains("\u201chome.gw\u201d is also saved at 192.168.1.1"))
+        assertTrue(one.contains("reflash"))
+        val two = sameAddressNote(listOf("home.gw", "lab"), "192.168.1.1")
+        assertTrue(two, two.contains("\u201chome.gw\u201d, \u201clab\u201d are also saved"))
+    }
+
+    /** Identity is part of equality, so a row re-keyed to a different router recomposes. */
+    @Test
+    fun `identity takes part in row equality`() {
+        assertNotEquals(row(1, "home", "a"), row(1, "home", "b"))
+        assertEquals(row(1, "home", "a"), row(1, "home", "a"))
     }
 }

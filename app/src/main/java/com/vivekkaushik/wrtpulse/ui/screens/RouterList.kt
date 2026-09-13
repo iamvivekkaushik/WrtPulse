@@ -73,10 +73,12 @@ fun agoLabel(epoch: Long, nowEpoch: Long = System.currentTimeMillis() / 1000): S
     }
 }
 
-fun RouterEntity.asRouter(connectedHost: String?, connectingHost: String?): Router {
-    val status = when (host) {
-        connectingHost -> RouterStatus.Reconnecting
-        connectedHost -> RouterStatus.Online
+fun RouterEntity.asRouter(connectedIdentity: String?, connectingIdentity: String?): Router {
+    // By identity, not address: two saved routers can share 192.168.1.1, and only one of
+    // them is the one the session is on.
+    val status = when (identity) {
+        connectingIdentity -> RouterStatus.Reconnecting
+        connectedIdentity -> RouterStatus.Online
         else -> RouterStatus.Saved
     }
     return Router(
@@ -116,8 +118,8 @@ fun demoRouterMatches(r: Router, query: String): Boolean {
 @Composable
 fun RouterListScreen(
     saved: List<RouterEntity>?,
-    connectedHost: String?,
-    connectingHost: String?,
+    connectedIdentity: String?,
+    connectingIdentity: String?,
     error: String?,
     onOpenRouter: (Router) -> Unit,
     onOpenSaved: (RouterEntity) -> Unit,
@@ -217,7 +219,7 @@ fun RouterListScreen(
                             corner = 14.dp,
                         ) { swipe ->
                             RouterCard(
-                                e.asRouter(connectedHost, connectingHost),
+                                e.asRouter(connectedIdentity, connectingIdentity),
                                 onClick = { onOpenSaved(e) },
                                 modifier = swipe,
                             )
@@ -252,8 +254,7 @@ fun RouterListScreen(
         renaming?.let { entity ->
             EditRouterDialog(
                 entity = entity,
-                others = saved.orEmpty(),
-                connectedHost = connectedHost,
+                connectedIdentity = connectedIdentity,
                 onDismiss = { renaming = null },
                 onConfirm = { name, host, port ->
                     renaming = null
@@ -264,7 +265,7 @@ fun RouterListScreen(
         confirmDelete?.let { entity ->
             ForgetRouterDialog(
                 entity = entity,
-                connectedHost = connectedHost,
+                connectedIdentity = connectedIdentity,
                 onDismiss = { confirmDelete = null },
                 onConfirm = { onDelete(entity); confirmDelete = null },
             )
@@ -356,26 +357,13 @@ internal fun routerAddress(input: String): Pair<String, Int?>? {
 /**
  * Why an edited entry cannot be saved, or null when it can.
  *
- * The duplicate check is the one that matters: two rows pointing at the same address, port
- * and user are the same router twice, and the second one's credential is the one that gets
- * used or not depending on list order.
+ * Another entry on the same address is not a reason. Two routers on two networks can both
+ * answer at 192.168.1.1; each row is opened on its own, carries its own credential and its
+ * own pinned host key, and the key is what tells them apart at connect time.
  */
-internal fun routerEditBlock(
-    name: String,
-    address: String,
-    entity: RouterEntity,
-    others: List<RouterEntity>,
-): String? {
+internal fun routerEditBlock(name: String, address: String): String? {
     if (routerName(name) == null) return "A router needs a name to show on its card."
-    val parsed = routerAddress(address) ?: return "Enter an address — an IP or a hostname."
-    val (host, port) = parsed
-    val clash = others.firstOrNull {
-        it.id != entity.id && it.host == host &&
-            it.port == (port ?: entity.port) && it.username == entity.username
-    }
-    if (clash != null) {
-        return "\u201c${clash.name}\u201d already points at $host as ${entity.username}."
-    }
+    routerAddress(address) ?: return "Enter an address — an IP or a hostname."
     return null
 }
 
@@ -389,7 +377,7 @@ internal fun routerEditBlock(
 internal fun routerAddressNotes(
     entity: RouterEntity,
     address: String,
-    connectedHost: String?,
+    connectedIdentity: String?,
 ): List<String> = buildList {
     val host = routerAddress(address)?.first ?: return@buildList
     if (host == entity.host) return@buildList
@@ -398,10 +386,10 @@ internal fun routerAddressNotes(
             "To move the router itself, use Network · LAN & local network while connected to it."
     )
     add(
-        "Host keys are pinned per address, so $host counts as a first contact: its " +
-            "fingerprint is shown for you to accept the next time you connect."
+        "The host key saved for this entry moves with it. If a different router answers at " +
+            "$host, you get the changed-key warning, not a first-contact prompt."
     )
-    if (connectedHost != null && connectedHost == entity.host) {
+    if (connectedIdentity != null && connectedIdentity == entity.identity) {
         add("The session open on ${entity.host} right now stays on ${entity.host} until you reconnect.")
     }
 }
@@ -413,17 +401,17 @@ internal fun routerAddressNotes(
  * the ones the app cannot undo for you: a key it installed stays installed, and a live
  * session outlives its entry.
  */
-internal fun forgetRouterNotes(entity: RouterEntity, connectedHost: String?): List<String> = buildList {
+internal fun forgetRouterNotes(entity: RouterEntity, connectedIdentity: String?): List<String> = buildList {
     if (entity.privateKey != null) {
         add(
             "The app's SSH key stays in this router's authorized_keys. Remove it from " +
                 "System · SSH keys first if you want it gone."
         )
     }
-    if (connectedHost != null && connectedHost == entity.host) {
+    if (connectedIdentity != null && connectedIdentity == entity.identity) {
         add("You are connected to this router now. The session stays open, but the saved entry goes.")
     }
-    add("Its saved password or key is deleted from this phone. Nothing changes on the router.")
+    add("Its saved password or key and its pinned host key are deleted from this phone. Nothing changes on the router.")
 }
 
 @Composable
@@ -497,8 +485,7 @@ private data class Quad(val c: Color, val s: String, val p: Boolean, val ms: Int
 @Composable
 private fun EditRouterDialog(
     entity: RouterEntity,
-    others: List<RouterEntity>,
-    connectedHost: String?,
+    connectedIdentity: String?,
     onDismiss: () -> Unit,
     onConfirm: (String, String, Int) -> Unit,
 ) {
@@ -506,8 +493,8 @@ private fun EditRouterDialog(
     var address by remember(entity.id) {
         mutableStateOf(if (entity.port == 22) entity.host else "${entity.host}:${entity.port}")
     }
-    val block = routerEditBlock(name, address, entity, others)
-    val notes = routerAddressNotes(entity, address, connectedHost)
+    val block = routerEditBlock(name, address)
+    val notes = routerAddressNotes(entity, address, connectedIdentity)
     val parsed = routerAddress(address)
     Dialog(onDismissRequest = onDismiss) {
         Column(
@@ -616,7 +603,7 @@ private fun DialogField(value: String, onChange: (String) -> Unit) {
 @Composable
 private fun ForgetRouterDialog(
     entity: RouterEntity,
-    connectedHost: String?,
+    connectedIdentity: String?,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
@@ -639,7 +626,7 @@ private fun ForgetRouterDialog(
                 style = mono(10.5f, 500, Wrt.TextDim),
                 modifier = Modifier.padding(top = 3.dp),
             )
-            forgetRouterNotes(entity, connectedHost).forEach {
+            forgetRouterNotes(entity, connectedIdentity).forEach {
                 Text(it, style = sans(10.5f, 500, Wrt.AmberText), modifier = Modifier.padding(top = 10.dp))
             }
             Spacer(Modifier.height(16.dp))

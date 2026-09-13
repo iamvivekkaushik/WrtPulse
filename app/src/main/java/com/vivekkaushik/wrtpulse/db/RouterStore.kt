@@ -1,6 +1,7 @@
 package com.vivekkaushik.wrtpulse.db
 
 import android.content.Context
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
@@ -12,7 +13,9 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.vivekkaushik.wrtpulse.net.SshTarget
 import kotlinx.coroutines.flow.Flow
+import java.util.UUID
 
 /**
  * One saved router. The password is never stored as text — [credential] is an
@@ -30,7 +33,15 @@ data class RouterEntity(
     val credential: ByteArray?,
     val lastSeenEpoch: Long,
     val privateKey: ByteArray? = null,  // sealed OpenSSH PEM; when set, key auth replaces the password
+    /**
+     * What host keys are pinned to — see [SshTarget.identity]. Rows saved before this column
+     * existed carry "host:port", the scope their pins were already stored under.
+     */
+    @ColumnInfo(defaultValue = "") val identity: String = "$host:$port",
 ) {
+    /** The connection this row describes, carrying its identity so its own pins apply. */
+    val sshTarget: SshTarget get() = SshTarget(host, port, username, identity)
+
     /**
      * Compared field by field, with content equality for the sealed blobs.
      *
@@ -51,6 +62,7 @@ data class RouterEntity(
             model == other.model &&
             summary == other.summary &&
             lastSeenEpoch == other.lastSeenEpoch &&
+            identity == other.identity &&
             credential.contentEquals(other.credential) &&
             privateKey.contentEquals(other.privateKey)
     }
@@ -64,9 +76,15 @@ data class RouterEntity(
         result = 31 * result + model.hashCode()
         result = 31 * result + summary.hashCode()
         result = 31 * result + lastSeenEpoch.hashCode()
+        result = 31 * result + identity.hashCode()
         result = 31 * result + (credential?.contentHashCode() ?: 0)
         result = 31 * result + (privateKey?.contentHashCode() ?: 0)
         return result
+    }
+
+    companion object {
+        /** A fresh identity for a router being added. Opaque; never shown. */
+        fun newIdentity(): String = UUID.randomUUID().toString()
     }
 }
 
@@ -97,8 +115,16 @@ interface RouterDao {
     @Query("SELECT COUNT(*) FROM routers")
     suspend fun count(): Int
 
-    @Query("SELECT * FROM routers WHERE host = :host AND port = :port AND username = :username LIMIT 1")
-    suspend fun find(host: String, port: Int, username: String): RouterEntity?
+    @Query("SELECT * FROM routers WHERE identity = :identity LIMIT 1")
+    suspend fun byIdentity(identity: String): RouterEntity?
+
+    /**
+     * Every row that knocks on this address as this user. More than one is legitimate — two
+     * networks, two routers, both at 192.168.1.1 — which is why this is a list and not a
+     * lookup: the caller tells them apart by host key, not by address.
+     */
+    @Query("SELECT * FROM routers WHERE host = :host AND port = :port AND username = :username")
+    suspend fun atAddress(host: String, port: Int, username: String): List<RouterEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(router: RouterEntity): Long
@@ -120,7 +146,7 @@ interface RouterDao {
     suspend fun delete(id: Long)
 }
 
-@Database(entities = [RouterEntity::class, ClientName::class], version = 3, exportSchema = false)
+@Database(entities = [RouterEntity::class, ClientName::class], version = 4, exportSchema = false)
 abstract class WrtDb : RoomDatabase() {
     abstract fun routers(): RouterDao
     abstract fun clientNames(): ClientNameDao
@@ -141,9 +167,20 @@ abstract class WrtDb : RoomDatabase() {
             }
         }
 
+        /**
+         * Existing rows take "host:port" as their identity — the scope their host keys were
+         * pinned under all along — so nobody re-confirms a fingerprint after the upgrade.
+         */
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE routers ADD COLUMN identity TEXT NOT NULL DEFAULT ''")
+                db.execSQL("UPDATE routers SET identity = host || ':' || port WHERE identity = ''")
+            }
+        }
+
         fun build(context: Context): WrtDb =
             Room.databaseBuilder(context, WrtDb::class.java, "wrtpulse.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build()
     }
 }

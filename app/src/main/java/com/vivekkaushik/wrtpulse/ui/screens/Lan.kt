@@ -1538,10 +1538,9 @@ private fun MovedPanel(address: String, onDone: () -> Unit) {
             modifier = Modifier.padding(top = 8.dp),
         )
         Text(
-            "Host keys are pinned per address, so $address is a first contact and its " +
-                "fingerprint is shown for you to accept. If a different router once answered " +
-                "on $address, the changed-key warning appears instead — that is the old pin, " +
-                "not an interception.",
+            "The saved host key moves with this router's entry, so reconnecting at $address " +
+                "is not a first contact. A changed-key warning there would mean a different " +
+                "router is answering, not a stale pin.",
             style = sans(12.5f, 400, Wrt.TextDim, lineHeight = 19.sp),
             modifier = Modifier.padding(top = 8.dp),
         )

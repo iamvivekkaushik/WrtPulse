@@ -16,8 +16,8 @@ import java.security.MessageDigest
 /** A config archive kept on the phone, in the app's private storage. */
 data class LocalBackup(
     val file: File,
-    /** The address it was pulled from, as the filename carries it. */
-    val host: String,
+    /** Which router it was pulled from, as the filename carries it — see [ConfigArchive.tag]. */
+    val tag: String,
     val createdEpoch: Long,
     val bytes: Long,
     /** `option hostname` inside the archive — what the row shows, since addresses move. */
@@ -113,10 +113,12 @@ class BackupStore(private val session: RouterSession, private val directory: Fil
     var restoring by mutableStateOf(false); private set
 
     val host: String get() = session.target.host
-    val safeHost: String get() = ConfigArchive.safeHost(host)
+
+    /** What this router's archives are filed under: its identity, not its address. */
+    val tag: String get() = ConfigArchive.tag(session.target)
 
     /** The newest archive taken from THIS router, which is what the System row reports. */
-    val lastBackup: LocalBackup? get() = local.firstOrNull { it.host == safeHost }
+    val lastBackup: LocalBackup? get() = local.firstOrNull { it.tag == tag }
 
     /** Cheap: a directory listing. Called on entry and after anything that changes it. */
     fun refreshLocal() {
@@ -125,7 +127,7 @@ class BackupStore(private val session: RouterSession, private val directory: Fil
                 ConfigArchive.parseName(f.name)?.let { (h, t) ->
                     LocalBackup(
                         file = f,
-                        host = h,
+                        tag = h,
                         createdEpoch = t,
                         bytes = f.length(),
                         hostname = hostnameIn(f),
@@ -229,7 +231,7 @@ class BackupStore(private val session: RouterSession, private val directory: Fil
         when (val pulled = ConfigArchive.pull(session, directory, board?.release) { progress = it }) {
             is ConfigArchive.Pull.Done -> {
                 refreshLocal()
-                prune(local.filter { it.host == safeHost }.map { it.file }, AUTO_KEEP).forEach {
+                prune(local.filter { it.tag == tag }.map { it.file }, AUTO_KEEP).forEach {
                     runCatching { ConfigArchive.releaseFile(it).delete() }
                     it.delete()
                 }

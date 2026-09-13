@@ -72,6 +72,60 @@ class HostKeyStoreTest {
         assertTrue(reloaded.isKnown(SshTarget("192.168.2.2")))
     }
 
+    /**
+     * The bug: two routers on two networks both answer at 192.168.1.1. Pinned by address, the
+     * second one's key read as the first one's key CHANGING — the red interception screen —
+     * and the two could not be saved side by side. Pinned by the saved router's identity,
+     * each holds its own key and the other is a first contact.
+     */
+    @Test
+    fun `two routers on the same address are pinned apart by identity`() {
+        val store = store()
+        val home = SshTarget("192.168.1.1", identity = "id-home")
+        val office = SshTarget("192.168.1.1", identity = "id-office")
+        val homeKey = key("ssh-ed25519", "AAAAHOME")
+        val officeKey = key("ssh-ed25519", "AAAAOFFICE")
+        store.trust(home, homeKey)
+
+        val error = runCatching { store.verify(office, officeKey) }.exceptionOrNull()
+        assertTrue("expected first contact, got $error", error is SshException.UnknownHostKey)
+
+        store.trust(office, officeKey)
+        store.verify(home, homeKey)
+        store.verify(office, officeKey)
+        // Each still refuses the other's key: the address is shared, the identity is not.
+        assertTrue(runCatching { store.verify(home, officeKey) }.exceptionOrNull() is SshException.HostKeyChanged)
+        store.forget(home)
+        assertNull(store.saved(home, "ssh-ed25519"))
+        assertEquals(officeKey, store.saved(office, "ssh-ed25519"))
+    }
+
+    /** A pin follows its router across an address change; it was never about the address. */
+    @Test
+    fun `a moved router keeps its pin under its identity`() {
+        val store = store()
+        val k = key("ssh-ed25519", "AAAAC3Nza")
+        store.trust(SshTarget("192.168.1.1", identity = "id-home"), k)
+        store.verify(SshTarget("10.0.0.1", identity = "id-home"), k)
+    }
+
+    /**
+     * Entries written before identities existed are "host:port:type" on disk. A target with
+     * no identity — and a migrated row, whose identity IS "host:port" — reads them unchanged,
+     * so nobody re-confirms a fingerprint after the upgrade.
+     */
+    @Test
+    fun `pins from before identities still verify`() {
+        val file = File.createTempFile("known-hosts", ".txt")
+        val body = "AAAAC3Nza"
+        file.writeText("192.168.2.1:22:ssh-ed25519 ssh-ed25519 $body ${HostKeyStore.fingerprint(body.toByteArray())}")
+        val store = HostKeyStore(file)
+        val k = key("ssh-ed25519", body)
+        store.verify(SshTarget("192.168.2.1"), k)
+        store.verify(SshTarget("192.168.2.1", identity = "192.168.2.1:22"), k)
+        assertEquals("192.168.2.1:22", SshTarget("192.168.2.1").pinScope)
+    }
+
     @Test
     fun `fingerprints match the openssh form shown in the ui`() {
         // ssh-keygen prints base64 without padding.

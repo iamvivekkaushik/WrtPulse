@@ -143,7 +143,7 @@ private fun WrtPulseApp() {
 
     // The Keystore blob is only opened after the user passes the screen-lock gate, once per launch.
     var unlocked by remember { mutableStateOf(false) }
-    var connectingHost by remember { mutableStateOf<String?>(null) }
+    var connectingIdentity by remember { mutableStateOf<String?>(null) }
     val prefs = remember { context.getSharedPreferences("wrtpulse", android.content.Context.MODE_PRIVATE) }
     var biometricEnabled by remember { mutableStateOf(prefs.getBoolean("biometric_gate", true)) }
 
@@ -192,7 +192,7 @@ private fun WrtPulseApp() {
     // The app's own public key, so the keys screen can recognise the entry it is signed in
     // with and refuse to delete it. Derived from the sealed private key, keyed on the saved
     // row so a routine lastSeen touch does not re-open the Keystore.
-    val savedEntity = savedRouters?.firstOrNull { it.host == WrtRuntime.session?.target?.host }
+    val savedEntity = savedRouters?.firstOrNull { it.identity == WrtRuntime.session?.target?.identity }
     val appPublicLine = remember(savedEntity?.id, savedEntity?.privateKey?.size) {
         runCatching { savedEntity?.privateKey?.let { WrtRuntime.vault.open(it) } }.getOrNull()
             ?.let { SshKeys.publicLineFrom(it) }
@@ -250,9 +250,7 @@ private fun WrtPulseApp() {
     fun doConnect(entity: RouterEntity) {
         val keyPem = runCatching { entity.privateKey?.let { WrtRuntime.vault.open(it) } }.getOrNull()
         val secret = runCatching { entity.credential?.let { WrtRuntime.vault.open(it) } }.getOrNull()
-        flow.host = entity.host
-        flow.port = entity.port.toString()
-        flow.username = entity.username
+        flow.startSaved(entity)
         if (keyPem == null && secret == null) {
             // No stored credential (or the Keystore key changed): fall back to onboarding, prefilled.
             flow.password = ""
@@ -262,11 +260,11 @@ private fun WrtPulseApp() {
         }
         flow.keyPem = keyPem
         flow.password = secret?.let { String(it, Charsets.UTF_8) } ?: ""
-        connectingHost = entity.host
+        connectingIdentity = entity.identity
         flow.connect(
-            onFirstContact = { connectingHost = null; dest = Dest.Onboarding2 },
+            onFirstContact = { connectingIdentity = null; dest = Dest.Onboarding2 },
             onConnected = {
-                connectingHost = null
+                connectingIdentity = null
                 currentRouter = flow.routerName
                 tab = MainTab.Dashboard
                 dest = Dest.Main
@@ -274,7 +272,7 @@ private fun WrtPulseApp() {
                     runCatching { WrtRuntime.db.routers().touch(entity.id, System.currentTimeMillis() / 1000) }
                 }
             },
-            onKeyChanged = { connectingHost = null; hostKeyRouter = entity.host; dest = Dest.HostKey },
+            onKeyChanged = { connectingIdentity = null; hostKeyRouter = entity.host; dest = Dest.HostKey },
         )
     }
 
@@ -332,8 +330,8 @@ private fun WrtPulseApp() {
                 } else RouterListScreen(
                     onAbout = { aboutFromList = true },
                     saved = savedRouters,
-                    connectedHost = if (WrtRuntime.session?.isConnected == true) WrtRuntime.session?.target?.host else null,
-                    connectingHost = if (flow.busy) connectingHost else null,
+                    connectedIdentity = if (WrtRuntime.session?.isConnected == true) WrtRuntime.session?.target?.identity else null,
+                    connectingIdentity = if (flow.busy) connectingIdentity else null,
                     error = flow.error,
                     onOpenRouter = { r ->
                         when (r.status) {
@@ -343,7 +341,7 @@ private fun WrtPulseApp() {
                         }
                     },
                     onOpenSaved = { e ->
-                        if (WrtRuntime.session?.isConnected == true && WrtRuntime.session?.target?.host == e.host) {
+                        if (WrtRuntime.session?.isConnected == true && WrtRuntime.session?.target?.identity == e.identity) {
                             currentRouter = e.name
                             tab = MainTab.Dashboard
                             dest = Dest.Main
@@ -351,7 +349,7 @@ private fun WrtPulseApp() {
                             connectSaved(e)
                         }
                     },
-                    onAdd = { flow.keyPem = null; flow.password = ""; dest = Dest.Onboarding1 },
+                    onAdd = { flow.startNew(); dest = Dest.Onboarding1 },
                     onEdit = { e, name, host, port ->
                         scope.launch {
                             runCatching {
@@ -368,9 +366,13 @@ private fun WrtPulseApp() {
                         if (currentRouter == e.name) currentRouter = name
                     },
                     onDelete = { e ->
-                        // Local only: the row and its sealed credential go, the router is
-                        // never touched. RouterList spells that out before confirming.
-                        scope.launch { runCatching { WrtRuntime.db.routers().delete(e.id) } }
+                        // Local only: the row, its sealed credential and its pinned host key
+                        // go; the router is never touched. RouterList spells that out before
+                        // confirming.
+                        scope.launch {
+                            runCatching { WrtRuntime.db.routers().delete(e.id) }
+                            runCatching { WrtRuntime.hostKeys.forget(e.sshTarget) }
+                        }
                     },
                 )
                 Dest.HostKey -> {
@@ -432,11 +434,12 @@ private fun WrtPulseApp() {
                                     // A subnet change took the session with it. The saved
                                     // entry follows the router to its new address, and the
                                     // user goes back to the list to reconnect there — the
-                                    // app cannot reach the old address any more, and the new
-                                    // one is a first contact for host keys.
+                                    // app cannot reach the old address any more. The pinned
+                                    // host key belongs to the entry, not the address, so it
+                                    // follows too and reconnecting is not a first contact.
                                     onLanMoved = { host ->
                                         val entity = savedRouters?.firstOrNull {
-                                            it.host == WrtRuntime.session?.target?.host
+                                            it.identity == WrtRuntime.session?.target?.identity
                                         }
                                         scope.launch {
                                             entity?.let {
@@ -546,7 +549,7 @@ private fun WrtPulseApp() {
                                         board = flow.board,
                                         country = wifiStore?.radios?.firstOrNull { it.country.isNotBlank() }?.country,
                                         sshKeyInstalled = if (telemetry != null) {
-                                            savedRouters?.firstOrNull { it.host == WrtRuntime.session?.target?.host }
+                                            savedRouters?.firstOrNull { it.identity == WrtRuntime.session?.target?.identity }
                                                 ?.privateKey != null
                                         } else null,
                                         biometricEnabled = if (telemetry != null) biometricEnabled else null,
@@ -594,11 +597,11 @@ private fun WrtPulseApp() {
                     ticker = ticker,
                     currentRouter = currentRouter,
                     saved = savedRouters,
-                    connectedHost = if (WrtRuntime.session?.isConnected == true) WrtRuntime.session?.target?.host else null,
+                    connectedIdentity = if (WrtRuntime.session?.isConnected == true) WrtRuntime.session?.target?.identity else null,
                     liveLatencyMs = telemetry?.latencyMs,
                     onPickSaved = { e ->
                         showSwitcher = false
-                        if (WrtRuntime.session?.target?.host != e.host || WrtRuntime.session?.isConnected != true) {
+                        if (WrtRuntime.session?.target?.identity != e.identity || WrtRuntime.session?.isConnected != true) {
                             dest = Dest.RouterList
                             connectSaved(e)
                         }
@@ -616,8 +619,7 @@ private fun WrtPulseApp() {
                     onManage = { showSwitcher = false; returnToMain = true; dest = Dest.RouterList },
                     onAdd = {
                         showSwitcher = false
-                        flow.keyPem = null
-                        flow.password = ""
+                        flow.startNew()
                         returnToMain = true
                         dest = Dest.Onboarding1
                     },

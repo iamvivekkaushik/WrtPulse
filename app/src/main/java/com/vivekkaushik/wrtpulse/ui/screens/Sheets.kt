@@ -109,7 +109,7 @@ fun SwitcherSheetContent(
     ticker: LiveTicker,
     currentRouter: String,
     saved: List<com.vivekkaushik.wrtpulse.db.RouterEntity>? = null,
-    connectedHost: String? = null,
+    connectedIdentity: String? = null,
     liveLatencyMs: Int? = null,
     onPickSaved: (com.vivekkaushik.wrtpulse.db.RouterEntity) -> Unit = {},
     onPick: (Router) -> Unit,
@@ -125,7 +125,7 @@ fun SwitcherSheetContent(
         }
         Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             val entries: List<Pair<Router, com.vivekkaushik.wrtpulse.db.RouterEntity?>> =
-                saved?.map { e -> e.asRouter(connectedHost, null) to e }
+                saved?.map { e -> e.asRouter(connectedIdentity, null) to e }
                     ?: Demo.routers.map { it to null }
             entries.forEach { (r, entity) ->
                 val selected = if (saved != null) r.status == RouterStatus.Online else r.name == currentRouter

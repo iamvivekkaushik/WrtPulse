@@ -2,6 +2,7 @@ package com.vivekkaushik.wrtpulse.data
 
 import com.vivekkaushik.wrtpulse.net.RouterSession
 import com.vivekkaushik.wrtpulse.net.SshException
+import com.vivekkaushik.wrtpulse.net.SshTarget
 import com.vivekkaushik.wrtpulse.ops.Commands
 import com.vivekkaushik.wrtpulse.ops.Parsers
 import java.io.File
@@ -75,7 +76,7 @@ object ConfigArchive {
                     )
                 } else {
                     directory.mkdirs()
-                    val file = File(directory, fileName(session.target.host))
+                    val file = File(directory, fileName(tag(session.target)))
                     file.writeBytes(bytes)
                     release?.takeIf { it.isNotBlank() }
                         ?.let { runCatching { releaseFile(file).writeText(it) } }
@@ -91,11 +92,23 @@ object ConfigArchive {
     /** The host as a filename can carry it. */
     fun safeHost(host: String): String = host.replace(Regex("[^A-Za-z0-9.-]"), "_")
 
-    /** `wrtpulse-<host>-<epoch>.tar.gz`. */
-    fun fileName(host: String, epochSeconds: Long = System.currentTimeMillis() / 1000): String =
-        "wrtpulse-${safeHost(host)}-$epochSeconds.tar.gz"
+    /**
+     * Which router an archive is filed under: the saved router's identity, so two routers
+     * that share an address keep separate backups. A router saved before identities existed
+     * carries "host:port" as its identity and its archives were named by host alone, so it
+     * keeps that name and finds what it already took.
+     */
+    fun tag(target: SshTarget): String {
+        val identity = target.identity
+        return if (identity == null || identity == "${target.host}:${target.port}") safeHost(target.host)
+        else safeHost(identity)
+    }
 
-    /** The host and time out of a name [fileName] made; null for any other file. */
+    /** `wrtpulse-<tag>-<epoch>.tar.gz`, [tag] being what [tag] returns. */
+    fun fileName(tag: String, epochSeconds: Long = System.currentTimeMillis() / 1000): String =
+        "wrtpulse-${safeHost(tag)}-$epochSeconds.tar.gz"
+
+    /** The tag and time out of a name [fileName] made; null for any other file. */
     fun parseName(name: String): Pair<String, Long>? {
         val m = NAME.matchEntire(name) ?: return null
         val epoch = m.groupValues[2].toLongOrNull() ?: return null

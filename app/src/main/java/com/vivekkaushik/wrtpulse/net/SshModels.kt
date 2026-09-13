@@ -1,11 +1,23 @@
 package com.vivekkaushik.wrtpulse.net
 
-/** Everything needed to open one SSH connection. */
+/**
+ * Everything needed to open one SSH connection.
+ *
+ * [identity] is which saved router this is, and it is what host keys are pinned to. Two
+ * routers on two networks can both answer at 192.168.1.1, so the address cannot be the
+ * identity: keyed by address, the second router's key looked like the first router's key
+ * changing, and the two could not be saved side by side. Null pins by address, which is what
+ * every entry saved before identities existed uses.
+ */
 data class SshTarget(
     val host: String,
     val port: Int = 22,
     val username: String = "root",
+    val identity: String? = null,
 ) {
+    /** The scope host keys are pinned under. */
+    val pinScope: String get() = identity ?: "$host:$port"
+
     val label: String get() = if (port == 22) host else "$host:$port"
 }
 

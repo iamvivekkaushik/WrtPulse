@@ -1051,13 +1051,13 @@ class LanStore(private val session: RouterSession) : Refreshable {
                     "on is usually enough. The saved router is updated to the new address."
             )
             add(
-                // Learned the hard way on a router moved to an address a DIFFERENT router had
-                // once answered on: the pin for that address was still there, so the app
-                // showed the red interception warning rather than a first-contact prompt.
-                "Host keys are pinned per address, so $routerIp is a first contact and its " +
-                    "fingerprint is shown for you to accept. If a different router ever " +
-                    "answered on $routerIp, you get the changed-key warning instead — that is " +
-                    "the stale pin, not an interception."
+                // The pinned host key belongs to the saved entry, not to the address, so it
+                // follows the router across the move. Keyed by address it did not: a router
+                // moved to an address a different router had once answered on met that
+                // router's stale pin and the red interception warning.
+                "The saved host key moves with the router's entry, so reconnecting at " +
+                    "$routerIp is not a first contact. A changed-key warning there would " +
+                    "mean a different router is answering, not a stale pin."
             )
         }
         if (!dhcpOn && pool?.ignore == false) {

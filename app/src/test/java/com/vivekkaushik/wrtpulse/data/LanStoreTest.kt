@@ -185,9 +185,9 @@ class LanStoreTest {
         val notes = s.notes()
         assertTrue(notes.any { it.contains("This connection ends") })
         assertTrue(notes.any { it.contains("192.168.2.1") })
-        assertTrue(notes.any { it.contains("first contact") })
-        // A stale pin from another router on that address reads as interception unless the
-        // note says otherwise — which is what it looked like on the first router moved.
+        // The pin follows the entry across the move, so there is no fingerprint to re-accept
+        // and a changed-key warning at the new address means what it says.
+        assertTrue(notes.any { it.contains("not a first contact") })
         assertTrue(notes.any { it.contains("changed-key warning") })
     }
 
