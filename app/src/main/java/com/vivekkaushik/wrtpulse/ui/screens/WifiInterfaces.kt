@@ -1520,8 +1520,10 @@ fun NetworkHomeScreen(
             latencyMs = liveLatencyMs ?: ticker.latencyMs,
             onRouterTap = onRouterTap,
         )
+        // Scrolls: five cards fit a phone upright and not sideways, where the bottom ones
+        // were simply off the screen with no way to reach them.
         Column(
-            Modifier.weight(1f).padding(horizontal = 14.dp, vertical = 12.dp),
+            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Column(

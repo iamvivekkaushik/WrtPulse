@@ -58,16 +58,28 @@ private const val MaxWidthScale = 1.35f
 /** Past this the UI stops growing and sits centred — a tablet does not want 24 dp body text. */
 private val MaxContentWidth = 520.dp
 
+/**
+ * The shorter side a window has to have before it counts as a tablet and gets the centred
+ * column. A phone turned sideways is wide but not tall; capping and centring it left the top
+ * bar and the tab bar short of the edges, and scaling it to its new width blew the whole UI
+ * up by a third for a screen that had just lost half its height.
+ */
+private const val TabletShortSideDp = 600f
+
 @Composable
 fun WrtPulseTheme(content: @Composable () -> Unit) {
     val base = LocalDensity.current
-    val windowWidthPx = LocalWindowInfo.current.containerSize.width
+    val size = LocalWindowInfo.current.containerSize
+    // The SHORTER side, so turning the phone does not change the scale. The design was drawn
+    // for a phone's width; sideways, that width is now the height, and it is still the
+    // dimension the layout has to fit — a row of tab labels has more room, not less.
+    val shortPx = minOf(size.width, size.height)
+    val shortDp = if (shortPx <= 0) 0f else shortPx / base.density
 
     // Before the window is measured there is nothing to scale against; 1f keeps that first
     // frame at the platform density rather than collapsing it to zero.
-    val widthScale = if (windowWidthPx <= 0) 1f else {
-        (windowWidthPx / base.density / DesignWidthDp).coerceIn(MinWidthScale, MaxWidthScale)
-    }
+    val widthScale = if (shortPx <= 0) 1f else (shortDp / DesignWidthDp).coerceIn(MinWidthScale, MaxWidthScale)
+    val tablet = shortDp >= TabletShortSideDp
 
     // The design is drawn at a font scale of 1.0. A request to enlarge text is honoured; a
     // request to shrink it is not, because the dp chrome around the text does not shrink with
@@ -87,7 +99,9 @@ fun WrtPulseTheme(content: @Composable () -> Unit) {
             typography = Typography,
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-                Box(Modifier.widthIn(max = MaxContentWidth).fillMaxSize()) { content() }
+                // Only a tablet is narrowed to the column. A phone, either way up, gets its
+                // whole width: the bars reach the edges and the cards stretch.
+                Box((if (tablet) Modifier.widthIn(max = MaxContentWidth) else Modifier).fillMaxSize()) { content() }
             }
         }
     }
