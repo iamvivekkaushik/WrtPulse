@@ -52,6 +52,7 @@ import com.vivekkaushik.wrtpulse.data.V6Mode
 import com.vivekkaushik.wrtpulse.data.WanRow
 import com.vivekkaushik.wrtpulse.data.WanStore
 import com.vivekkaushik.wrtpulse.ops.PingResult
+import com.vivekkaushik.wrtpulse.ui.PullToRefresh
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.MonoTag
 import com.vivekkaushik.wrtpulse.ui.PrimaryButton
@@ -116,7 +117,7 @@ fun WanSection(
             }
             return@Column
         }
-        Box(Modifier.weight(1f)) {
+        PullToRefresh(Modifier.weight(1f), onRefresh = { if (!store.applying && !store.refreshPaused) store.load() }) {
             when (page) {
                 WanPage.Hub -> WanHub(
                     store = store,
@@ -222,6 +223,7 @@ private fun WanHub(
         selected?.let { row ->
             LiveCard(row, live)
             TestCard(store, row, onTest)
+            CycleCard(store, row)
             Column(
                 Modifier
                     .fillMaxWidth()
@@ -558,6 +560,87 @@ private fun TestCard(store: WanStore, row: WanRow, onTest: () -> Unit) {
                 store.pings.forEach { result -> PingTile(result, Modifier.weight(1f)) }
             }
         }
+    }
+}
+
+/**
+ * Stop and restart, the way LuCI's interface page offers them — `ifdown` and `ifup` on this
+ * one uplink. Stop takes a second tap, because on the primary uplink it is everyone's
+ * internet; the app itself rides the LAN and is not at risk, which the note says outright.
+ */
+@Composable
+private fun CycleCard(store: WanStore, row: WanRow) {
+    val scope = rememberCoroutineScope()
+    val busy = store.cycling != null
+    val mine = store.cycling == row.section
+    var armed by remember(row.section) { mutableStateOf(false) }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(1.dp, Wrt.BorderCard, RoundedCornerShape(13.dp))
+            .background(Wrt.BgCard, RoundedCornerShape(13.dp))
+            .padding(horizontal = 13.dp, vertical = 12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text(if (row.up) "Restart or stop" else "Start", style = sans(13f, 600))
+                Text(
+                    when {
+                        mine -> "waiting for netifd…"
+                        row.up -> "ifup ${row.section} · ifdown ${row.section}"
+                        else -> "ifup ${row.section} — the interface is down"
+                    },
+                    style = mono(10f, 500, Wrt.TextDim),
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+            }
+            Box(
+                Modifier
+                    .background(if (busy) Wrt.BgDeep else Wrt.Accent, RoundedCornerShape(9.dp))
+                    .clickable(enabled = !busy) { armed = false; scope.launch { store.restart(row.section) } }
+                    .padding(horizontal = 12.dp, vertical = 7.dp)
+            ) {
+                Text(
+                    when {
+                        mine -> "Working…"
+                        row.up -> "Restart"
+                        else -> "Start"
+                    },
+                    style = sans(11.5f, 650, if (busy) Wrt.TextDim else Wrt.OnAccent),
+                )
+            }
+            if (row.up) {
+                Box(
+                    Modifier
+                        .border(1.dp, if (armed) Wrt.Red else Wrt.Red.copy(alpha = 0.45f), RoundedCornerShape(9.dp))
+                        .background(if (armed) Wrt.Red.copy(alpha = 0.12f) else Wrt.BgCard, RoundedCornerShape(9.dp))
+                        .clickable(enabled = !busy) {
+                            if (armed) { armed = false; scope.launch { store.stop(row.section) } } else armed = true
+                        }
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                ) {
+                    Text(
+                        if (armed) "Tap again" else "Stop",
+                        style = sans(11.5f, 650, if (busy) Wrt.TextDim else Wrt.Red),
+                    )
+                }
+            }
+        }
+        Text(
+            when {
+                armed && row.primary ->
+                    "This is the uplink carrying the default route: stopping it takes the " +
+                        "internet away from every device until you start it again. The app keeps " +
+                        "working — it reaches the router over the LAN."
+                armed -> "Stopped means down until Start: no address, no route, and netifd does not retry."
+                row.up -> "Restart is ifup: the address is renewed, a PPPoE session redialled, a Wi-Fi " +
+                    "client re-associated. Clients see a short gap."
+                else -> "The interface is down. Start runs ifup; a wired line answers in seconds, " +
+                    "PPPoE and Wi-Fi clients can take longer."
+            },
+            style = sans(10.5f, 400, if (armed) Wrt.AmberText else Wrt.TextDim, lineHeight = 16.sp),
+            modifier = Modifier.padding(top = 9.dp),
+        )
     }
 }
 
@@ -1120,8 +1203,8 @@ private fun AddWiredUplinkSheet(
     // just plugged into, so it starts selected.
     var chosenId by remember {
         mutableStateOf(
-            sockets.firstOrNull { it.id !in used && it.up }?.id
-                ?: sockets.firstOrNull { it.id !in used }?.id,
+            sockets.firstOrNull { it.id !in used && it.up && store.uplinkBlock(it) == null }?.id
+                ?: sockets.firstOrNull { it.id !in used && store.uplinkBlock(it) == null }?.id,
         )
     }
     var proto by remember { mutableStateOf("dhcp") }
@@ -1189,7 +1272,7 @@ private fun AddWiredUplinkSheet(
             }
         }
         Spacer(Modifier.height(14.dp))
-        if (chosen != null) {
+        if (chosen != null && store.uplinkBlock(chosen) == null) {
             PrimaryButton("Stage $name on ${chosen.label}") { onCreate(chosen, proto) }
         } else {
             Box(
@@ -1200,7 +1283,10 @@ private fun AddWiredUplinkSheet(
                     .border(1.dp, Wrt.BorderInput, RoundedCornerShape(11.dp)),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("Pick a socket", style = sans(13.5f, 650, Wrt.TextDim))
+                Text(
+                    if (chosen != null) "Not from here — see above" else "Pick a socket",
+                    style = sans(13.5f, 650, Wrt.TextDim),
+                )
             }
         }
         Box(

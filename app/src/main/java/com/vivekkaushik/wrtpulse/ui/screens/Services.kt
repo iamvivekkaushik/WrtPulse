@@ -39,6 +39,7 @@ import com.vivekkaushik.wrtpulse.data.ServiceStore
 import com.vivekkaushik.wrtpulse.ops.Commands
 import com.vivekkaushik.wrtpulse.ops.RouterService
 import com.vivekkaushik.wrtpulse.ops.ServiceAction
+import com.vivekkaushik.wrtpulse.ui.PullToRefresh
 import com.vivekkaushik.wrtpulse.ui.FilterChip
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.GhostButton
@@ -140,17 +141,19 @@ fun ServicesScreen(
                     SvcTab.All -> true
                 }
             }
-        if (rows.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.TopCenter) {
-                Text(emptyLine(tab, store, filter), style = sans(11.5f, 500, Wrt.TextDim))
-            }
-        } else {
-            LazyColumn(
-                Modifier.fillMaxSize().padding(horizontal = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                contentPadding = PaddingValues(bottom = 16.dp),
-            ) {
-                items(rows, key = { it.name }) { service -> ServiceRow(service) { open = service } }
+        PullToRefresh(Modifier.fillMaxSize(), onRefresh = { if (!store.busy && !store.loading) store.load() }) {
+            if (rows.isEmpty()) {
+                Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), contentAlignment = Alignment.TopCenter) {
+                    Text(emptyLine(tab, store, filter), style = sans(11.5f, 500, Wrt.TextDim))
+                }
+            } else {
+                LazyColumn(
+                    Modifier.fillMaxSize().padding(horizontal = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    contentPadding = PaddingValues(bottom = 16.dp),
+                ) {
+                    items(rows, key = { it.name }) { service -> ServiceRow(service) { open = service } }
+                }
             }
         }
     }

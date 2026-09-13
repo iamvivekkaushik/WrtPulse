@@ -15,6 +15,7 @@ import com.vivekkaushik.wrtpulse.ops.NetDevice
 import com.vivekkaushik.wrtpulse.ops.Parsers
 import com.vivekkaushik.wrtpulse.ops.PingResult
 import com.vivekkaushik.wrtpulse.ops.SwPort
+import com.vivekkaushik.wrtpulse.ops.BoardPort
 import com.vivekkaushik.wrtpulse.ops.SwitchDev
 import com.vivekkaushik.wrtpulse.ops.SwitchVlan
 import com.vivekkaushik.wrtpulse.ops.WanConfig
@@ -57,8 +58,9 @@ data class WanRow(
  *
  * On a DSA board [id] is the netdev (`wan`, `lan4`); on a swconfig board it is `sw:<n>`, the
  * switch port number, because there the socket has no netdev of its own — it reaches the
- * CPU through a VLAN. [inLan] says whether the LAN owns it today, which decides whether
- * moving the WAN onto it also has to take it away from the LAN.
+ * CPU through a VLAN. A board with two chips names the second one's sockets `sw:<chip>:<n>`,
+ * since port 3 on each chip is two different holes. [inLan] says whether the LAN owns it
+ * today, which decides whether moving the WAN onto it also has to take it away from the LAN.
  */
 data class Socket(
     val id: String,
@@ -66,8 +68,13 @@ data class Socket(
     val up: Boolean,
     val speedMbps: Int?,
     val inLan: Boolean,
+    /** The switch chip the socket hangs off; null on DSA. */
+    val chip: String? = null,
 ) {
-    val switchPort: Int? get() = id.removePrefix("sw:").toIntOrNull().takeIf { id.startsWith("sw:") }
+    val switchPort: Int? get() = id.removePrefix("sw:").substringAfterLast(':').toIntOrNull().takeIf { id.startsWith("sw:") }
+
+    /** The chip an id names outright — `sw:switch1:3` — or null for `sw:3`, the uplink chip's. */
+    val switchChip: String? get() = id.removePrefix("sw:").takeIf { id.startsWith("sw:") && ':' in it }?.substringBeforeLast(':')
 }
 
 /** A swconfig VLAN the apply would create to carry a WAN socket to the CPU. */
@@ -91,6 +98,9 @@ class WanStore(private val session: RouterSession) : Refreshable {
 
     /** The switch chips on a swconfig board, and the VLANs the config carves on them. Empty on DSA. */
     val swDevs = mutableStateListOf<SwitchDev>()
+
+    /** The chip's ports as the board file names them, per chip — `LAN 1` for port 3. */
+    val boardPorts = mutableStateMapOf<String, List<BoardPort>>()
     val swVlans = mutableStateListOf<SwitchVlan>()
 
     /** The `network` config as read, for the lookups that need the raw map. */
@@ -188,6 +198,7 @@ class WanStore(private val session: RouterSession) : Refreshable {
         devs.clear(); devs.addAll(Parsers.netdevs(parts["links"].orEmpty()))
         deviceSections.clear(); deviceSections.addAll(Parsers.netDevices(network))
         swDevs.clear(); swDevs.addAll(Parsers.switchDevs(parts["swconfig"].orEmpty()))
+        boardPorts.clear(); boardPorts.putAll(Parsers.boardSwitchPorts(parts["board"].orEmpty()))
         swVlans.clear(); swVlans.addAll(Parsers.switchVlans(network))
         networkUci.clear(); networkUci.putAll(network)
         protos.clear(); protos.addAll(Parsers.protoHandlers(parts["protos"].orEmpty()).sorted())
@@ -354,7 +365,7 @@ class WanStore(private val session: RouterSession) : Refreshable {
         val vid = value(path("device"), current?.device.orEmpty()).substringAfter('.', "").toIntOrNull()
             ?: return null
         switchVlanDrafts.values.firstOrNull { it.vlan == vid }?.let { return it.vlan to it.ports }
-        val saved = swVlans.firstOrNull { it.vlan == vid } ?: return null
+        val saved = uplinkVlans().firstOrNull { it.vlan == vid } ?: return null
         return saved.vlan to Parsers.swPorts(value("network.${saved.section}.ports", saved.ports))
     }
 
@@ -367,7 +378,7 @@ class WanStore(private val session: RouterSession) : Refreshable {
     val port: String
         get() {
             wanSwitchVlan()?.let { (_, ports) ->
-                val cpu = switchDev?.cpuPort
+                val cpu = uplinkChip?.cpuPort
                 ports.firstOrNull { it.port != cpu }?.let { return "sw:${it.port}" }
             }
             val name = value(path("device"), current?.device.orEmpty())
@@ -384,7 +395,7 @@ class WanStore(private val session: RouterSession) : Refreshable {
     val vlanId: String
         get() {
             wanSwitchVlan()?.let { (vid, ports) ->
-                val cpu = switchDev?.cpuPort
+                val cpu = uplinkChip?.cpuPort
                 val member = ports.firstOrNull { it.port != cpu } ?: return ""
                 return if (member.tagged) vid.toString() else ""
             }
@@ -439,12 +450,44 @@ class WanStore(private val session: RouterSession) : Refreshable {
     /** True on a board whose sockets hang off a swconfig chip rather than being netdevs. */
     val swconfig: Boolean get() = swDevs.isNotEmpty()
 
-    private val switchDev: SwitchDev? get() = swDevs.firstOrNull()
+    /**
+     * The chip a WAN VLAN can be written on: the one whose CPU port feeds the netdev switch
+     * VLANs are named after — `eth0`, so `eth0.2` is a VLAN on it. The board file says which
+     * port feeds which netdev; without it, the first chip, which on a one-chip board is the
+     * only one. A second chip's sockets reach this one through a port of it, and a WAN on
+     * them would need a VLAN carried across both — which the app does not write.
+     */
+    private val uplinkChip: SwitchDev?
+        get() {
+            val base = switchBase()
+            return swDevs.firstOrNull { dev -> boardPorts[dev.name].orEmpty().any { it.cpu && it.device == base } }
+                ?: swDevs.firstOrNull()
+        }
 
-    /** The VLAN the LAN rides on a swconfig board, and its section. */
-    private fun lanSwitchVlan(): SwitchVlan? {
+    /** A chip's own VLANs. A lone chip gets every VLAN, whatever the config calls it. */
+    private fun vlansOn(dev: SwitchDev): List<SwitchVlan> =
+        swVlans.filter { it.device == dev.name }.ifEmpty { if (swDevs.size <= 1) swVlans else emptyList() }
+
+    private fun uplinkVlans(): List<SwitchVlan> = uplinkChip?.let { vlansOn(it) }.orEmpty()
+
+    /** The VLAN the LAN rides on a chip, and its section — on the uplink chip by default. */
+    private fun lanSwitchVlan(dev: SwitchDev? = uplinkChip): SwitchVlan? {
         val vlan = Parsers.lanSwitchVlan(networkUci) ?: return null
-        return swVlans.firstOrNull { it.vlan == vlan }
+        return dev?.let { vlansOn(it) }.orEmpty().firstOrNull { it.vlan == vlan }
+    }
+
+    /**
+     * Why a WAN cannot be staged on a socket, or null when it can. A socket on a chip other
+     * than the uplink one reaches the router through that chip: its uplink is two VLANs on
+     * two chips, and the app says so instead of writing half of it.
+     */
+    fun uplinkBlock(socket: Socket): String? {
+        val chip = socket.chip ?: return null
+        val via = uplinkChip ?: return null
+        if (chip == via.name) return null
+        return "${socket.label} is on $chip, which reaches the router through ${via.name}. A WAN " +
+            "there needs a VLAN carried across both chips, which the app does not write — " +
+            "set it from the terminal, or use a socket on ${via.name}."
     }
 
     /** `eth0` — what a switch VLAN's netdev is named after, from the LAN's own member `eth0.1`. */
@@ -467,12 +510,27 @@ class WanStore(private val session: RouterSession) : Refreshable {
      * all reaches nothing, so it is offered as free.
      */
     fun sockets(): List<Socket> {
-        val dev = switchDev
-        if (dev != null) {
-            val lanPorts = lanSwitchVlan()?.let { Parsers.swPorts(it.ports) }.orEmpty().map { it.port }.toSet()
-            return Parsers.switchSockets(dev, swVlans).map { n ->
-                val link = dev.links[n]
-                Socket("sw:$n", "Port $n", link?.up == true, link?.speedMbps, n in lanPorts)
+        if (swDevs.isNotEmpty()) {
+            val via = uplinkChip
+            // Every chip's sockets, the uplink chip's first. The others are real holes on the
+            // case and belong in the list; [uplinkBlock] says what can be done with them.
+            return swDevs.sortedByDescending { it === via }.flatMap { dev ->
+                val lanPorts = lanSwitchVlan(dev)?.let { Parsers.swPorts(it.ports) }.orEmpty().map { it.port }.toSet()
+                val board = boardPorts[dev.name].orEmpty()
+                val own = dev === via
+                Parsers.switchSockets(dev, vlansOn(dev), board).map { n ->
+                    val link = dev.links[n]
+                    val label = board.firstOrNull { it.num == n }?.label
+                        ?: if (swDevs.size > 1) "${dev.name} port $n" else "Port $n"
+                    Socket(
+                        id = if (own) "sw:$n" else "sw:${dev.name}:$n",
+                        label = label,
+                        up = link?.up == true,
+                        speedMbps = link?.speedMbps,
+                        inLan = n in lanPorts,
+                        chip = dev.name,
+                    )
+                }
             }
         }
         val members = lanBridgeMembers()
@@ -498,10 +556,13 @@ class WanStore(private val session: RouterSession) : Refreshable {
     private fun socketOf(device: String): String? {
         if (device.isEmpty()) return null
         if (swconfig) {
+            // A socket id staged as the device — a pick the app refused to wire, see
+            // [stageSocket] — names its socket outright.
+            if (device.startsWith("sw:")) return device
             val vid = device.substringAfter('.', "").toIntOrNull() ?: return null
-            val cpu = switchDev?.cpuPort
+            val cpu = uplinkChip?.cpuPort
             val ports = switchVlanDrafts.values.firstOrNull { it.vlan == vid }?.ports
-                ?: swVlans.firstOrNull { it.vlan == vid }
+                ?: uplinkVlans().firstOrNull { it.vlan == vid }
                     ?.let { Parsers.swPorts(value("network.${it.section}.ports", it.ports)) }
                 ?: return null
             return ports.firstOrNull { it.port != cpu }?.let { "sw:${it.port}" }
@@ -522,8 +583,13 @@ class WanStore(private val session: RouterSession) : Refreshable {
     fun wiredUplinkPreview(socket: Socket, proto: String): List<String> = buildList {
         val name = nextUplinkName()
         val switchPort = socket.switchPort
+        val block = uplinkBlock(socket)
+        if (block != null) {
+            add(block)
+            return@buildList
+        }
         if (switchPort != null) {
-            val dev = switchDev
+            val dev = uplinkChip
             val cpu = dev?.cpuPort
             val lanVlan = Parsers.lanSwitchVlan(networkUci)
             if (socket.inLan && lanVlan != null) add("${socket.label} leaves the LAN's VLAN $lanVlan.")
@@ -531,7 +597,7 @@ class WanStore(private val session: RouterSession) : Refreshable {
                 add("${dev?.name ?: "The switch"} does not say which port is the CPU, so no VLAN can be written.")
             } else {
                 val vid = switchVlanFor(switchPort, cpu)
-                val reused = swVlans.any { it.vlan == vid }
+                val reused = uplinkVlans().any { it.vlan == vid }
                 add(
                     (if (reused) "VLAN $vid on ${dev.name} is reused" else "VLAN $vid is created on ${dev.name}") +
                         ": ${socket.label} untagged, CPU port $cpu tagged — netdev ${switchBase()}.$vid."
@@ -652,7 +718,13 @@ class WanStore(private val session: RouterSession) : Refreshable {
             stage(path("device"), saved, name)
             return
         }
-        val dev = switchDev ?: return
+        val dev = uplinkChip ?: return
+        if (uplinkBlock(socket) != null) {
+            // A socket on the other chip: stage the pick as it is so [problems] refuses it
+            // with the reason, rather than wiring a VLAN on a chip the socket is not on.
+            stage(path("device"), saved, socket.id)
+            return
+        }
         if (socket.inLan) freeFromLanSwitchVlan(switchPort)
         val cpu = dev.cpuPort
         if (cpu == null) {
@@ -663,7 +735,7 @@ class WanStore(private val session: RouterSession) : Refreshable {
         }
         val vid = newVlan.toIntOrNull() ?: switchVlanFor(switchPort, cpu)
         val ports = listOf(SwPort(switchPort, tagged = newVlan.isNotEmpty()), SwPort(cpu, tagged = true))
-        val existing = swVlans.firstOrNull { it.vlan == vid && it.device == dev.name }
+        val existing = uplinkVlans().firstOrNull { it.vlan == vid }
         if (existing != null) {
             stage("network.${existing.section}.ports", existing.ports, Parsers.swPortsValue(ports))
         } else {
@@ -679,9 +751,10 @@ class WanStore(private val session: RouterSession) : Refreshable {
      * id from 2, the way every stock config numbers the WAN.
      */
     private fun switchVlanFor(switchPort: Int, cpu: Int): Int {
-        swVlans.firstOrNull { vlan ->
+        uplinkVlans().firstOrNull { vlan ->
             Parsers.swPorts(vlan.ports).filter { it.port != cpu }.map { it.port } == listOf(switchPort)
         }?.let { return it.vlan }
+        // Every chip's ids count as taken: a VLAN id is one number on the wire between them.
         val taken = swVlans.map { it.vlan }.toSet() + switchVlanDrafts.values.map { it.vlan }
         return (2..4094).first { it !in taken }
     }
@@ -964,6 +1037,39 @@ class WanStore(private val session: RouterSession) : Refreshable {
      * The pings are bound to that interface's device, so a standby WAN is measured over its
      * own link instead of following the default route out of the primary.
      */
+    /** The uplink an ifup/ifdown is in flight for, so its buttons hold still. */
+    var cycling by mutableStateOf<String?>(null); private set
+
+    /**
+     * `ifdown` — the uplink goes away and stays away until [restart]. The app's own session
+     * rides the LAN, so it survives; everyone's internet through this uplink does not, and
+     * the hub's Stop says so before the second tap.
+     */
+    suspend fun stop(section: String) = cycle(section, Commands.ifdown(section), "$section stopped — Start brings it back.")
+
+    /**
+     * `ifup` — down and up again, or up from stopped. The row's state is re-read afterwards,
+     * and read only: a PPPoE session or a Wi-Fi client can take a while to come back, and
+     * `ifup` returning proves nothing about that.
+     */
+    suspend fun restart(section: String) = cycle(section, Commands.ifup(section), "$section restarted.")
+
+    private suspend fun cycle(section: String, command: String, done: String) {
+        if (cycling != null || section.isEmpty()) return
+        cycling = section
+        error = null
+        notice = null
+        try {
+            session.exec(command, timeoutMs = 30_000).requireOk(command.substringBefore(' '))
+            load()
+            notice = done
+        } catch (e: SshException) {
+            error = "${command.substringBefore(' ')} $section failed: ${e.message}"
+        } finally {
+            cycling = null
+        }
+    }
+
     suspend fun runTest(section: String = selected) {
         if (testingSection != null || section.isEmpty()) return
         testingSection = section
@@ -1131,11 +1237,14 @@ class WanStore(private val session: RouterSession) : Refreshable {
             if (port.isEmpty() && !wirelessUplink && writingDevice) {
                 add("Pick the socket the ISP is plugged into.")
             }
-            if (writingDevice && swconfig && switchDev?.cpuPort == null) {
+            if (writingDevice && swconfig && uplinkChip?.cpuPort == null) {
                 add(
-                    "${switchDev?.name ?: "The switch"} did not report which port is the CPU, so " +
+                    "${uplinkChip?.name ?: "The switch"} did not report which port is the CPU, so " +
                         "a VLAN for the WAN socket cannot be written. Set it from the terminal."
                 )
+            }
+            if (writingDevice && swconfig) {
+                sockets().firstOrNull { it.id == deviceName }?.let { picked -> uplinkBlock(picked)?.let { add(it) } }
             }
             if (writingDevice && swconfig) {
                 val lanVlan = Parsers.lanSwitchVlan(networkUci)

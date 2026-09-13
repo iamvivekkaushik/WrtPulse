@@ -42,6 +42,7 @@ import androidx.core.content.FileProvider
 import com.vivekkaushik.wrtpulse.data.BackupStore
 import com.vivekkaushik.wrtpulse.data.LocalBackup
 import com.vivekkaushik.wrtpulse.ops.Commands
+import com.vivekkaushik.wrtpulse.ui.PullToRefresh
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.GhostButton
 import com.vivekkaushik.wrtpulse.ui.MonoTag
@@ -138,139 +139,141 @@ fun BackupScreen(
             return@Column
         }
 
-        Column(
-            Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            // The design assumes one router; this app has several, so the identity gets a line
-            // of its own above the card, which stays exactly as drawn.
-            Text(
-                listOfNotNull(
-                    store.board?.hostname?.ifBlank { null } ?: store.host,
-                    store.board?.release?.ifBlank { null },
-                    store.lastBackup?.let { "last backup ${BackupStore.ageLabel(it.createdEpoch)}" },
-                ).joinToString(" · "),
-                style = mono(9.5f, 500, Wrt.TextDim),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            // Design 38's order: back up, what it holds, what is already here, the switch.
-            Card {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Back up now", style = sans(13.5f, 650))
+        PullToRefresh(Modifier.weight(1f), onRefresh = { if (!store.busy && !store.loading) store.load() }) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                // The design assumes one router; this app has several, so the identity gets a line
+                // of its own above the card, which stays exactly as drawn.
+                Text(
+                    listOfNotNull(
+                        store.board?.hostname?.ifBlank { null } ?: store.host,
+                        store.board?.release?.ifBlank { null },
+                        store.lastBackup?.let { "last backup ${BackupStore.ageLabel(it.createdEpoch)}" },
+                    ).joinToString(" · "),
+                    style = mono(9.5f, 500, Wrt.TextDim),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                // Design 38's order: back up, what it holds, what is already here, the switch.
+                Card {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Back up now", style = sans(13.5f, 650))
+                            Text(
+                                "Pulled to this phone over SSH, then removed from the router",
+                                style = sans(10.5f, 400, Wrt.TextSecondary, lineHeight = 15.sp),
+                                modifier = Modifier.padding(top = 3.dp),
+                            )
+                        }
+                        AccentChip(
+                            text = if (store.busy) "Working…" else "Create",
+                            busy = store.busy,
+                        ) { if (!store.busy) scope.launch { result = 1 to store.backUp() } }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    CodeLine("sysupgrade -b ${Commands.BACKUP_FILE}") { showCommand = true }
+                    ResultLine(result?.takeIf { it.first == 1 }?.second)
+                }
+                // Screen 38 corrected: a backup CONTAINS the host keys — it does not exclude them.
+                NoteCard(
+                    "Contains this router's SSH host keys. Kept in app-private storage; leaves the " +
+                        "phone only through a share sheet you tap."
+                )
+
+                SectionLabel("WHAT'S INCLUDED — SYSUPGRADE -L", tracking = 0.14)
+                IncludeCard(
+                    store = store,
+                    showFiles = showFiles,
+                    onToggleFiles = { showFiles = !showFiles },
+                    onAdd = { addingPath = true },
+                    onRemove = { path -> scope.launch { result = 4 to store.removeIncludePath(path) } },
+                    message = result?.takeIf { it.first == 4 }?.second,
+                )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SectionLabel("ON THIS PHONE — ALL ROUTERS", tracking = 0.14)
+                    FlexSpacer()
+                    DashedChip("Import file") { picker.launch(arrayOf("*/*")) }
+                }
+                // The design wraps the whole list in one card: rows divided inside it, not a
+                // card each and not floating on the page.
+                Card {
+                    store.refusedImport?.let { (name, why) ->
+                        Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+                            Text(name, style = mono(11.5f, 500, Wrt.Red), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                "refused — $why",
+                                style = sans(10f, 400, Wrt.Red, lineHeight = 15.sp),
+                                modifier = Modifier.padding(top = 3.dp),
+                            )
+                        }
+                        if (store.local.isNotEmpty()) com.vivekkaushik.wrtpulse.ui.HorizontalHairline(Wrt.BorderRow)
+                    }
+                    if (store.local.isEmpty() && store.refusedImport == null) {
                         Text(
-                            "Pulled to this phone over SSH, then removed from the router",
-                            style = sans(10.5f, 400, Wrt.TextSecondary, lineHeight = 15.sp),
-                            modifier = Modifier.padding(top = 3.dp),
+                            "No backups yet. The first one appears here as soon as it is taken.",
+                            style = sans(10.5f, 500, Wrt.TextDim),
+                            modifier = Modifier.padding(vertical = 8.dp),
                         )
                     }
-                    AccentChip(
-                        text = if (store.busy) "Working…" else "Create",
-                        busy = store.busy,
-                    ) { if (!store.busy) scope.launch { result = 1 to store.backUp() } }
-                }
-                Spacer(Modifier.height(10.dp))
-                CodeLine("sysupgrade -b ${Commands.BACKUP_FILE}") { showCommand = true }
-                ResultLine(result?.takeIf { it.first == 1 }?.second)
-            }
-            // Screen 38 corrected: a backup CONTAINS the host keys — it does not exclude them.
-            NoteCard(
-                "Contains this router's SSH host keys. Kept in app-private storage; leaves the " +
-                    "phone only through a share sheet you tap."
-            )
-
-            SectionLabel("WHAT'S INCLUDED — SYSUPGRADE -L", tracking = 0.14)
-            IncludeCard(
-                store = store,
-                showFiles = showFiles,
-                onToggleFiles = { showFiles = !showFiles },
-                onAdd = { addingPath = true },
-                onRemove = { path -> scope.launch { result = 4 to store.removeIncludePath(path) } },
-                message = result?.takeIf { it.first == 4 }?.second,
-            )
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                SectionLabel("ON THIS PHONE — ALL ROUTERS", tracking = 0.14)
-                FlexSpacer()
-                DashedChip("Import file") { picker.launch(arrayOf("*/*")) }
-            }
-            // The design wraps the whole list in one card: rows divided inside it, not a
-            // card each and not floating on the page.
-            Card {
-                store.refusedImport?.let { (name, why) ->
-                    Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
-                        Text(name, style = mono(11.5f, 500, Wrt.Red), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            "refused — $why",
-                            style = sans(10f, 400, Wrt.Red, lineHeight = 15.sp),
-                            modifier = Modifier.padding(top = 3.dp),
+                    store.local.forEachIndexed { index, backup ->
+                        BackupRow(
+                            backup = backup,
+                            otherRouter = backup.tag != store.tag,
+                            confirmDelete = confirmDelete == backup.name,
+                            onShare = { shareBackup(context, backup.file) },
+                            onSave = { saving = backup; saver.launch(backup.name) },
+                            onRestore = { result = 3 to store.stageLocal(backup) },
+                            onDelete = {
+                                if (confirmDelete == backup.name) {
+                                    result = 2 to store.delete(backup)
+                                    confirmDelete = null
+                                } else {
+                                    confirmDelete = backup.name
+                                }
+                            },
                         )
-                    }
-                    if (store.local.isNotEmpty()) com.vivekkaushik.wrtpulse.ui.HorizontalHairline(Wrt.BorderRow)
-                }
-                if (store.local.isEmpty() && store.refusedImport == null) {
-                    Text(
-                        "No backups yet. The first one appears here as soon as it is taken.",
-                        style = sans(10.5f, 500, Wrt.TextDim),
-                        modifier = Modifier.padding(vertical = 8.dp),
-                    )
-                }
-                store.local.forEachIndexed { index, backup ->
-                    BackupRow(
-                        backup = backup,
-                        otherRouter = backup.tag != store.tag,
-                        confirmDelete = confirmDelete == backup.name,
-                        onShare = { shareBackup(context, backup.file) },
-                        onSave = { saving = backup; saver.launch(backup.name) },
-                        onRestore = { result = 3 to store.stageLocal(backup) },
-                        onDelete = {
-                            if (confirmDelete == backup.name) {
-                                result = 2 to store.delete(backup)
-                                confirmDelete = null
-                            } else {
-                                confirmDelete = backup.name
-                            }
-                        },
-                    )
-                    if (index < store.local.lastIndex) {
-                        com.vivekkaushik.wrtpulse.ui.HorizontalHairline(Wrt.BorderRow)
+                        if (index < store.local.lastIndex) {
+                            com.vivekkaushik.wrtpulse.ui.HorizontalHairline(Wrt.BorderRow)
+                        }
                     }
                 }
-            }
-            ResultLine(result?.takeIf { it.first == 2 }?.second)
+                ResultLine(result?.takeIf { it.first == 2 }?.second)
 
-            ToggleCard {
-                ToggleRow(
-                    title = "Auto-backup before changes",
-                    body = "Snapshot to this phone before every Apply · keeps the last " +
-                        "${BackupStore.AUTO_KEEP}, oldest deleted",
-                    checked = store.autoBackup,
-                    divider = false,
-                ) { onAutoBackup(!store.autoBackup) }
-            }
+                ToggleCard {
+                    ToggleRow(
+                        title = "Auto-backup before changes",
+                        body = "Snapshot to this phone before every Apply · keeps the last " +
+                            "${BackupStore.AUTO_KEEP}, oldest deleted",
+                        checked = store.autoBackup,
+                        divider = false,
+                    ) { onAutoBackup(!store.autoBackup) }
+                }
 
-            SectionLabel("RESTORE", color = Wrt.Red, tracking = 0.14)
-            RestoreCard(
-                store = store,
-                message = result?.takeIf { it.first == 3 }?.second,
-                onPick = { picker.launch(arrayOf("*/*")) },
-                onResult = { result = 3 to it },
-            )
+                SectionLabel("RESTORE", color = Wrt.Red, tracking = 0.14)
+                RestoreCard(
+                    store = store,
+                    message = result?.takeIf { it.first == 3 }?.second,
+                    onPick = { picker.launch(arrayOf("*/*")) },
+                    onResult = { result = 3 to it },
+                )
 
-            store.progress?.let {
-                Text(it, style = mono(10.5f, 500, Wrt.Accent), modifier = Modifier.padding(top = 2.dp))
+                store.progress?.let {
+                    Text(it, style = mono(10.5f, 500, Wrt.Accent), modifier = Modifier.padding(top = 2.dp))
+                }
+                store.error?.let {
+                    Text(it, style = sans(11f, 500, Wrt.Red))
+                }
+                Spacer(Modifier.height(12.dp))
             }
-            store.error?.let {
-                Text(it, style = sans(11f, 500, Wrt.Red))
-            }
-            Spacer(Modifier.height(12.dp))
         }
     }
 

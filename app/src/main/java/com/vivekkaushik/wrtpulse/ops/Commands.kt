@@ -1021,7 +1021,16 @@ object Commands {
         // Whether the DHCP server is actually serving, as opposed to configured to.
         "echo $SECTION dnsmasq" to "pgrep dnsmasq >/dev/null 2>&1 && echo running || echo stopped",
         "echo $SECTION swconfig" to SWCONFIG,
+        "echo $SECTION board" to BOARD_SWITCH,
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    /**
+     * The switch block of `/etc/board.json`: which chip ports are wired to which case socket,
+     * and which is the CPU port. LuCI's switch page reads the same file, which is how it
+     * shows "LAN 1" and "LAN 2" on a chip that reports seven ports. Empty on DSA boards and
+     * on any board whose file has no switch block.
+     */
+    val BOARD_SWITCH = "jsonfilter -i /etc/board.json -e '@.switch' 2>/dev/null || true"
 
     /**
      * The switch chip, on the boards that still have one.
@@ -1085,6 +1094,7 @@ object Commands {
         "echo $SECTION protos" to "ls /lib/netifd/proto 2>/dev/null; ls /usr/lib/pppd/*/ 2>/dev/null",
         // The switch chip on a swconfig board: its sockets are numbers here, not netdevs.
         "echo $SECTION swconfig" to SWCONFIG,
+        "echo $SECTION board" to BOARD_SWITCH,
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
     /**
@@ -1193,6 +1203,13 @@ object Commands {
 
     /** Brings one interface down and up — the gentle reload when no device section changed. */
     fun ifup(name: String) = "ifup '$name' >/dev/null 2>&1; echo done"
+
+    /**
+     * Takes one interface down and leaves it there: the address goes, the route goes, a PPPoE
+     * session ends, a Wi-Fi client disassociates. Nothing brings it back but [ifup] or a
+     * reboot — netifd does not retry a stopped interface.
+     */
+    fun ifdown(name: String) = "ifdown '$name' >/dev/null 2>&1; echo done"
 
     /** A new or edited `config device` needs netifd to rebuild it, which ifup will not do. */
     const val NETWORK_RELOAD = "/etc/init.d/network reload >/dev/null 2>&1; echo done"

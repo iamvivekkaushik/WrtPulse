@@ -11,6 +11,7 @@ import com.vivekkaushik.wrtpulse.ops.LAN_STATUS
 import com.vivekkaushik.wrtpulse.ops.NETDEV_LINES
 import com.vivekkaushik.wrtpulse.ops.NETWORK_UCI
 import com.vivekkaushik.wrtpulse.ops.SWCONFIG_OUT
+import com.vivekkaushik.wrtpulse.ops.SwPort
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -698,10 +699,11 @@ class LanStoreTest {
      * CPU port tagged, and the LAN riding it through the bridge member `eth0.1` rather than
      * through `network.lan.device`.
      */
-    private fun swStore(dhcp: String = DHCP_UCI): LanStore =
+    private fun swStore(dhcp: String = DHCP_UCI, board: String = ""): LanStore =
         LanStore(RouterSession(SshTarget("192.168.0.1"), unusedClient, { error("unused") })).apply {
             ingest(
                 mapOf(
+                    "board" to board,
                     "net" to """
                         network.lan=interface
                         network.lan.device='br-lan'
@@ -739,6 +741,37 @@ class LanStoreTest {
         assertTrue(s.socketUp(3))
         assertFalse(s.socketUp(5))
         assertEquals(1000, s.socketSpeed(3))
+        assertFalse(s.socketsNamed())
+        assertEquals("P3", s.socketLabel(3))
+        assertEquals("CPU", s.cpuLabel())
+    }
+
+    /**
+     * The chip reports seven ports; the case has two holes. With the board file the screen
+     * shows the two, labelled as the case is, and the CPU port by the netdev it feeds — what
+     * LuCI's switch page shows, and what a P1–P6 row of guesses is not.
+     */
+    @Test
+    fun `the board file names the sockets and drops the ones with no hole`() {
+        val s = swStore(board = com.vivekkaushik.wrtpulse.ops.DECO_BOARD_SWITCH)
+        assertTrue(s.socketsNamed())
+        assertEquals(listOf(3, 5), s.switchSockets())
+        assertEquals("LAN 1", s.socketLabel(3))
+        assertEquals("LAN 2", s.socketLabel(5))
+        assertEquals("CPU (eth0)", s.cpuLabel())
+        // A port the board does not name still has a fallback, in case a VLAN names it.
+        assertEquals("P4", s.socketLabel(4))
+    }
+
+    /** Named sockets make the "which number is which hole" advice wrong, so it goes. */
+    @Test
+    fun `notes name the socket with a link as the case does`() {
+        val s = swStore(board = com.vivekkaushik.wrtpulse.ops.DECO_BOARD_SWITCH)
+        s.setSwPort(s.swVlanRows().single(), 5, PortState.Off)
+        val notes = s.notes()
+        assertTrue(notes.any { it.contains("LAN 1 has a link") })
+        assertFalse(notes.any { it.contains("which number is which hole") })
+        assertTrue(notes.any { it.startsWith("LAN 2 would be in no VLAN") })
     }
 
     /**
@@ -1062,5 +1095,170 @@ class BeforeApplyHookTest {
         assertFalse(s.apply())
         assertTrue(s.error!!.contains("sysupgrade -b"))
         assertEquals(1, s.pendingCount)
+    }
+}
+
+/** An MT7620A with a second switch chip on its LAN side, as `swconfig` shows both. */
+internal val TWO_CHIPS_OUT = """
+    Found: switch0 - mt7620
+    Found: switch1 - rtl8367
+    # switch0
+    switch0: mt7620(MT7620 built-in switch), ports: 7 (cpu @ 6), vlans: 4096
+    Port 5:
+    	link: port:5 link:up speed:1000baseT full-duplex
+    Port 6:
+    	link: port:6 link:up speed:1000baseT full-duplex
+    # switch1
+    switch1: rtl8367(RTL8367), ports: 6 (cpu @ 5), vlans: 4096
+    Port 0:
+    	link: port:0 link:up speed:1000baseT full-duplex
+    Port 1:
+    	link: port:1 link:down
+    Port 5:
+    	link: port:5 link:up speed:1000baseT full-duplex
+""".trimIndent()
+
+/**
+ * The bug: a two-chip board was judged as one chip. Every VLAN was read against switch0's
+ * CPU port, and port 0 untagged in VLAN 1 on both chips counted as port 0 untagged in two
+ * VLANs — so the review sheet refused a config the router was already running, and Apply
+ * stayed grey for any change at all.
+ */
+class TwoChipBoardTest {
+
+    private val unusedClient = object : SshClient {
+        override suspend fun probeHostKey(target: SshTarget) = error("unused")
+        override suspend fun connect(target: SshTarget, auth: SshAuth, connectTimeoutMs: Long) = error("unused")
+    }
+
+    /** [switch1Vlan] is the one VLAN the second chip carries: 1 shares the LAN, 2 does not. */
+    private fun store(switch1Vlan: Int = 1): LanStore =
+        LanStore(RouterSession(SshTarget("192.168.1.1"), unusedClient, { error("unused") })).apply {
+            ingest(
+                mapOf(
+                    "net" to """
+                        network.lan=interface
+                        network.lan.device='br-lan'
+                        network.lan.proto='static'
+                        network.lan.ipaddr='192.168.1.1/24'
+                        network.br_lan=device
+                        network.br_lan.name='br-lan'
+                        network.br_lan.type='bridge'
+                        network.br_lan.ports='eth0.1'
+                        network.@switch[0]=switch
+                        network.@switch[0].name='switch0'
+                        network.@switch[0].reset='1'
+                        network.@switch[0].enable_vlan='1'
+                        network.@switch_vlan[0]=switch_vlan
+                        network.@switch_vlan[0].device='switch0'
+                        network.@switch_vlan[0].vlan='1'
+                        network.@switch_vlan[0].ports='5 6t'
+                        network.@switch_vlan[1]=switch_vlan
+                        network.@switch_vlan[1].device='switch0'
+                        network.@switch_vlan[1].vlan='2'
+                        network.@switch_vlan[1].ports='4 6t'
+                        network.@switch[1]=switch
+                        network.@switch[1].name='switch1'
+                        network.@switch[1].reset='1'
+                        network.@switch[1].enable_vlan='1'
+                        network.@switch_vlan[2]=switch_vlan
+                        network.@switch_vlan[2].device='switch1'
+                        network.@switch_vlan[2].vlan='$switch1Vlan'
+                        network.@switch_vlan[2].ports='0 1 2 3 4 5t'
+                    """.trimIndent(),
+                    "dhcp" to DHCP_UCI,
+                    "live" to "{}",
+                    "leases" to "",
+                    "neigh" to "",
+                    "links" to "eth0 up 1 1000 02:00:00:00:00:02 phy wired\neth0.1 up 1 - 02:00:00:00:00:02 virt wired",
+                    "dnsmasq" to "running",
+                    "swconfig" to TWO_CHIPS_OUT,
+                )
+            )
+        }
+
+    @Test
+    fun `both chips are read, each with its own cpu port`() {
+        val s = store()
+        assertEquals(listOf("switch0", "switch1"), s.swDevs.map { it.name })
+        assertEquals(6, s.chip("switch0")!!.cpuPort)
+        assertEquals(5, s.chip("switch1")!!.cpuPort)
+        assertEquals(listOf(0, 1, 2, 3, 4, 5), s.switchSockets("switch0"))
+        assertEquals(listOf(0, 1, 2, 3, 4), s.switchSockets("switch1"))
+        assertTrue(s.socketUp(0, "switch1"))
+        assertFalse(s.socketUp(0, "switch0"))
+    }
+
+    /** The config the router is running has to pass its own review. */
+    @Test
+    fun `a running two-chip config raises no problem`() {
+        val s = store()
+        assertEquals(emptyList<String>(), s.problems())
+        assertFalse(s.cpuPortUnknown)
+    }
+
+    /** A change on the second chip is judged by the second chip: its CPU port, its ports. */
+    @Test
+    fun `a vlan on the second chip is checked against that chip`() {
+        val s = store()
+        val draft = s.addSwVlan(3, "switch1")
+        assertEquals("switch1", draft.device)
+        assertEquals(listOf(SwPort(5, tagged = true)), draft.ports)
+        s.setSwPort(s.swVlanRows().single { it.device == "switch1" && it.vlan == 1 }, 4, PortState.Off)
+        s.setSwPort(s.swVlanRows().single { it.vlan == 3 }, 4, PortState.Untagged)
+        assertEquals(emptyList<String>(), s.problems())
+        assertTrue(s.ops().any { it.endsWith(".device='switch1'") })
+        assertTrue(s.ops().any { it.endsWith(".ports='4 5t'") })
+        // The notes speak about the chip that changed.
+        assertTrue(s.notes().any { it.contains("on switch1") && it.contains("link") })
+    }
+
+    /** Dropping the second chip's CPU port is still caught — by that chip's number. */
+    @Test
+    fun `the second chip's cpu port is the one its vlans must carry`() {
+        val s = store()
+        s.addSwVlan(3, "switch1")
+        // Rows are snapshots: re-read between taps, as the screen does.
+        s.setSwPort(s.swVlanRows().single { it.vlan == 3 }, 5, PortState.Off)
+        s.setSwPort(s.swVlanRows().single { it.vlan == 3 }, 4, PortState.Untagged)
+        assertTrue(s.problems().any { it.contains("on switch1") && it.contains("CPU port (5)") })
+        // And switch0's VLANs, untouched, are not accused of missing port 5.
+        assertFalse(s.problems().any { it.contains("VLAN 2") })
+    }
+
+    /** Port 0 untagged in VLAN 1 on each chip is two ports, not one port twice. */
+    @Test
+    fun `the same port number on two chips is two ports`() {
+        val s = store()
+        s.setSwPort(s.swVlanRows().single { it.device == "switch0" && it.vlan == 2 }, 0, PortState.Untagged)
+        assertFalse(s.problems().any { it.contains("untagged in VLAN 1 and 1") })
+        assertEquals(emptyList<String>(), s.problems())
+    }
+
+    /** A chip that never carried the LAN's VLAN is not accused of removing it. */
+    @Test
+    fun `only the chip that carried the lan vlan can lose it`() {
+        val s = store(switch1Vlan = 2)
+        s.addSwVlan(3, "switch1")
+        assertFalse(s.problems().any { it.contains("removes it") })
+        // Whereas on switch0 it is the LAN, and going is a problem.
+        s.stageDelete("network.@switch_vlan[0]")
+        assertTrue(s.problems().any { it.contains("on switch0") && it.contains("removes it") })
+    }
+
+    /** Both chips usually carry the LAN's VLAN; the second losing it strands its sockets. */
+    @Test
+    fun `the second chip losing the lan vlan is said in its own terms`() {
+        val s = store()
+        s.stageDelete("network.@switch_vlan[2]")
+        val problem = s.problems().single { it.contains("removes it") }
+        assertTrue(problem, problem.contains("on switch1") && problem.contains("every socket on switch1"))
+    }
+
+    @Test
+    fun `free vlan ids are per chip`() {
+        val s = store()
+        assertEquals(3, s.freeSwVlanId("switch0"))
+        assertEquals(2, s.freeSwVlanId("switch1"))
     }
 }

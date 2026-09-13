@@ -39,6 +39,7 @@ import com.vivekkaushik.wrtpulse.data.Telemetry
 import com.vivekkaushik.wrtpulse.ops.InstallPlan
 import com.vivekkaushik.wrtpulse.ops.RemovePlan
 import com.vivekkaushik.wrtpulse.ops.RouterPackage
+import com.vivekkaushik.wrtpulse.ui.PullToRefresh
 import com.vivekkaushik.wrtpulse.ui.FilterChip
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.GhostButton
@@ -134,20 +135,22 @@ fun PackagesScreen(
             PkgTab.Updates -> store.upgrades.toList()
             PkgTab.Search -> store.results.toList()
         }
-        if (rows.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.TopCenter) {
-                Text(
-                    emptyLine(tab, store, filter, query),
-                    style = sans(11.5f, 500, Wrt.TextDim),
-                )
-            }
-        } else {
-            LazyColumn(
-                Modifier.fillMaxSize().padding(horizontal = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp),
-            ) {
-                items(rows, key = { it.name }) { pkg -> PackageRow(pkg) { open = pkg } }
+        PullToRefresh(Modifier.fillMaxSize(), onRefresh = { if (!store.busy && !store.loading) store.load() }) {
+            if (rows.isEmpty()) {
+                Box(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), contentAlignment = Alignment.TopCenter) {
+                    Text(
+                        emptyLine(tab, store, filter, query),
+                        style = sans(11.5f, 500, Wrt.TextDim),
+                    )
+                }
+            } else {
+                LazyColumn(
+                    Modifier.fillMaxSize().padding(horizontal = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp),
+                ) {
+                    items(rows, key = { it.name }) { pkg -> PackageRow(pkg) { open = pkg } }
+                }
             }
         }
     }

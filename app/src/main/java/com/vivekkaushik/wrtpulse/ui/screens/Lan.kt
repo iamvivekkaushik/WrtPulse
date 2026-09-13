@@ -43,6 +43,8 @@ import com.vivekkaushik.wrtpulse.data.VlanRow
 import com.vivekkaushik.wrtpulse.ops.IpMath
 import com.vivekkaushik.wrtpulse.ops.NetDev
 import com.vivekkaushik.wrtpulse.ops.Parsers
+import com.vivekkaushik.wrtpulse.ops.SwitchDev
+import com.vivekkaushik.wrtpulse.ui.PullToRefresh
 import com.vivekkaushik.wrtpulse.ui.FilterChip
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.GhostButton
@@ -127,7 +129,7 @@ fun LanScreen(
             }
         }
 
-        Box(Modifier.weight(1f)) {
+        PullToRefresh(Modifier.weight(1f), onRefresh = { if (!store.applying && !store.refreshPaused) store.load() }) {
             when (tab) {
                 LanTab.Subnet -> SubnetTab(store) { uciPath = it }
                 LanTab.Dhcp -> DhcpTab(store)
@@ -189,9 +191,9 @@ fun LanScreen(
             CreateVlanSheet(
                 store = store,
                 onCancel = { creatingVlan = false },
-                onCreate = { id ->
+                onCreate = { id, device ->
                     // A swconfig board gets a switch_vlan; a DSA board gets a bridge-vlan.
-                    if (store.switchDev != null || store.swVlans.isNotEmpty()) store.addSwVlan(id)
+                    if (store.switchDev != null || store.swVlans.isNotEmpty()) store.addSwVlan(id, device)
                     else store.addVlan(id)
                     creatingVlan = false
                 },
@@ -925,7 +927,10 @@ private fun VlansTab(store: LanStore, onCreate: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         if (swconfig) {
-            SwitchPortsCard(store)
+            // One card per chip: a board with an external switch behind the internal one
+            // has two sets of sockets, two CPU ports, and two port 0s.
+            if (store.swDevs.isEmpty()) SwitchPortsCard(store, null)
+            store.swDevs.forEach { dev -> SwitchPortsCard(store, dev) }
         } else {
             PortsCard(ports, swconfig = false)
         }
@@ -1058,9 +1063,9 @@ private fun PortsCard(ports: List<NetDev>, swconfig: Boolean) {
  * and watch which one lights up.
  */
 @Composable
-private fun SwitchPortsCard(store: LanStore) {
-    val dev = store.switchDev
-    val sockets = store.switchSockets()
+private fun SwitchPortsCard(store: LanStore, dev: SwitchDev?) {
+    val chip = dev?.name
+    val sockets = store.switchSockets(chip)
     Column(
         Modifier
             .fillMaxWidth()
@@ -1072,7 +1077,7 @@ private fun SwitchPortsCard(store: LanStore) {
             SectionLabel("SWITCH PORTS — ${dev?.name?.uppercase() ?: "SWCONFIG"}", size = 9.5f, tracking = 0.12)
             FlexSpacer()
             Text(
-                "${sockets.count { store.socketUp(it) }} up · ${sockets.count { !store.socketUp(it) }} down",
+                "${sockets.count { store.socketUp(it, chip) }} up · ${sockets.count { !store.socketUp(it, chip) }} down",
                 style = mono(10f, 500, Wrt.TextTertiary),
             )
         }
@@ -1089,7 +1094,7 @@ private fun SwitchPortsCard(store: LanStore) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             sockets.forEach { port ->
-                val up = store.socketUp(port)
+                val up = store.socketUp(port, chip)
                 Column(
                     if (sockets.size >= 3) Modifier.weight(1f) else Modifier.width(84.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -1110,12 +1115,12 @@ private fun SwitchPortsCard(store: LanStore) {
                         StatusDot(if (up) Wrt.Green else Wrt.DotOff, 6.dp, pulse = up)
                     }
                     Text(
-                        "P$port",
+                        store.socketLabel(port, chip),
                         style = mono(9f, 600, if (up) Wrt.TextPrimary else Wrt.TextDim),
                         maxLines = 1,
                     )
                     Text(
-                        store.socketSpeed(port)?.let { if (it >= 1000) "${it / 1000}G" else "${it}M" } ?: "—",
+                        store.socketSpeed(port, chip)?.let { if (it >= 1000) "${it / 1000}G" else "${it}M" } ?: "—",
                         style = mono(8.5f, 500, if (up) Wrt.TextDim else Wrt.DotOff),
                     )
                 }
@@ -1123,9 +1128,16 @@ private fun SwitchPortsCard(store: LanStore) {
         }
         dev?.cpuPort?.let { cpu ->
             Text(
-                "Port $cpu is the CPU port — the wire to the router itself, not a socket. " +
-                    (dev.model.takeIf { it.isNotEmpty() }?.let { "$it. " } ?: "") +
-                    "Plug a cable in and re-read to learn which number is which hole.",
+                if (store.socketsNamed(chip)) {
+                    // The board file named the sockets, so there is no guessing left to do.
+                    "Port $cpu is ${store.cpuLabel(chip)} — the wire to the router itself, not a socket. " +
+                        (dev.model.takeIf { it.isNotEmpty() }?.let { "$it, " } ?: "") +
+                        "${dev.ports} ports on the chip, ${sockets.size} wired to the case."
+                } else {
+                    "Port $cpu is the CPU port — the wire to the router itself, not a socket. " +
+                        (dev.model.takeIf { it.isNotEmpty() }?.let { "$it. " } ?: "") +
+                        "Plug a cable in and re-read to learn which number is which hole."
+                },
                 style = sans(10.5f, 400, Wrt.TextDim, lineHeight = 16.sp),
                 modifier = Modifier.padding(top = 9.dp),
             )
@@ -1137,7 +1149,9 @@ private fun SwitchPortsCard(store: LanStore) {
 @Composable
 private fun SwVlanCard(store: LanStore, row: SwVlanRow) {
     val block = store.swVlanDeleteBlock(row)
-    val cpu = store.switchDev?.cpuPort
+    // The row's own chip, never the first one: each has its own CPU port and numbering.
+    val chip = row.device
+    val cpu = store.chip(chip)?.cpuPort
     val cpuState = cpu?.let { store.swStateOf(row, it) }
     Column(
         Modifier
@@ -1162,10 +1176,10 @@ private fun SwVlanCard(store: LanStore, row: SwVlanRow) {
             Modifier.fillMaxWidth().padding(top = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(7.dp),
         ) {
-            store.switchSockets().forEach { port ->
+            store.switchSockets(chip).forEach { port ->
                 val state = store.swStateOf(row, port)
                 PortChip(
-                    label = "P$port " + when (state) {
+                    label = store.socketLabel(port, chip) + " " + when (state) {
                         PortState.Off -> "—"
                         PortState.Untagged -> "U"
                         PortState.Tagged -> "T"
@@ -1173,6 +1187,9 @@ private fun SwVlanCard(store: LanStore, row: SwVlanRow) {
                     state = state,
                     enabled = !row.deleting,
                     modifier = Modifier.weight(1f),
+                    // The link is the one fact about a socket the chip alone can give, and
+                    // the one that says whether a change here touches a live cable.
+                    linkUp = store.socketUp(port, chip),
                 ) { store.cycleSwPort(row, port) }
             }
         }
@@ -1184,7 +1201,7 @@ private fun SwVlanCard(store: LanStore, row: SwVlanRow) {
             ) {
                 Text("CPU", style = mono(9f, 600, Wrt.TextDim))
                 PortChip(
-                    label = "P$cpu " + when (cpuState) {
+                    label = (if (store.socketsNamed(chip)) store.cpuLabel(chip) else "P$cpu") + " " + when (cpuState) {
                         PortState.Off -> "—"
                         PortState.Untagged -> "U"
                         PortState.Tagged -> "T"
@@ -1237,6 +1254,8 @@ private fun PortChip(
     state: PortState,
     enabled: Boolean,
     modifier: Modifier,
+    /** The socket's link, when the chip reports one: a dot beside the label. */
+    linkUp: Boolean? = null,
     onClick: () -> Unit,
 ) {
     Box(
@@ -1252,18 +1271,31 @@ private fun PortChip(
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            label,
-            style = mono(
-                10f, 600,
-                when (state) {
-                    PortState.Untagged -> Wrt.OnAccent
-                    PortState.Tagged -> Wrt.Accent
-                    PortState.Off -> Wrt.TextDim
-                },
-            ),
-            maxLines = 1,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            if (linkUp != null) {
+                StatusDot(
+                    when {
+                        linkUp && state == PortState.Untagged -> Wrt.OnAccent
+                        linkUp -> Wrt.Green
+                        else -> Wrt.DotOff
+                    },
+                    5.dp,
+                    pulse = linkUp,
+                )
+            }
+            Text(
+                label,
+                style = mono(
+                    10f, 600,
+                    when (state) {
+                        PortState.Untagged -> Wrt.OnAccent
+                        PortState.Tagged -> Wrt.Accent
+                        PortState.Off -> Wrt.TextDim
+                    },
+                ),
+                maxLines = 1,
+            )
+        }
     }
 }
 
@@ -1366,18 +1398,55 @@ private fun VlanCard(store: LanStore, row: VlanRow, ports: List<NetDev>) {
 }
 
 @Composable
-private fun CreateVlanSheet(store: LanStore, onCancel: () -> Unit, onCreate: (Int) -> Unit) {
-    var text by remember { mutableStateOf(store.freeVlanId().toString()) }
+private fun CreateVlanSheet(store: LanStore, onCancel: () -> Unit, onCreate: (Int, String?) -> Unit) {
+    val swconfig = store.switchDev != null || store.swVlans.isNotEmpty()
+    // Which chip a swconfig VLAN goes on. One chip needs no asking; two do.
+    var device by remember { mutableStateOf(store.switchDev?.name) }
+    var text by remember(device) {
+        mutableStateOf((if (swconfig) store.freeSwVlanId(device) else store.freeVlanId()).toString())
+    }
     val id = text.toIntOrNull()
-    val taken = store.vlanRows().any { it.vlan == id && it.device == store.lanBridge }
+    val taken = if (swconfig) {
+        store.swVlanRows().any { it.vlan == id && (store.swDevs.size <= 1 || it.device == device) }
+    } else {
+        store.vlanRows().any { it.vlan == id && it.device == store.lanBridge }
+    }
     val ok = id != null && id in 1..4094 && !taken
+    val on = if (swconfig) device ?: "the switch" else store.lanBridge.ifEmpty { "the LAN bridge" }
 
     Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 22.dp)) {
         Text("Create VLAN", style = sans(16f, 650), modifier = Modifier.padding(top = 14.dp))
+        if (swconfig && store.swDevs.size > 1) {
+            Row(
+                Modifier.padding(top = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Switch chip", style = mono(9.5f, 500, Wrt.TextDim))
+                store.swDevs.forEach { dev ->
+                    val picked = dev.name == device
+                    Box(
+                        Modifier
+                            .let {
+                                if (picked) it.background(Wrt.Accent, RoundedCornerShape(6.dp))
+                                else it.border(1.dp, Wrt.BorderInput, RoundedCornerShape(6.dp))
+                            }
+                            .clickable { device = dev.name }
+                            .padding(horizontal = 10.dp, vertical = 5.dp),
+                    ) {
+                        Text(dev.name, style = mono(10f, 600, if (picked) Wrt.OnAccent else Wrt.TextSecondary))
+                    }
+                }
+            }
+        }
         Text(
-            "On ${store.lanBridge.ifEmpty { "the LAN bridge" }}. It appears as " +
-                "${store.lanBridge}.${text} and carries nothing until ports are added and an " +
-                "interface names it.",
+            if (swconfig) {
+                "On $on. It carries nothing until ports are added and an interface names " +
+                    "the VLAN's netdev as its device."
+            } else {
+                "On $on. It appears as ${store.lanBridge}.$text and carries nothing until " +
+                    "ports are added and an interface names it."
+            },
             style = sans(12f, 400, Wrt.TextSecondary, lineHeight = 18.sp),
             modifier = Modifier.padding(top = 4.dp),
         )
@@ -1388,8 +1457,8 @@ private fun CreateVlanSheet(store: LanStore, onCancel: () -> Unit, onCreate: (In
                 when {
                     id == null -> "A VLAN id is a number."
                     id !in 1..4094 -> "The standard allows 1 to 4094."
-                    taken -> "${store.lanBridge} already has VLAN $id."
-                    else -> "Free on ${store.lanBridge}."
+                    taken -> "$on already has VLAN $id."
+                    else -> "Free on $on."
                 },
                 style = sans(10.5f, 400, if (ok) Wrt.TextDim else Wrt.Red),
                 modifier = Modifier.padding(top = 5.dp),
@@ -1397,7 +1466,7 @@ private fun CreateVlanSheet(store: LanStore, onCancel: () -> Unit, onCreate: (In
         }
         Spacer(Modifier.height(14.dp))
         if (ok) {
-            PrimaryButton("Stage VLAN $id") { onCreate(id!!) }
+            PrimaryButton("Stage VLAN $id") { onCreate(id!!, device) }
         } else {
             Box(
                 Modifier

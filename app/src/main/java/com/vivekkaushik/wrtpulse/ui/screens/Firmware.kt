@@ -44,6 +44,7 @@ import com.vivekkaushik.wrtpulse.data.WatchEnd
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.vivekkaushik.wrtpulse.ops.Commands
+import com.vivekkaushik.wrtpulse.ui.PullToRefresh
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.GhostButton
 import com.vivekkaushik.wrtpulse.ui.MonoTag
@@ -135,288 +136,290 @@ fun FirmwareScreen(
             return@Column
         }
 
-        Column(
-            Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            RunningCard(store)
-
-            SectionLabel("FIVE GATES, ONE SCREEN", tracking = 0.14)
-
-            // Designs 40a/40b: the gates are a sequence. Exactly one is actionable, and only
-            // that one carries a button — the rest show what they WILL run, so the screen
-            // reads as "here is the next thing to do", not five competing controls.
-            val gate1 = when {
-                store.busy && store.progress?.contains("archive", true) == true -> GateState.Running
-                store.backupDone -> GateState.Done
-                store.backupWaived -> GateState.Skipped
-                else -> GateState.StartHere
-            }
-            val gate2 = when {
-                store.busy && store.progress?.contains("server", true) == true -> GateState.Running
-                store.check?.safe == false -> GateState.Blocked
-                store.check != null -> GateState.Done
-                gate1 == GateState.Done || gate1 == GateState.Skipped -> GateState.StartHere
-                else -> GateState.Waiting
-            }
-            val rebuildOnly = store.check?.sameVersion == true
-            val gate3 = when {
-                store.busy && (store.progress?.contains("ownload", true) == true ||
-                    store.progress?.contains("Sending", true) == true) -> GateState.Running
-                store.image != null -> GateState.Done
-                gate2 != GateState.Done -> GateState.Waiting
-                // Nothing newer exists: rebuilding is a choice, not the next step.
-                rebuildOnly -> GateState.Optional
-                else -> GateState.StartHere
-            }
-            val gate4 = when {
-                store.image?.testPassed == true -> GateState.Done
-                store.image?.testPassed == false -> GateState.Blocked
-                store.image != null -> GateState.StartHere
-                else -> GateState.Waiting
-            }
-
-            GateCard(
-                index = 1,
-                title = "Back up the configuration",
-                state = gate1,
-                detail = when {
-                    store.backupFile != null -> "${store.backupFile!!.name} · saved to this phone"
-                    store.backupWaived -> "skipped — nothing to restore from"
-                    else -> "pulled onto this phone, then removed from the router"
-                },
-                message = result?.takeIf { it.first == 1 }?.second,
+        PullToRefresh(Modifier.weight(1f), onRefresh = { if (!store.busy && !store.loading) store.load() }) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (store.backupDone) {
-                    InlineAction("Share the backup", Wrt.Accent) { shareBackup(context, store.backupFile) }
-                } else {
-                    CodeLine("sysupgrade -b ${Commands.BACKUP_FILE}")
-                    Spacer(Modifier.height(10.dp))
+                RunningCard(store)
+
+                SectionLabel("FIVE GATES, ONE SCREEN", tracking = 0.14)
+
+                // Designs 40a/40b: the gates are a sequence. Exactly one is actionable, and only
+                // that one carries a button — the rest show what they WILL run, so the screen
+                // reads as "here is the next thing to do", not five competing controls.
+                val gate1 = when {
+                    store.busy && store.progress?.contains("archive", true) == true -> GateState.Running
+                    store.backupDone -> GateState.Done
+                    store.backupWaived -> GateState.Skipped
+                    else -> GateState.StartHere
+                }
+                val gate2 = when {
+                    store.busy && store.progress?.contains("server", true) == true -> GateState.Running
+                    store.check?.safe == false -> GateState.Blocked
+                    store.check != null -> GateState.Done
+                    gate1 == GateState.Done || gate1 == GateState.Skipped -> GateState.StartHere
+                    else -> GateState.Waiting
+                }
+                val rebuildOnly = store.check?.sameVersion == true
+                val gate3 = when {
+                    store.busy && (store.progress?.contains("ownload", true) == true ||
+                        store.progress?.contains("Sending", true) == true) -> GateState.Running
+                    store.image != null -> GateState.Done
+                    gate2 != GateState.Done -> GateState.Waiting
+                    // Nothing newer exists: rebuilding is a choice, not the next step.
+                    rebuildOnly -> GateState.Optional
+                    else -> GateState.StartHere
+                }
+                val gate4 = when {
+                    store.image?.testPassed == true -> GateState.Done
+                    store.image?.testPassed == false -> GateState.Blocked
+                    store.image != null -> GateState.StartHere
+                    else -> GateState.Waiting
+                }
+
+                GateCard(
+                    index = 1,
+                    title = "Back up the configuration",
+                    state = gate1,
+                    detail = when {
+                        store.backupFile != null -> "${store.backupFile!!.name} · saved to this phone"
+                        store.backupWaived -> "skipped — nothing to restore from"
+                        else -> "pulled onto this phone, then removed from the router"
+                    },
+                    message = result?.takeIf { it.first == 1 }?.second,
+                ) {
+                    if (store.backupDone) {
+                        InlineAction("Share the backup", Wrt.Accent) { shareBackup(context, store.backupFile) }
+                    } else {
+                        CodeLine("sysupgrade -b ${Commands.BACKUP_FILE}")
+                        Spacer(Modifier.height(10.dp))
+                        FlowRow(
+                            itemVerticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            AccentChip(if (store.busy) "Working…" else "Back up now", busy = store.busy) {
+                                if (!store.busy) {
+                                    scope.launch { result = 1 to store.backUp(File(context.filesDir, "backups")) }
+                                }
+                            }
+                            Text("or", style = sans(10.5f, 400, Wrt.TextDim))
+                            // "asks once more" in the design — so it does.
+                            InlineAction(
+                                if (waiveArmed) "Tap again to continue with no backup"
+                                else "Continue without a backup — asks once more.",
+                                if (waiveArmed) Wrt.Amber else Wrt.TextTertiary,
+                            ) {
+                                if (waiveArmed) {
+                                    store.waiveBackup()
+                                    waiveArmed = false
+                                    result = 1 to "Continuing without a backup"
+                                } else {
+                                    waiveArmed = true
+                                }
+                            }
+                        }
+                    }
+                }
+
+                GateCard(
+                    index = 2,
+                    title = "Ask the upgrade server",
+                    state = gate2,
+                    detail = when {
+                        store.check != null -> "owut check"
+                        store.status.tool == "owut" ->
+                            "owut asks sysupgrade.openwrt.org what's available for " +
+                                (store.board?.boardName?.ifBlank { null } ?: "this board")
+                        store.status.hasTool -> "${store.status.tool} — not driven by this app yet"
+                        else -> "no owut on this router; use a download URL below"
+                    },
+                    message = result?.takeIf { it.first == 2 }?.second,
+                ) {
+                    store.check?.let { check ->
+                        ServerAnswerBox(check, store.checkDetail)
+                        // 40b: the same-version case says outright that there is nothing newer,
+                        // instead of leaving two identical versions to be puzzled over.
+                        if (check.sameVersion) {
+                            Spacer(Modifier.height(9.dp))
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .border(1.dp, Wrt.Accent.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
+                                    .background(Wrt.Accent.copy(alpha = 0.05f), RoundedCornerShape(11.dp))
+                                    .padding(horizontal = 11.dp, vertical = 9.dp),
+                                horizontalArrangement = Arrangement.spacedBy(9.dp),
+                            ) {
+                                Text(
+                                    "Latest release already installed. owut can rebuild " +
+                                        "${check.versionTo?.substringBefore(" ") ?: "it"} with the newest packages.",
+                                    style = sans(11.5f, 650, Wrt.TextPrimary, lineHeight = 17.sp),
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(9.dp))
+                    }
+                    if (store.userPackages.isNotEmpty()) {
+                        Text(
+                            "${store.userPackages.size} package${if (store.userPackages.size == 1) "" else "s"} " +
+                                "you installed are not in the default image: " +
+                                store.userPackages.joinToString(", ") +
+                                ". owut carries them into the build; reinstall after a plain flash.",
+                            style = sans(10.5f, 500, Wrt.AmberText, lineHeight = 16.sp),
+                            modifier = Modifier.padding(bottom = 10.dp),
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("$ ${Commands.UPGRADE_CHECK.substringBefore(" 2>")}", style = mono(9.5f, 500, Wrt.TextDim))
+                        if (store.status.tool == "owut" && (gate2 == GateState.StartHere || store.check != null)) {
+                            InlineAction(if (store.check == null) "run" else "check again", Wrt.Accent) {
+                                scope.launch { result = 2 to store.runCheck() }
+                            }
+                        }
+                    }
+                }
+
+                GateCard(
+                    index = 3,
+                    title = "Build and download",
+                    state = gate3,
+                    detail = store.image?.let { img ->
+                        listOfNotNull(
+                            img.path.substringAfterLast('/'),
+                            img.sizeBytes?.let { preciseBytes(it) },
+                            img.sha256?.take(12),
+                        ).joinToString(" · ")
+                    } ?: "built by the server with your installed packages",
+                    message = result?.takeIf { it.first == 3 }?.second,
+                ) {
+                    if (store.busy && store.downloadLine != null) {
+                        DownloadProgress(store)
+                        Spacer(Modifier.height(9.dp))
+                    }
+                    store.status.tmpFreeKb?.let { free ->
+                        Text(
+                            "/tmp free ${preciseBytes(free * 1024)}" +
+                                (store.image?.sizeBytes?.let { " · image needs ${preciseBytes(it)}" }
+                                    ?: " · read now, checked against image size later"),
+                            style = mono(9.5f, 500, Wrt.TextDim),
+                            modifier = Modifier.padding(bottom = 9.dp),
+                        )
+                    }
+                    // 40b: when there is nothing newer, the offer is a rebuild — named as one.
+                    if (gate3 == GateState.Optional) {
+                        Text(
+                            "Rebuild ${store.check?.versionTo?.substringBefore(" ") ?: "this version"} with " +
+                                "current packages · same version, newer" +
+                                (store.check?.outdatedPackages?.let { " ($it out of date)" } ?: ""),
+                            style = sans(11f, 400, Wrt.TextSecondary, lineHeight = 16.sp),
+                            modifier = Modifier.padding(bottom = 9.dp),
+                        )
+                    }
+                    if (store.status.tool == "owut" && store.image == null &&
+                        (gate3 == GateState.StartHere || gate3 == GateState.Optional || gate3 == GateState.Running)
+                    ) {
+                        if (gate3 == GateState.Optional) {
+                            OutlineChip(if (store.busy) "Rebuilding…" else "Rebuild") {
+                                if (!store.busy) scope.launch { result = 3 to store.downloadWithTool() }
+                            }
+                        } else {
+                            AccentChip(if (store.busy) "Building…" else "Build and download", busy = store.busy) {
+                                if (!store.busy) scope.launch { result = 3 to store.downloadWithTool() }
+                            }
+                        }
+                        Spacer(Modifier.height(9.dp))
+                    }
+                    // These bypass owut entirely, so they stay available whatever gate 2 said.
+                    // FlowRow, not Row: four labels do not fit 360dp, and a Row makes the last
+                    // one spell itself vertically down the edge rather than wrapping.
                     FlowRow(
-                        itemVerticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        AccentChip(if (store.busy) "Working…" else "Back up now", busy = store.busy) {
-                            if (!store.busy) {
-                                scope.launch { result = 1 to store.backUp(File(context.filesDir, "backups")) }
+                        if (store.status.tool == "owut" && store.image != null) {
+                            InlineAction("Download again") {
+                                scope.launch { result = 3 to store.downloadWithTool() }
                             }
                         }
-                        Text("or", style = sans(10.5f, 400, Wrt.TextDim))
-                        // "asks once more" in the design — so it does.
-                        InlineAction(
-                            if (waiveArmed) "Tap again to continue with no backup"
-                            else "Continue without a backup — asks once more.",
-                            if (waiveArmed) Wrt.Amber else Wrt.TextTertiary,
-                        ) {
-                            if (waiveArmed) {
-                                store.waiveBackup()
-                                waiveArmed = false
-                                result = 1 to "Continuing without a backup"
-                            } else {
-                                waiveArmed = true
+                        InlineAction(if (urlOpen) "Hide the URL field" else "Use a URL + sha256") {
+                            urlOpen = !urlOpen
+                        }
+                        InlineAction("Flash a local file") { picker.launch(arrayOf("*/*")) }
+                        if (store.image != null) {
+                            InlineAction("Discard image", Wrt.Red) {
+                                scope.launch { result = 3 to store.discardImage() }
                             }
                         }
                     }
-                }
-            }
-
-            GateCard(
-                index = 2,
-                title = "Ask the upgrade server",
-                state = gate2,
-                detail = when {
-                    store.check != null -> "owut check"
-                    store.status.tool == "owut" ->
-                        "owut asks sysupgrade.openwrt.org what's available for " +
-                            (store.board?.boardName?.ifBlank { null } ?: "this board")
-                    store.status.hasTool -> "${store.status.tool} — not driven by this app yet"
-                    else -> "no owut on this router; use a download URL below"
-                },
-                message = result?.takeIf { it.first == 2 }?.second,
-            ) {
-                store.check?.let { check ->
-                    ServerAnswerBox(check, store.checkDetail)
-                    // 40b: the same-version case says outright that there is nothing newer,
-                    // instead of leaving two identical versions to be puzzled over.
-                    if (check.sameVersion) {
+                    if (urlOpen) {
                         Spacer(Modifier.height(9.dp))
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .border(1.dp, Wrt.Accent.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
-                                .background(Wrt.Accent.copy(alpha = 0.05f), RoundedCornerShape(11.dp))
-                                .padding(horizontal = 11.dp, vertical = 9.dp),
-                            horizontalArrangement = Arrangement.spacedBy(9.dp),
-                        ) {
-                            Text(
-                                "Latest release already installed. owut can rebuild " +
-                                    "${check.versionTo?.substringBefore(" ") ?: "it"} with the newest packages.",
-                                style = sans(11.5f, 650, Wrt.TextPrimary, lineHeight = 17.sp),
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(9.dp))
-                }
-                if (store.userPackages.isNotEmpty()) {
-                    Text(
-                        "${store.userPackages.size} package${if (store.userPackages.size == 1) "" else "s"} " +
-                            "you installed are not in the default image: " +
-                            store.userPackages.joinToString(", ") +
-                            ". owut carries them into the build; reinstall after a plain flash.",
-                        style = sans(10.5f, 500, Wrt.AmberText, lineHeight = 16.sp),
-                        modifier = Modifier.padding(bottom = 10.dp),
-                    )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("$ ${Commands.UPGRADE_CHECK.substringBefore(" 2>")}", style = mono(9.5f, 500, Wrt.TextDim))
-                    if (store.status.tool == "owut" && (gate2 == GateState.StartHere || store.check != null)) {
-                        InlineAction(if (store.check == null) "run" else "check again", Wrt.Accent) {
-                            scope.launch { result = 2 to store.runCheck() }
-                        }
+                        ManualUrl(
+                            url = url,
+                            onUrl = { url = it },
+                            sha = sha,
+                            onSha = { sha = it },
+                            onFetch = {
+                                scope.launch {
+                                    result = 3 to store.downloadFromUrl(url.trim(), sha.trim().ifEmpty { null })
+                                }
+                            },
+                        )
                     }
                 }
-            }
 
-            GateCard(
-                index = 3,
-                title = "Build and download",
-                state = gate3,
-                detail = store.image?.let { img ->
-                    listOfNotNull(
-                        img.path.substringAfterLast('/'),
-                        img.sizeBytes?.let { preciseBytes(it) },
-                        img.sha256?.take(12),
-                    ).joinToString(" · ")
-                } ?: "built by the server with your installed packages",
-                message = result?.takeIf { it.first == 3 }?.second,
-            ) {
-                if (store.busy && store.downloadLine != null) {
-                    DownloadProgress(store)
-                    Spacer(Modifier.height(9.dp))
-                }
-                store.status.tmpFreeKb?.let { free ->
-                    Text(
-                        "/tmp free ${preciseBytes(free * 1024)}" +
-                            (store.image?.sizeBytes?.let { " · image needs ${preciseBytes(it)}" }
-                                ?: " · read now, checked against image size later"),
-                        style = mono(9.5f, 500, Wrt.TextDim),
-                        modifier = Modifier.padding(bottom = 9.dp),
-                    )
-                }
-                // 40b: when there is nothing newer, the offer is a rebuild — named as one.
-                if (gate3 == GateState.Optional) {
-                    Text(
-                        "Rebuild ${store.check?.versionTo?.substringBefore(" ") ?: "this version"} with " +
-                            "current packages · same version, newer" +
-                            (store.check?.outdatedPackages?.let { " ($it out of date)" } ?: ""),
-                        style = sans(11f, 400, Wrt.TextSecondary, lineHeight = 16.sp),
-                        modifier = Modifier.padding(bottom = 9.dp),
-                    )
-                }
-                if (store.status.tool == "owut" && store.image == null &&
-                    (gate3 == GateState.StartHere || gate3 == GateState.Optional || gate3 == GateState.Running)
+                GateCard(
+                    index = 4,
+                    title = "Let sysupgrade check the image",
+                    state = gate4,
+                    detail = when (store.image?.testPassed) {
+                        true -> "accepted for this device"
+                        false -> "refused — see below"
+                        null -> "reads the image's metadata and refuses one built for another board"
+                    },
+                    message = result?.takeIf { it.first == 4 }?.second,
                 ) {
-                    if (gate3 == GateState.Optional) {
-                        OutlineChip(if (store.busy) "Rebuilding…" else "Rebuild") {
-                            if (!store.busy) scope.launch { result = 3 to store.downloadWithTool() }
-                        }
+                    val img = store.image
+                    if (img == null) {
+                        Text(
+                            "$ sysupgrade -T ${Commands.MANUAL_IMAGE.substringBeforeLast('/')}/… · " +
+                                if (rebuildOnly) "runs if you rebuild" else "runs once an image is in /tmp",
+                            style = mono(9.5f, 500, Wrt.TextDim),
+                        )
                     } else {
-                        AccentChip(if (store.busy) "Building…" else "Build and download", busy = store.busy) {
-                            if (!store.busy) scope.launch { result = 3 to store.downloadWithTool() }
+                        CodeLine(Commands.imageTest(img.path))
+                        if (img.testOutput.isNotBlank()) {
+                            Spacer(Modifier.height(8.dp))
+                            OutputBox(img.testOutput, img.testPassed == false)
                         }
-                    }
-                    Spacer(Modifier.height(9.dp))
-                }
-                // These bypass owut entirely, so they stay available whatever gate 2 said.
-                // FlowRow, not Row: four labels do not fit 360dp, and a Row makes the last
-                // one spell itself vertically down the edge rather than wrapping.
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    if (store.status.tool == "owut" && store.image != null) {
-                        InlineAction("Download again") {
-                            scope.launch { result = 3 to store.downloadWithTool() }
-                        }
-                    }
-                    InlineAction(if (urlOpen) "Hide the URL field" else "Use a URL + sha256") {
-                        urlOpen = !urlOpen
-                    }
-                    InlineAction("Flash a local file") { picker.launch(arrayOf("*/*")) }
-                    if (store.image != null) {
-                        InlineAction("Discard image", Wrt.Red) {
-                            scope.launch { result = 3 to store.discardImage() }
-                        }
-                    }
-                }
-                if (urlOpen) {
-                    Spacer(Modifier.height(9.dp))
-                    ManualUrl(
-                        url = url,
-                        onUrl = { url = it },
-                        sha = sha,
-                        onSha = { sha = it },
-                        onFetch = {
-                            scope.launch {
-                                result = 3 to store.downloadFromUrl(url.trim(), sha.trim().ifEmpty { null })
+                        Spacer(Modifier.height(9.dp))
+                        if (img.testPassed == null) {
+                            AccentChip("Check the image", busy = store.busy) {
+                                if (!store.busy) scope.launch { result = 4 to store.dryRun() }
                             }
-                        },
-                    )
-                }
-            }
-
-            GateCard(
-                index = 4,
-                title = "Let sysupgrade check the image",
-                state = gate4,
-                detail = when (store.image?.testPassed) {
-                    true -> "accepted for this device"
-                    false -> "refused — see below"
-                    null -> "reads the image's metadata and refuses one built for another board"
-                },
-                message = result?.takeIf { it.first == 4 }?.second,
-            ) {
-                val img = store.image
-                if (img == null) {
-                    Text(
-                        "$ sysupgrade -T ${Commands.MANUAL_IMAGE.substringBeforeLast('/')}/… · " +
-                            if (rebuildOnly) "runs if you rebuild" else "runs once an image is in /tmp",
-                        style = mono(9.5f, 500, Wrt.TextDim),
-                    )
-                } else {
-                    CodeLine(Commands.imageTest(img.path))
-                    if (img.testOutput.isNotBlank()) {
-                        Spacer(Modifier.height(8.dp))
-                        OutputBox(img.testOutput, img.testPassed == false)
-                    }
-                    Spacer(Modifier.height(9.dp))
-                    if (img.testPassed == null) {
-                        AccentChip("Check the image", busy = store.busy) {
-                            if (!store.busy) scope.launch { result = 4 to store.dryRun() }
+                        } else {
+                            InlineAction("Check again") { scope.launch { result = 4 to store.dryRun() } }
                         }
-                    } else {
-                        InlineAction("Check again") { scope.launch { result = 4 to store.dryRun() } }
                     }
                 }
-            }
 
-            FlashGate(
-                store = store,
-                message = result?.takeIf { it.first == 5 }?.second,
-                onOpenConfirm = { confirming = true },
-            )
+                FlashGate(
+                    store = store,
+                    message = result?.takeIf { it.first == 5 }?.second,
+                    onOpenConfirm = { confirming = true },
+                )
 
-            store.progress?.let {
-                Text(it, style = mono(10.5f, 500, Wrt.Accent), modifier = Modifier.padding(top = 2.dp))
+                store.progress?.let {
+                    Text(it, style = mono(10.5f, 500, Wrt.Accent), modifier = Modifier.padding(top = 2.dp))
+                }
+                store.error?.let {
+                    Text(it, style = sans(11f, 500, Wrt.Red))
+                }
+                Spacer(Modifier.height(12.dp))
             }
-            store.error?.let {
-                Text(it, style = sans(11f, 500, Wrt.Red))
-            }
-            Spacer(Modifier.height(12.dp))
         }
     }
 }

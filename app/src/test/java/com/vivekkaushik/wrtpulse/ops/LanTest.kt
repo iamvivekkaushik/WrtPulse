@@ -707,3 +707,51 @@ class SwconfigParseTest {
         assertEquals(100, quiet.links.getValue(1).speedMbps)
     }
 }
+
+/** The switch block of the Deco M4R's /etc/board.json, as `jsonfilter -e '@.switch'` prints it. */
+const val DECO_BOARD_SWITCH = """{ "switch0": { "enable": true, "reset": true, "ports": [ { "num": 0, "device": "eth0", "need_tag": false, "want_untag": false }, { "num": 3, "role": "lan", "index": 1 }, { "num": 5, "role": "lan", "index": 2 } ], "roles": [ { "role": "lan", "ports": "3 5 0t", "device": "eth0.1" } ] } }"""
+
+/**
+ * The chip says seven ports; the case has two holes and LuCI labels them LAN 1 and LAN 2.
+ * The board file is where those labels come from, and the app now reads the same file.
+ */
+class BoardPortsParseTest {
+
+    private val ports = Parsers.boardSwitchPorts(DECO_BOARD_SWITCH).getValue("switch0")
+
+    @Test
+    fun `the board names the cpu port by its netdev and the sockets by role and index`() {
+        assertEquals(listOf(0, 3, 5), ports.map { it.num })
+        val cpu = ports.single { it.cpu }
+        assertEquals(0, cpu.num)
+        assertEquals("CPU (eth0)", cpu.label)
+        assertEquals(listOf("LAN 1", "LAN 2"), ports.filterNot { it.cpu }.map { it.label })
+    }
+
+    @Test
+    fun `a single wan socket has no index and a bare role`() {
+        val one = Parsers.boardSwitchPorts(
+            """{ "switch0": { "ports": [ { "num": 1, "role": "wan" }, { "num": 6, "device": "eth1" } ] } }"""
+        ).getValue("switch0")
+        assertEquals("WAN", one.single { it.num == 1 }.label)
+        assertEquals("CPU (eth1)", one.single { it.num == 6 }.label)
+    }
+
+    @Test
+    fun `no switch block, garbage, or a port with no number is nothing`() {
+        assertEquals(emptyMap<String, List<BoardPort>>(), Parsers.boardSwitchPorts(""))
+        assertEquals(emptyMap<String, List<BoardPort>>(), Parsers.boardSwitchPorts("not json"))
+        assertEquals(emptyList<BoardPort>(), Parsers.boardSwitchPorts("""{ "switch0": { "ports": [ { "role": "lan" } ] } }""").getValue("switch0"))
+    }
+
+    /** With the board's word the socket list is its ports in its order — never the chip's count. */
+    @Test
+    fun `sockets follow the board file when it exists and the chip when it does not`() {
+        val dev = Parsers.switchDevs(SWCONFIG_OUT).single()
+        assertEquals(listOf(3, 5), Parsers.switchSockets(dev, emptyList(), ports))
+        assertEquals(listOf(1, 2, 3, 4, 5), Parsers.switchSockets(dev, emptyList()))
+        // A board file that only names the CPU port says nothing about the sockets.
+        val cpuOnly = ports.filter { it.cpu }
+        assertEquals(listOf(1, 2, 3, 4, 5), Parsers.switchSockets(dev, emptyList(), cpuOnly))
+    }
+}

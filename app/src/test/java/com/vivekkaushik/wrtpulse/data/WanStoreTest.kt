@@ -14,6 +14,7 @@ import com.vivekkaushik.wrtpulse.ops.WAN_NETWORK_UCI
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -808,6 +809,7 @@ class WiredUplinkTest {
         firewall: String = DECO_FIREWALL_UCI,
         dump: String = decoDump(),
         swconfig: String = SWCONFIG_OUT,
+        board: String = "",
     ): WanStore = WanStore(RouterSession(SshTarget("192.168.0.1"), unusedClient, { error("unused") })).apply {
         ingest(
             mapOf(
@@ -818,8 +820,17 @@ class WiredUplinkTest {
                 "links" to DECO_NETDEVS,
                 "protos" to PROTO_LS,
                 "swconfig" to swconfig,
+                "board" to board,
             )
         )
+    }
+
+    /** The uplink picker offers the holes by the names printed beside them when the board says. */
+    @Test
+    fun `a board file labels the sockets as the case does`() {
+        val sockets = deco(board = com.vivekkaushik.wrtpulse.ops.DECO_BOARD_SWITCH).sockets()
+        assertEquals(listOf("sw:3", "sw:5"), sockets.map { it.id })
+        assertEquals(listOf("LAN 1", "LAN 2"), sockets.map { it.label })
     }
 
     private fun socket(store: WanStore, id: String): Socket = store.sockets().single { it.id == id }
@@ -1085,5 +1096,119 @@ class WiredUplinkRefreshTest {
         s.ingest(parts)
         assertEquals("wan", s.selected)
         assertTrue(s.wanRows().any { it.section == "wan" })
+    }
+}
+
+/**
+ * An MT7620A whose LAN sockets hang off a second chip. `eth0` is the internal switch0's CPU
+ * port; switch1's sockets reach it through a port of switch0, so a WAN on one of them is two
+ * VLANs on two chips — which the app does not write, and says so.
+ */
+private val TWO_CHIP_NETWORK_UCI = """
+    network.lan=interface
+    network.lan.device='br-lan'
+    network.lan.proto='static'
+    network.lan.ipaddr='192.168.1.1/24'
+    network.br_lan=device
+    network.br_lan.name='br-lan'
+    network.br_lan.type='bridge'
+    network.br_lan.ports='eth0.1'
+    network.@switch[0]=switch
+    network.@switch[0].name='switch0'
+    network.@switch[0].reset='1'
+    network.@switch[0].enable_vlan='1'
+    network.@switch_vlan[0]=switch_vlan
+    network.@switch_vlan[0].device='switch0'
+    network.@switch_vlan[0].vlan='1'
+    network.@switch_vlan[0].ports='5 6t'
+    network.@switch[1]=switch
+    network.@switch[1].name='switch1'
+    network.@switch[1].reset='1'
+    network.@switch[1].enable_vlan='1'
+    network.@switch_vlan[1]=switch_vlan
+    network.@switch_vlan[1].device='switch1'
+    network.@switch_vlan[1].vlan='1'
+    network.@switch_vlan[1].ports='0 1 2 3 5t'
+""".trimIndent()
+
+private const val TWO_CHIP_BOARD = """{ "switch0": { "ports": [ { "num": 6, "device": "eth0" }, { "num": 4, "role": "wan" } ] } }"""
+
+class TwoChipUplinkTest {
+
+    private val unusedClient = object : SshClient {
+        override suspend fun probeHostKey(target: SshTarget) = error("unused")
+        override suspend fun connect(target: SshTarget, auth: SshAuth, connectTimeoutMs: Long) = error("unused")
+    }
+
+    private fun store(board: String = TWO_CHIP_BOARD): WanStore =
+        WanStore(RouterSession(SshTarget("192.168.1.1"), unusedClient, { error("unused") })).apply {
+            ingest(
+                mapOf(
+                    "net" to TWO_CHIP_NETWORK_UCI,
+                    "fw" to DECO_FIREWALL_UCI,
+                    "dhcp" to DHCP_V6_UCI,
+                    "dump" to "{}",
+                    "links" to "eth0 up 1 1000 02:00:00:00:00:02 phy wired\neth0.1 up 1 - 02:00:00:00:00:02 virt wired",
+                    "protos" to PROTO_LS,
+                    "swconfig" to TWO_CHIPS_OUT,
+                    "board" to board,
+                )
+            )
+        }
+
+    /** Both chips' holes are listed; the uplink chip's come first and keep the plain ids. */
+    @Test
+    fun `sockets on both chips are listed, each under its own chip`() {
+        val sockets = store().sockets()
+        assertEquals(listOf("sw:4", "sw:switch1:0", "sw:switch1:1", "sw:switch1:2", "sw:switch1:3"), sockets.map { it.id })
+        assertEquals("WAN", sockets.first().label)
+        assertEquals("switch1 port 0", sockets[1].label)
+        assertEquals(listOf("switch0", "switch1", "switch1", "switch1", "switch1"), sockets.map { it.chip })
+        // In the LAN by each chip's own VLAN 1, not the other's.
+        assertFalse(sockets.single { it.id == "sw:4" }.inLan)
+        assertTrue(sockets.single { it.id == "sw:switch1:2" }.inLan)
+        assertTrue(sockets.single { it.id == "sw:switch1:0" }.up)
+        assertEquals(0, sockets.single { it.id == "sw:switch1:0" }.switchPort)
+        assertEquals("switch1", sockets.single { it.id == "sw:switch1:0" }.switchChip)
+    }
+
+    /** The board file says eth0 is switch0's — so switch0 is where a WAN VLAN goes. */
+    @Test
+    fun `a socket on the uplink chip is wired as before`() {
+        val s = store()
+        val socket = s.sockets().single { it.id == "sw:4" }
+        assertNull(s.uplinkBlock(socket))
+        s.addWiredUplink(socket)
+        assertTrue(s.ops().contains("set network.swvlan2.device='switch0'"))
+        assertTrue(s.ops().contains("set network.swvlan2.ports='4 6t'"))
+        assertTrue(s.ops().contains("set network.wan.device='eth0.2'"))
+        assertEquals(emptyList<String>(), s.problems())
+    }
+
+    /** A socket on the other chip is refused with the reason, and never half-wired. */
+    @Test
+    fun `a socket on the second chip is refused with the reason`() {
+        val s = store()
+        val socket = s.sockets().single { it.id == "sw:switch1:2" }
+        val block = s.uplinkBlock(socket)!!
+        assertTrue(block, block.contains("on switch1") && block.contains("through switch0"))
+        assertEquals(listOf(block), s.wiredUplinkPreview(socket, "dhcp").take(1))
+        s.addWiredUplink(socket)
+        assertTrue(s.problems().any { it == block })
+        assertFalse(s.ops().any { it.contains("switch_vlan") })
+        assertFalse(s.ops().any { it.contains("@switch_vlan[1].ports") })
+    }
+
+    /**
+     * Without a board file the first chip is taken as the uplink chip, as it always was, and
+     * its sockets are the ports its VLANs name — port 5 here, since nothing says port 4 is a hole.
+     */
+    @Test
+    fun `without a board file the first chip carries the uplink`() {
+        val s = store(board = "")
+        val ids = s.sockets().map { it.id }
+        assertEquals(listOf("sw:5", "sw:switch1:0", "sw:switch1:1", "sw:switch1:2", "sw:switch1:3"), ids)
+        assertNull(s.uplinkBlock(s.sockets().single { it.id == "sw:5" }))
+        assertNotNull(s.uplinkBlock(s.sockets().single { it.id == "sw:switch1:2" }))
     }
 }

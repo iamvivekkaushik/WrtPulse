@@ -157,6 +157,7 @@ private fun WrtPulseApp() {
     val termSessions = remember(session) { session?.let { TerminalSessions(it, scope) } }
     val routerOps = remember(session, telemetry) { session?.let { RouterOps(it, telemetry) } }
     val guestStore = remember(session) { session?.let { GuestStore(it) } }
+    val iotStore = remember(session) { session?.let { GuestStore(it, com.vivekkaushik.wrtpulse.data.NetworkKind.IOT) } }
     val liveLogs = remember(session) { session?.let { LiveLogs(it) } }
     // Read on entry rather than on a tick — the installed list only changes when
     // somebody changes it, and reading it sweeps the whole package database.
@@ -412,10 +413,10 @@ private fun WrtPulseApp() {
                                     inventory = inventory,
                                     ops = routerOps,
                                     guest = guestStore,
+                                    iot = iotStore,
                                     board = flow.board,
                                     routerName = currentRouter,
                                     onRouterTap = { showSwitcher = true },
-                                    onOpenTerminal = { tab = MainTab.Terminal },
                                 )
                                 MainTab.Network -> WifiSection(
                                     ticker = ticker,

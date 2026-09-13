@@ -27,8 +27,8 @@ android {
         applicationId = "com.vivekkaushik.wrtpulse"
         minSdk = 28
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.3"
+        versionCode = 5
+        versionName = "1.3.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -99,6 +99,7 @@ dependencies {
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
     implementation(libs.androidx.biometric)
+    implementation(libs.androidx.fragment.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

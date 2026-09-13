@@ -34,6 +34,7 @@ import androidx.compose.ui.window.Dialog
 import com.vivekkaushik.wrtpulse.data.SshKeyStore
 import com.vivekkaushik.wrtpulse.ops.AuthorizedKey
 import com.vivekkaushik.wrtpulse.ops.Commands
+import com.vivekkaushik.wrtpulse.ui.PullToRefresh
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.GhostButton
 import com.vivekkaushik.wrtpulse.ui.MonoTag
@@ -78,66 +79,68 @@ fun SshKeysScreen(store: SshKeyStore?, latencyMs: Int, onBack: () -> Unit) {
             return@Column
         }
 
-        LazyColumn(
-            Modifier.fillMaxSize().padding(horizontal = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-            contentPadding = PaddingValues(vertical = 10.dp),
-        ) {
-            item {
-                Column {
-                    AccessCard(store)
-                    Spacer(Modifier.height(10.dp))
-                    if (store.hasAppKey && !store.appKeyInstalled) {
-                        PrimaryButton("Install the app's key") {
-                            scope.launch { toast = store.installAppKey() }
-                        }
-                        Spacer(Modifier.height(6.dp))
-                    }
-                    GhostButton(
-                        if (adding) "Cancel" else "Add a key",
-                        border = Wrt.TextTertiary,
-                    ) { adding = !adding; paste = "" }
-                    if (adding) {
+        PullToRefresh(Modifier.fillMaxSize(), onRefresh = { if (!store.busy && !store.loading) store.load() }) {
+            LazyColumn(
+                Modifier.fillMaxSize().padding(horizontal = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(vertical = 10.dp),
+            ) {
+                item {
+                    Column {
+                        AccessCard(store)
                         Spacer(Modifier.height(10.dp))
-                        PasteBox(paste, { paste = it }) {
-                            scope.launch {
-                                toast = store.add(paste)
-                                if (toast?.startsWith("Failed") != true) { adding = false; paste = "" }
+                        if (store.hasAppKey && !store.appKeyInstalled) {
+                            PrimaryButton("Install the app's key") {
+                                scope.launch { toast = store.installAppKey() }
+                            }
+                            Spacer(Modifier.height(6.dp))
+                        }
+                        GhostButton(
+                            if (adding) "Cancel" else "Add a key",
+                            border = Wrt.TextTertiary,
+                        ) { adding = !adding; paste = "" }
+                        if (adding) {
+                            Spacer(Modifier.height(10.dp))
+                            PasteBox(paste, { paste = it }) {
+                                scope.launch {
+                                    toast = store.add(paste)
+                                    if (toast?.startsWith("Failed") != true) { adding = false; paste = "" }
+                                }
                             }
                         }
+                        toast?.let {
+                            Text(
+                                it,
+                                style = mono(10.5f, 500, if (it.startsWith("Failed")) Wrt.Red else Wrt.Accent),
+                                modifier = Modifier.padding(top = 10.dp).clickable { toast = null },
+                            )
+                        }
+                        store.error?.let {
+                            Text(it, style = sans(11f, 500, Wrt.Red), modifier = Modifier.padding(top = 8.dp))
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        SectionLabel(
+                            if (store.keys.isEmpty()) "NO KEYS INSTALLED" else "AUTHORIZED KEYS",
+                            tracking = 0.14,
+                        )
+                        Spacer(Modifier.height(4.dp))
                     }
-                    toast?.let {
+                }
+                items(store.keys, key = { it.blob }) { key ->
+                    KeyRow(key, store) { confirm = key }
+                }
+                item {
+                    if (store.keys.isEmpty() && store.loaded) {
                         Text(
-                            it,
-                            style = mono(10.5f, 500, if (it.startsWith("Failed")) Wrt.Red else Wrt.Accent),
-                            modifier = Modifier.padding(top = 10.dp).clickable { toast = null },
+                            "Nothing can log in with a key. Only the password stands between " +
+                                "this router and anyone on the network.",
+                            style = sans(11.5f, 500, Wrt.TextDim),
+                            modifier = Modifier.padding(vertical = 12.dp),
                         )
                     }
-                    store.error?.let {
-                        Text(it, style = sans(11f, 500, Wrt.Red), modifier = Modifier.padding(top = 8.dp))
-                    }
                     Spacer(Modifier.height(10.dp))
-                    SectionLabel(
-                        if (store.keys.isEmpty()) "NO KEYS INSTALLED" else "AUTHORIZED KEYS",
-                        tracking = 0.14,
-                    )
-                    Spacer(Modifier.height(4.dp))
+                    PasswordCard(store)
                 }
-            }
-            items(store.keys, key = { it.blob }) { key ->
-                KeyRow(key, store) { confirm = key }
-            }
-            item {
-                if (store.keys.isEmpty() && store.loaded) {
-                    Text(
-                        "Nothing can log in with a key. Only the password stands between " +
-                            "this router and anyone on the network.",
-                        style = sans(11.5f, 500, Wrt.TextDim),
-                        modifier = Modifier.padding(vertical = 12.dp),
-                    )
-                }
-                Spacer(Modifier.height(10.dp))
-                PasswordCard(store)
             }
         }
     }

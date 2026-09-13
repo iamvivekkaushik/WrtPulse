@@ -12,6 +12,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -21,8 +22,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -44,6 +49,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.vivekkaushik.wrtpulse.data.Refreshable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
@@ -59,6 +65,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.draw.clip
@@ -641,4 +649,59 @@ fun LiveRefresh(store: Refreshable?, intervalMs: Long) {
             }
         }
     }
+}
+
+/**
+ * Pull down to re-read the router.
+ *
+ * The stores already know how to re-read safely — a `load()` rebuilds the read-only base
+ * and leaves staged edits alone — so this is only the gesture in front of it. The spinner
+ * stays for as long as the read takes and not a moment less: one that vanished before the
+ * router answered told the user nothing about whether anything was read. A second pull
+ * while one is in flight is ignored rather than queued, since two reads of the same thing
+ * answer the same question.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PullToRefresh(
+    modifier: Modifier = Modifier,
+    /** False when there is nothing to read — a demo screen with no router behind it. */
+    enabled: Boolean = true,
+    onRefresh: suspend () -> Unit,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    if (!enabled) {
+        Box(modifier, content = content)
+        return
+    }
+    val scope = rememberCoroutineScope()
+    var refreshing by remember { mutableStateOf(false) }
+    val state = rememberPullToRefreshState()
+    PullToRefreshBox(
+        isRefreshing = refreshing,
+        onRefresh = {
+            if (!refreshing) {
+                scope.launch {
+                    refreshing = true
+                    try {
+                        onRefresh()
+                    } finally {
+                        refreshing = false
+                    }
+                }
+            }
+        },
+        modifier = modifier,
+        state = state,
+        indicator = {
+            PullToRefreshDefaults.Indicator(
+                state = state,
+                isRefreshing = refreshing,
+                modifier = Modifier.align(Alignment.TopCenter),
+                containerColor = Wrt.BgCard,
+                color = Wrt.Accent,
+            )
+        },
+        content = content,
+    )
 }

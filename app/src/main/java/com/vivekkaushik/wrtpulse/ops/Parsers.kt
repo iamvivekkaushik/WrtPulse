@@ -258,6 +258,35 @@ data class SwitchDev(
 /** One switch port's link, straight off `swconfig dev X show`. */
 data class SwitchLink(val port: Int, val up: Boolean, val speedMbps: Int?, val duplex: Boolean)
 
+/**
+ * One port of a switch chip as `/etc/board.json` describes it — the file LuCI's switch page
+ * reads, and the only place the chip's port numbers meet the labels printed on the case.
+ *
+ * The chip reports every port it has, wired to a socket or not: the AR8337 in a two-socket
+ * Deco says seven. The board file lists the ones that go somewhere — the CPU port by the
+ * netdev it feeds, the sockets by role and index — so "LAN 1" and "LAN 2" can be shown
+ * instead of a guess at which of P1–P6 has a hole behind it.
+ */
+data class BoardPort(
+    val num: Int,
+    /** `lan`, `wan` — the role the board gives the socket. Null on the CPU port. */
+    val role: String?,
+    /** The number after the role on the case, when a board has more than one of that role. */
+    val index: Int?,
+    /** The netdev behind a CPU port: `eth0`. Null on a socket. */
+    val device: String?,
+) {
+    val cpu: Boolean get() = role == null && device != null
+
+    /** What LuCI prints over the column: `CPU (eth0)`, `LAN 1`, `WAN`. */
+    val label: String
+        get() = when {
+            cpu -> "CPU ($device)"
+            role != null -> role.uppercase() + (index?.let { " $it" } ?: "")
+            else -> "Port $num"
+        }
+}
+
 /** A port's membership in a swconfig VLAN: a bare number is untagged, `5t` is tagged. */
 data class SwPort(val port: Int, val tagged: Boolean) {
     fun token(): String = if (tagged) "${port}t" else port.toString()
@@ -2131,7 +2160,10 @@ object Parsers {
      * port 6 reports "up" with nothing plugged in. What the board's own config puts in a VLAN
      * is the honest list; with no VLANs at all, every non-CPU port is offered.
      */
-    fun switchSockets(dev: SwitchDev, vlans: List<SwitchVlan>): List<Int> {
+    fun switchSockets(dev: SwitchDev, vlans: List<SwitchVlan>, board: List<BoardPort> = emptyList()): List<Int> {
+        // The board file is the authority when it exists: it lists the ports with a hole
+        // behind them, in the order the case does, and nothing else.
+        board.filterNot { it.cpu || it.num == dev.cpuPort }.takeIf { it.isNotEmpty() }?.let { return it.map { p -> p.num } }
         val count = if (dev.ports > 0) dev.ports else 6
         val all = (0 until count).filter { it != dev.cpuPort }
         // Match VLANs to this chip by name; a config whose VLANs name a chip differently
@@ -2143,6 +2175,31 @@ object Parsers {
             .filter { it != dev.cpuPort }
             .distinct()
         return if (configured.isEmpty()) all else configured.sorted()
+    }
+
+    /**
+     * `jsonfilter -i /etc/board.json -e '@.switch'` → each chip's ports as the board names
+     * them, keyed by chip. Empty when the board has no switch block — a DSA board, or a
+     * swconfig board whose port layout nobody wrote down — and then the chip's own numbering
+     * is all there is.
+     */
+    fun boardSwitchPorts(json: String): Map<String, List<BoardPort>> {
+        val root = runCatching { JSONObject(json.trim()) }.getOrNull() ?: return emptyMap()
+        val out = linkedMapOf<String, List<BoardPort>>()
+        root.keys().forEach { chip ->
+            val ports = root.optJSONObject(chip)?.optJSONArray("ports") ?: return@forEach
+            out[chip] = (0 until ports.length()).mapNotNull { i ->
+                val p = ports.optJSONObject(i) ?: return@mapNotNull null
+                if (!p.has("num")) return@mapNotNull null
+                BoardPort(
+                    num = p.optInt("num"),
+                    role = p.optString("role").takeIf { it.isNotEmpty() },
+                    index = if (p.has("index")) p.optInt("index") else null,
+                    device = p.optString("device").takeIf { it.isNotEmpty() },
+                )
+            }
+        }
+        return out
     }
 
     /** `uci show network` → swconfig VLANs, which the app reads and never writes. */

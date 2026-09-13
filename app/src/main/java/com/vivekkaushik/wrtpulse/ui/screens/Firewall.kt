@@ -43,6 +43,7 @@ import com.vivekkaushik.wrtpulse.ops.Lease
 import com.vivekkaushik.wrtpulse.ops.Parsers.FwForward
 import com.vivekkaushik.wrtpulse.ops.Parsers.FwRule
 import com.vivekkaushik.wrtpulse.ops.Parsers.FwZone
+import com.vivekkaushik.wrtpulse.ui.PullToRefresh
 import com.vivekkaushik.wrtpulse.ui.FilterChip
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.MonoTag
@@ -115,52 +116,54 @@ private fun FirewallHub(store: FirewallStore?, latencyMs: Int, onBack: () -> Uni
             }
             return@Column
         }
-        Column(
-            Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            EngineCard(store)
-            store.notice?.let { NoticeLine(it, if (store.rolledBack) Wrt.Amber else Wrt.Accent) }
-            store.error?.let { ProblemCard(it) }
-            val forwards = store.forwardRows()
-            val rules = store.ruleRows()
-            val zones = store.zoneRows()
-            val defaults = store.defaults()
-            val dmz = store.dmz()
+        PullToRefresh(Modifier.weight(1f), onRefresh = { if (!store.applying && !store.loading) store.load() }) {
             Column(
-                Modifier
-                    .fillMaxWidth()
-                    .border(1.dp, Wrt.BorderCard, RoundedCornerShape(13.dp))
-                    .background(Wrt.BgCard, RoundedCornerShape(13.dp))
-                    .padding(horizontal = 14.dp, vertical = 2.dp),
+                Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                HubRow(WrtIcons.Forwarding, "Port forwarding", "${forwards.count { it.enabled }} active · DNAT") { onOpen(FwTab.Forwards) }
-                HairDivider()
-                HubRow(
-                    WrtIcons.Rules, "Traffic rules",
-                    "${rules.size} rule${if (rules.size == 1) "" else "s"}" +
-                        rules.count { it.scheduled }.takeIf { it > 0 }?.let { " · $it scheduled" }.orEmpty(),
-                ) { onOpen(FwTab.Rules) }
-                HairDivider()
-                HubRow(
-                    WrtIcons.Zones, "Zones & NAT",
-                    "${zones.size} zone${if (zones.size == 1) "" else "s"}" +
-                        zones.filter { it.masq }.takeIf { it.isNotEmpty() }?.let { " · masq on ${it.joinToString(", ") { z -> z.name }}" }.orEmpty(),
-                ) { onOpen(FwTab.Zones) }
-                HairDivider()
-                HubRow(
-                    WrtIcons.ShieldOff, "DMZ — exposed host",
-                    if (dmz.enabled) "on · ${dmz.targetIp}" else "off",
-                    subtitleColor = if (dmz.enabled) Wrt.Red else Wrt.TextDim,
-                ) { onOpen(FwTab.Dmz) }
-                HairDivider()
-                HubRow(
-                    WrtIcons.Defaults, "Defaults & DoS defense",
-                    "input ${defaults.input.lowercase()} · syn-flood ${if (defaults.synFlood) "on" else "off"}",
-                    last = true,
-                ) { onOpen(FwTab.Defaults) }
+                EngineCard(store)
+                store.notice?.let { NoticeLine(it, if (store.rolledBack) Wrt.Amber else Wrt.Accent) }
+                store.error?.let { ProblemCard(it) }
+                val forwards = store.forwardRows()
+                val rules = store.ruleRows()
+                val zones = store.zoneRows()
+                val defaults = store.defaults()
+                val dmz = store.dmz()
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Wrt.BorderCard, RoundedCornerShape(13.dp))
+                        .background(Wrt.BgCard, RoundedCornerShape(13.dp))
+                        .padding(horizontal = 14.dp, vertical = 2.dp),
+                ) {
+                    HubRow(WrtIcons.Forwarding, "Port forwarding", "${forwards.count { it.enabled }} active · DNAT") { onOpen(FwTab.Forwards) }
+                    HairDivider()
+                    HubRow(
+                        WrtIcons.Rules, "Traffic rules",
+                        "${rules.size} rule${if (rules.size == 1) "" else "s"}" +
+                            rules.count { it.scheduled }.takeIf { it > 0 }?.let { " · $it scheduled" }.orEmpty(),
+                    ) { onOpen(FwTab.Rules) }
+                    HairDivider()
+                    HubRow(
+                        WrtIcons.Zones, "Zones & NAT",
+                        "${zones.size} zone${if (zones.size == 1) "" else "s"}" +
+                            zones.filter { it.masq }.takeIf { it.isNotEmpty() }?.let { " · masq on ${it.joinToString(", ") { z -> z.name }}" }.orEmpty(),
+                    ) { onOpen(FwTab.Zones) }
+                    HairDivider()
+                    HubRow(
+                        WrtIcons.ShieldOff, "DMZ — exposed host",
+                        if (dmz.enabled) "on · ${dmz.targetIp}" else "off",
+                        subtitleColor = if (dmz.enabled) Wrt.Red else Wrt.TextDim,
+                    ) { onOpen(FwTab.Dmz) }
+                    HairDivider()
+                    HubRow(
+                        WrtIcons.Defaults, "Defaults & DoS defense",
+                        "input ${defaults.input.lowercase()} · syn-flood ${if (defaults.synFlood) "on" else "off"}",
+                        last = true,
+                    ) { onOpen(FwTab.Defaults) }
+                }
+                CommandLine("$ ubus call service list '{\"name\":\"firewall\"}'")
             }
-            CommandLine("$ ubus call service list '{\"name\":\"firewall\"}'")
         }
     }
 }
@@ -355,9 +358,12 @@ private fun ForwardCard(f: FwForward, modifier: Modifier, changed: Boolean, onTo
             .padding(horizontal = 14.dp, vertical = 13.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(f.name.ifEmpty { f.section }, style = sans(13.5f, 650, text), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            // The name takes whatever the tag and the toggle leave, so the toggle sits at the
+            // edge whatever the name's length. A weighted name that did not fill, next to a
+            // weighted spacer, split the slack between them and left the toggle floating
+            // mid-row on short names.
+            Text(f.name.ifEmpty { f.section }, style = sans(13.5f, 650, text), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             MonoTag(protoLabel(f.proto), color = dim, size = 8.5f)
-            FlexSpacer()
             WToggle(on, onToggle)
         }
         Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -500,7 +506,8 @@ private fun LeasePicker(leases: List<Lease>, onPick: (Lease) -> Unit, onCancel: 
         if (leases.isEmpty()) {
             Text("No leases — the router's DHCP has handed out nothing.", style = sans(12f, 400, Wrt.TextDim), modifier = Modifier.padding(vertical = 18.dp))
         }
-        Column(Modifier.padding(top = 10.dp).verticalScroll(rememberScrollState())) {
+        // The sheet host scrolls; a second scroll here would be nested and refused.
+        Column(Modifier.padding(top = 10.dp)) {
             leases.sortedBy { it.hostname ?: "~" }.forEachIndexed { i, lease ->
                 Row(
                     Modifier.fillMaxWidth().clickable { onPick(lease) }.padding(vertical = 11.dp),
@@ -1223,9 +1230,10 @@ private fun FirewallReviewSheet(store: FirewallStore?, onApply: () -> Unit, onRe
                 .padding(top = 12.dp)
                 .border(1.dp, Wrt.BorderHair, RoundedCornerShape(12.dp))
                 .background(Wrt.BgCode, RoundedCornerShape(12.dp))
-                .padding(horizontal = 13.dp, vertical = 12.dp)
-                .verticalScroll(rememberScrollState()),
+                .padding(horizontal = 13.dp, vertical = 12.dp),
         ) {
+            // No scroll of its own: the sheet host scrolls the whole sheet, and a scrollable
+            // inside a scrollable is measured with no height limit, which Compose refuses.
             Text("# firewall", style = mono(11f, 500, Wrt.TextDim, lineHeight = 19.sp))
             store.diffLines().forEach { (line, added) ->
                 Text(line, style = mono(11f, 500, if (added) Wrt.Green else Wrt.Red, lineHeight = 19.sp))

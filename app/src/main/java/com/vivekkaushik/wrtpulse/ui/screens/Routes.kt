@@ -39,6 +39,7 @@ import com.vivekkaushik.wrtpulse.data.RouteRow
 import com.vivekkaushik.wrtpulse.data.RouteStore
 import com.vivekkaushik.wrtpulse.data.WanStore
 import com.vivekkaushik.wrtpulse.ops.KernelRoute
+import com.vivekkaushik.wrtpulse.ui.PullToRefresh
 import com.vivekkaushik.wrtpulse.ui.FilterChip
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.LiveRefresh
@@ -110,7 +111,7 @@ private fun RoutesList(store: RouteStore?, latencyMs: Int, onBack: () -> Unit, o
                 FilterChip(entry.label, tab == entry, size = 11f, padH = 11.dp, padV = 5.dp) { tab = entry }
             }
         }
-        Box(Modifier.weight(1f)) {
+        PullToRefresh(Modifier.weight(1f), onRefresh = { if (!store.applying && !store.refreshPaused) store.load() }) {
             when (tab) {
                 RtTab.Configured -> ConfiguredTab(
                     store,
@@ -309,11 +310,12 @@ private fun KernelRow(k: KernelRoute, static: Boolean) {
                 style = mono(12.5f, 650, if (isDefault) Wrt.Accent else Wrt.TextPrimary),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
+                // Fills, so the metric sits at the edge: a non-filling weight beside a
+                // weighted spacer split the slack and left the metric floating on short targets.
+                modifier = Modifier.weight(1f),
             )
             if (k.type != "unicast") MonoTag(k.type, color = Wrt.Amber, size = 8.5f)
             if (static) MonoTag("STATIC", color = Wrt.Accent, size = 8.5f)
-            FlexSpacer()
             k.metric?.let { Text("metric $it", style = mono(9.5f, 500, Wrt.TextDim)) }
         }
         Text(

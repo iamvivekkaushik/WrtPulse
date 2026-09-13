@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import com.vivekkaushik.wrtpulse.data.WifiStore
 import com.vivekkaushik.wrtpulse.ops.RegDomain
 import com.vivekkaushik.wrtpulse.ops.Regulatory
+import com.vivekkaushik.wrtpulse.ui.PullToRefresh
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.GhostButton
 import com.vivekkaushik.wrtpulse.ui.MonoTag
@@ -75,68 +76,70 @@ fun CountryScreen(store: WifiStore?, onBack: () -> Unit) {
         val selected = picked ?: effective
 
         val rows = remember(filter) { Regulatory.search(filter) }
-        LazyColumn(
-            Modifier.fillMaxSize().padding(horizontal = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-            contentPadding = PaddingValues(vertical = 10.dp),
-        ) {
-        // The header scrolls with the list rather than sitting above it: with the keyboard
-        // up and a pending change open it filled the whole screen, leaving Apply and
-        // Discard off the bottom and the country list squeezed to nothing.
-        item {
-          Column {
-            CurrentCard(store, saved, selected)
-            Spacer(Modifier.height(10.dp))
-            Box {
-                FormTextField(filter, { filter = it })
-                if (filter.isEmpty()) {
-                    Text(
-                        "search countries",
-                        style = mono(12.5f, 500, Wrt.TextFaint),
-                        modifier = Modifier.padding(start = 12.dp, top = 20.dp),
+        PullToRefresh(Modifier.fillMaxSize(), onRefresh = { if (!store.applying && !store.refreshPaused) store.load() }) {
+            LazyColumn(
+                Modifier.fillMaxSize().padding(horizontal = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(vertical = 10.dp),
+            ) {
+            // The header scrolls with the list rather than sitting above it: with the keyboard
+            // up and a pending change open it filled the whole screen, leaving Apply and
+            // Discard off the bottom and the country list squeezed to nothing.
+            item {
+              Column {
+                CurrentCard(store, saved, selected)
+                Spacer(Modifier.height(10.dp))
+                Box {
+                    FormTextField(filter, { filter = it })
+                    if (filter.isEmpty()) {
+                        Text(
+                            "search countries",
+                            style = mono(12.5f, 500, Wrt.TextFaint),
+                            modifier = Modifier.padding(start = 12.dp, top = 20.dp),
+                        )
+                    }
+                }
+                if (selected != null && selected != saved) {
+                    Spacer(Modifier.height(10.dp))
+                    PendingCard(
+                        store = store,
+                        selected = selected,
+                        onApply = {
+                            scope.launch {
+                                toast = if (store.apply()) {
+                                    "Applied · radios now report " +
+                                        (Regulatory.current(store.radios) ?: "nothing")
+                                } else {
+                                    "Failed: ${store.error ?: "the router refused the change"}"
+                                }
+                                picked = null
+                            }
+                        },
+                        onRevert = {
+                            radios.forEach { store.stage(it.section, "country", it.country, it.country) }
+                            picked = null
+                            toast = null
+                        },
                     )
                 }
+                toast?.let {
+                    Text(
+                        it,
+                        style = mono(10.5f, 500, if (it.startsWith("Failed")) Wrt.Red else Wrt.Accent),
+                        modifier = Modifier.padding(top = 8.dp).clickable { toast = null },
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+              }
             }
-            if (selected != null && selected != saved) {
-                Spacer(Modifier.height(10.dp))
-                PendingCard(
-                    store = store,
-                    selected = selected,
-                    onApply = {
-                        scope.launch {
-                            toast = if (store.apply()) {
-                                "Applied · radios now report " +
-                                    (Regulatory.current(store.radios) ?: "nothing")
-                            } else {
-                                "Failed: ${store.error ?: "the router refused the change"}"
-                            }
-                            picked = null
+                items(rows, key = { it.code }) { domain ->
+                    CountryRow(domain, domain.code == selected, domain.code == saved) {
+                        picked = domain.code
+                        // Stage on every radio: the domain is a property of the place, not of
+                        // one radio, and radios disagreeing about it is legal nonsense.
+                        radios.forEach { radio ->
+                            store.stage(radio.section, "country", radio.country, domain.code)
                         }
-                    },
-                    onRevert = {
-                        radios.forEach { store.stage(it.section, "country", it.country, it.country) }
-                        picked = null
-                        toast = null
-                    },
-                )
-            }
-            toast?.let {
-                Text(
-                    it,
-                    style = mono(10.5f, 500, if (it.startsWith("Failed")) Wrt.Red else Wrt.Accent),
-                    modifier = Modifier.padding(top = 8.dp).clickable { toast = null },
-                )
-            }
-            Spacer(Modifier.height(4.dp))
-          }
-        }
-            items(rows, key = { it.code }) { domain ->
-                CountryRow(domain, domain.code == selected, domain.code == saved) {
-                    picked = domain.code
-                    // Stage on every radio: the domain is a property of the place, not of
-                    // one radio, and radios disagreeing about it is legal nonsense.
-                    radios.forEach { radio ->
-                        store.stage(radio.section, "country", radio.country, domain.code)
                     }
                 }
             }

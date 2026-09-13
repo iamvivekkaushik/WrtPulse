@@ -47,13 +47,15 @@ import com.vivekkaushik.wrtpulse.ui.theme.Wrt
 import kotlinx.coroutines.launch
 
 /**
- * The Guest Wi-Fi sheet. Creates or manages an isolated guest network — the store does the
- * OpenWrt work; this is the SSID, the password, which bands, and the one-line honesty about
- * what a guest network is (internet, not your LAN).
+ * The Guest Wi-Fi and IoT Wi-Fi sheet — the store's kind says which. Creates or manages an
+ * isolated network; the store does the OpenWrt work, and this is the SSID, the password,
+ * which bands, and the one-line honesty about what the network is: internet but not your
+ * LAN for guests, and the same plus your LAN reaching in for IoT.
  */
 @Composable
 fun GuestSheet(store: GuestStore?, hostname: String?, onDismiss: () -> Unit) {
     if (store == null) return
+    val kind = store.kind
     LaunchedEffect(store) { if (!store.loaded) store.load() }
     Column(
         Modifier
@@ -63,9 +65,9 @@ fun GuestSheet(store: GuestStore?, hostname: String?, onDismiss: () -> Unit) {
             .verticalScroll(rememberScrollState()),
     ) {
         Row(Modifier.padding(top = 4.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(WrtIcons.GuestWifi, null, Modifier.size(18.dp), tint = Wrt.Accent)
+            Icon(if (kind.lanReaches) WrtIcons.IotWifi else WrtIcons.GuestWifi, null, Modifier.size(18.dp), tint = Wrt.Accent)
             Spacer(Modifier.size(9.dp))
-            Text("Guest Wi-Fi", style = sans(16f, 650))
+            Text(kind.label, style = sans(16f, 650))
         }
         when {
             !store.loaded && store.error == null ->
@@ -85,12 +87,18 @@ private fun CreateGuest(store: GuestStore, hostname: String?, onDismiss: () -> U
     var key by remember { mutableStateOf(defaults.key) }
     var open by remember { mutableStateOf(false) }
     var reveal by remember { mutableStateOf(true) }
-    var isolate by remember { mutableStateOf(true) }
+    var isolate by remember { mutableStateOf(defaults.isolate) }
     val selected = remember { mutableStateListOf<String>().apply { addAll(defaults.devices) } }
+    val kind = store.kind
 
     Text(
-        "A separate SSID that reaches the internet but not your LAN — its own subnet, its own " +
-            "DHCP, firewalled off from everything else.",
+        if (kind.lanReaches) {
+            "A separate SSID for smart-home devices. They reach the internet, your LAN can " +
+                "reach them, and they cannot reach your LAN — own subnet, own DHCP, firewalled off."
+        } else {
+            "A separate SSID that reaches the internet but not your LAN — its own subnet, its own " +
+                "DHCP, firewalled off from everything else."
+        },
         style = sans(12f, 400, Wrt.TextSecondary, lineHeight = 18.sp),
         modifier = Modifier.padding(top = 6.dp),
     )
@@ -133,7 +141,7 @@ private fun CreateGuest(store: GuestStore, hostname: String?, onDismiss: () -> U
 
     if (store.radios.size > 1) {
         Spacer(Modifier.height(12.dp))
-        FieldLabel("BANDS")
+        FieldLabel(if (kind.preferBand != null) "BANDS — 2.4 GHz ONLY BY DEFAULT" else "BANDS")
         FlowRow(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             store.radios.forEach { radio ->
                 val on = radio.section in selected
@@ -148,14 +156,21 @@ private fun CreateGuest(store: GuestStore, hostname: String?, onDismiss: () -> U
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Column(Modifier.weight(1f)) {
             Text("Isolate clients", style = sans(12.5f, 600))
-            Text("Guests can't see each other — only the internet.", style = sans(10f, 400, Wrt.TextDim, lineHeight = 14.sp), modifier = Modifier.padding(top = 2.dp))
+            Text(
+                if (kind.lanReaches) "Devices can't see each other. Off by default — hubs, casting and bulbs often need to."
+                else "Guests can't see each other — only the internet.",
+                style = sans(10f, 400, Wrt.TextDim, lineHeight = 14.sp), modifier = Modifier.padding(top = 2.dp),
+            )
         }
         WToggle(isolate) { isolate = !isolate }
     }
 
     Spacer(Modifier.height(12.dp))
     Text(
-        "Guests get ${defaults.routerIp.substringBeforeLast('.')}.0/24 · internet only · applied across wireless, network, dhcp, firewall.",
+        (if (kind.lanReaches) "Devices get" else "Guests get") +
+            " ${defaults.routerIp.substringBeforeLast('.')}.0/24 · " +
+            (if (kind.lanReaches) "internet, reachable from your LAN" else "internet only") +
+            " · applied across wireless, network, dhcp, firewall.",
         style = mono(9.5f, 500, Wrt.TextDim, lineHeight = 15.sp),
     )
 
@@ -166,7 +181,7 @@ private fun CreateGuest(store: GuestStore, hostname: String?, onDismiss: () -> U
     val label = when {
         store.applying -> "Creating…"
         selected.isEmpty() -> "Pick a band"
-        else -> "Create guest network"
+        else -> "Create ${kind.noun}"
     }
     if (ready) {
         PrimaryButton(label) {
@@ -188,6 +203,7 @@ private fun CreateGuest(store: GuestStore, hostname: String?, onDismiss: () -> U
 private fun ManageGuest(store: GuestStore, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     val net = store.existing ?: return
+    val kind = store.kind
     val clipboard = LocalClipboardManager.current
     var reveal by remember { mutableStateOf(false) }
     var confirmRemove by remember { mutableStateOf(false) }
@@ -195,7 +211,7 @@ private fun ManageGuest(store: GuestStore, onDismiss: () -> Unit) {
 
     Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Column(Modifier.weight(1f)) {
-            Text(net.ssid.ifBlank { "Guest network" }, style = sans(15f, 650))
+            Text(net.ssid.ifBlank { kind.noun.replaceFirstChar { it.uppercase() } }, style = sans(15f, 650))
             Text(
                 (if (net.enabled) "on the air" else "switched off") +
                     (if (net.open) " · open" else " · WPA2"),
@@ -242,12 +258,12 @@ private fun ManageGuest(store: GuestStore, onDismiss: () -> Unit) {
             if (!store.applying) scope.launch { if (store.remove()) onDismiss() }
         }
         Text(
-            "Deletes the guest SSID, its subnet, DHCP pool and firewall zone.",
+            "Deletes the ${kind.ssidSuffix} SSID, its subnet, DHCP pool and firewall zone.",
             style = sans(10f, 400, Wrt.TextDim, lineHeight = 14.sp),
             modifier = Modifier.padding(top = 6.dp),
         )
     } else {
-        GhostButton("Remove guest network", border = Wrt.Red.copy(alpha = 0.5f), textColor = Wrt.Red) { confirmRemove = true }
+        GhostButton("Remove ${kind.noun}", border = Wrt.Red.copy(alpha = 0.5f), textColor = Wrt.Red) { confirmRemove = true }
     }
     Spacer(Modifier.height(6.dp))
     GhostButton("Done", onClick = onDismiss)

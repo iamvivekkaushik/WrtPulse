@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.window.Dialog
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import com.vivekkaushik.wrtpulse.ui.PullToRefresh
 import com.vivekkaushik.wrtpulse.ui.PrimaryButton
 import com.vivekkaushik.wrtpulse.ui.GhostButton
 import com.vivekkaushik.wrtpulse.ui.SectionLabel
@@ -134,24 +135,26 @@ fun ClientsScreen(
                 onToggleSort = { byUsage = !byUsage },
             )
         }
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            val expandKey = expandedMac ?: defaultExpand
-            shown.forEach { client ->
-                val expandable = live != null || (!client.blocked && !client.offline)
-                if (client.mac == expandKey && expandable) {
-                    ExpandedClientCard(client, ticker, live, onRename)
-                } else {
-                    ClientRow(client, onClick = { if (expandable) expandedMac = client.mac })
+        PullToRefresh(Modifier.weight(1f), enabled = live != null, onRefresh = { live?.tickOnce() }) {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                val expandKey = expandedMac ?: defaultExpand
+                shown.forEach { client ->
+                    val expandable = live != null || (!client.blocked && !client.offline)
+                    if (client.mac == expandKey && expandable) {
+                        ExpandedClientCard(client, ticker, live, onRename)
+                    } else {
+                        ClientRow(client, onClick = { if (expandable) expandedMac = client.mac })
+                    }
                 }
+                if (live != null && shown.isEmpty()) {
+                    Text(
+                        if (live.stale) "Waiting for the router…" else "Nothing here",
+                        style = mono(11f, 500, Wrt.TextDim),
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp),
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
             }
-            if (live != null && shown.isEmpty()) {
-                Text(
-                    if (live.stale) "Waiting for the router…" else "Nothing here",
-                    style = mono(11f, 500, Wrt.TextDim),
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp),
-                )
-            }
-            Spacer(Modifier.height(12.dp))
         }
     }
 }

@@ -51,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.vivekkaushik.wrtpulse.ui.PullToRefresh
 import com.vivekkaushik.wrtpulse.ui.GhostButton
 import com.vivekkaushik.wrtpulse.ui.PrimaryButton
 import com.vivekkaushik.wrtpulse.data.DraftIface
@@ -118,32 +119,34 @@ fun InterfacesScreen(
             style = sans(11f, 400, Wrt.TextDim),
             modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 10.dp),
         )
-        Column(
-            Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            if (store.radios.isNotEmpty()) {
-                SectionLabel("RADIOS", tracking = 0.14, modifier = Modifier.padding(start = 2.dp, top = 2.dp))
-                store.radios.forEach { radio -> RadioRow(store, radio) { onOpenRadio(radio.section) } }
-                SectionLabel(
-                    "NETWORKS",
-                    tracking = 0.14,
-                    modifier = Modifier.padding(start = 2.dp, top = 6.dp),
-                )
+        PullToRefresh(Modifier.weight(1f), onRefresh = { if (!store.applying && !store.refreshPaused) store.load() }) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (store.radios.isNotEmpty()) {
+                    SectionLabel("RADIOS", tracking = 0.14, modifier = Modifier.padding(start = 2.dp, top = 2.dp))
+                    store.radios.forEach { radio -> RadioRow(store, radio) { onOpenRadio(radio.section) } }
+                    SectionLabel(
+                        "NETWORKS",
+                        tracking = 0.14,
+                        modifier = Modifier.padding(start = 2.dp, top = 6.dp),
+                    )
+                }
+                if (rows.isEmpty()) {
+                    Text(
+                        if (store.loaded) "This router has no wireless interfaces yet."
+                        else store.error ?: "Reading wireless config…",
+                        style = mono(11f, 500, if (store.error != null) Wrt.Red else Wrt.TextDim),
+                        modifier = Modifier.padding(vertical = 12.dp),
+                    )
+                }
+                rows.forEach { row -> InterfaceListRow(store, row, onEdit, onShowUci) }
+                Spacer(Modifier.height(8.dp))
             }
-            if (rows.isEmpty()) {
-                Text(
-                    if (store.loaded) "This router has no wireless interfaces yet."
-                    else store.error ?: "Reading wireless config…",
-                    style = mono(11f, 500, if (store.error != null) Wrt.Red else Wrt.TextDim),
-                    modifier = Modifier.padding(vertical = 12.dp),
-                )
-            }
-            rows.forEach { row -> InterfaceListRow(store, row, onEdit, onShowUci) }
-            Spacer(Modifier.height(8.dp))
         }
     }
 }

@@ -181,3 +181,88 @@ class GuestDetectTest {
         assertTrue(net!!.open)
     }
 }
+
+/**
+ * The IoT network is the guest recipe under its own names, with the one firewall difference
+ * that makes it useful: the LAN reaches in, the devices cannot reach out to the LAN.
+ */
+class IotOpsTest {
+
+    private val cfg = GuestConfig(
+        ssid = "Casa-IoT", key = "amber-cedar-delta-ember", open = false,
+        devices = listOf("radio0"), isolate = false, routerIp = "192.168.4.1",
+    )
+    private val ops = GuestStore.createOps(cfg, NetworkKind.IOT)
+
+    @Test
+    fun `iot lives under its own names and never touches the guest sections`() {
+        assertTrue(ops.contains("set network.wrtpulse_iot_dev.name='br-iot'"))
+        assertTrue(ops.contains("set network.wrtpulse_iot.ipaddr='192.168.4.1'"))
+        assertTrue(ops.contains("set dhcp.wrtpulse_iot.interface='wrtpulse_iot'"))
+        assertTrue(ops.contains("set firewall.wrtpulse_iot.name='iot'"))
+        assertTrue(ops.contains("set wireless.wrtpulse_iot.network='wrtpulse_iot'"))
+        assertTrue(ops.contains("set firewall.wrtpulse_iot_dhcp.name='IoT-DHCP'"))
+        assertFalse(ops.any { it.contains("wrtpulse_guest") })
+    }
+
+    /** The point of the zone: LAN → IoT is forwarded, IoT → LAN never is. */
+    @Test
+    fun `the lan is let into the iot zone, one way`() {
+        assertTrue(ops.contains("set firewall.wrtpulse_iot_lan=forwarding"))
+        assertTrue(ops.contains("set firewall.wrtpulse_iot_lan.src='lan'"))
+        assertTrue(ops.contains("set firewall.wrtpulse_iot_lan.dest='iot'"))
+        assertTrue(ops.contains("set firewall.wrtpulse_iot_wan.dest='wan'"))
+        assertTrue(ops.contains("set firewall.wrtpulse_iot.forward='REJECT'"))
+        assertFalse(ops.any { it.contains(".src='iot'") && it.contains("dest='lan'") })
+        // Guests get no such forwarding.
+        assertFalse(GuestStore.createOps(cfg, NetworkKind.GUEST).any { it.contains("_lan=forwarding") })
+    }
+
+    /** Devices that never leave keep their address; passers-by get an hour. */
+    @Test
+    fun `iot leases are long and isolation is off unless asked`() {
+        assertTrue(ops.contains("set dhcp.wrtpulse_iot.leasetime='12h'"))
+        assertFalse(ops.any { it.endsWith(".isolate='1'") })
+        assertTrue(GuestStore.createOps(cfg.copy(isolate = true), NetworkKind.IOT).any { it.endsWith(".isolate='1'") })
+        assertFalse(NetworkKind.IOT.isolateDefault)
+        assertTrue(NetworkKind.GUEST.isolateDefault)
+    }
+
+    @Test
+    fun `remove takes the lan forwarding with it`() {
+        val net = GuestNetwork(
+            ssid = "Casa-IoT", key = "x", open = false, enabled = true, bands = listOf("radio0"),
+            apSections = listOf("wrtpulse_iot"), network = "wrtpulse_iot",
+            zoneSection = "wrtpulse_iot", zoneName = "iot", address = null,
+        )
+        val ops = GuestStore.removeOps(net, NetworkKind.IOT)
+        assertTrue(ops.contains("delete firewall.wrtpulse_iot_lan"))
+        assertTrue(ops.contains("delete firewall.wrtpulse_iot"))
+        assertTrue(ops.contains("delete network.wrtpulse_iot"))
+        assertFalse(ops.any { it.contains("wrtpulse_guest") })
+    }
+
+    @Test
+    fun `the ssid says IoT and the default band is 2_4 GHz when the router has one`() {
+        assertEquals("home.gw-IoT", GuestStore.suggestSsid("home.gw", NetworkKind.IOT))
+        val radios = listOf(radio("radio0", "2.4G"), radio("radio1", "5G"))
+        assertEquals(listOf("radio0"), GuestStore.defaultRadios(radios, NetworkKind.IOT))
+        assertEquals(listOf("radio0", "radio1"), GuestStore.defaultRadios(radios, NetworkKind.GUEST))
+        // A 5 GHz-only router still gets its one radio rather than nothing.
+        assertEquals(listOf("radio1"), GuestStore.defaultRadios(listOf(radio("radio1", "5G")), NetworkKind.IOT))
+    }
+
+    /** An IoT zone is found under its own name, and a guest zone is not mistaken for it. */
+    @Test
+    fun `detection is by the kind's zone`() {
+        val ap = WifiNetwork("wrtpulse_iot", "radio0", "Casa-IoT", "psk2", "secretpass", false, "ap", "wrtpulse_iot")
+        val fw = Parsers.firewallConfig(
+            Parsers.uciShow("firewall.z=zone\nfirewall.z.name='iot'\nfirewall.z.network='wrtpulse_iot'")
+        )
+        assertEquals("Casa-IoT", GuestStore.detect(listOf(ap), fw, NetworkKind.IOT)!!.ssid)
+        assertNull(GuestStore.detect(listOf(ap), fw, NetworkKind.GUEST))
+    }
+
+    private fun radio(section: String, band: String) =
+        com.vivekkaushik.wrtpulse.ops.WifiRadio(section, band, "auto", "HT20", disabled = false)
+}

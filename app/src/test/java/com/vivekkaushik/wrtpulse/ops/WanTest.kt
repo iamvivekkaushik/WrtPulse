@@ -310,6 +310,10 @@ class WanCommandTest {
      */
     @Test
     fun `the rollback is armed before the batch`() {
+        // Stop and Start on the hub are the same two verbs LuCI's interface page runs, quoted
+        // so a section name is never shell.
+        assertEquals("ifdown 'wan' >/dev/null 2>&1; echo done", Commands.ifdown("wan"))
+        assertEquals("ifup 'wan' >/dev/null 2>&1; echo done", Commands.ifup("wan"))
         val script = Commands.wanApply(listOf("set network.wan.proto='pppoe'"), listOf("network"), Commands.ifup("wan"), 30)
         val copy = script.indexOf("cp /etc/config/network")
         val watcher = script.indexOf("sleep 30")

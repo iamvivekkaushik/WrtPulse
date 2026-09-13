@@ -72,14 +72,16 @@ fun DashboardScreen(
     inventory: Inventory?,
     ops: RouterOps? = null,
     guest: com.vivekkaushik.wrtpulse.data.GuestStore? = null,
+    /** The same store, told to be the IoT network. */
+    iot: com.vivekkaushik.wrtpulse.data.GuestStore? = null,
     board: com.vivekkaushik.wrtpulse.ops.BoardInfo? = null,
     routerName: String,
     onRouterTap: () -> Unit,
-    onOpenTerminal: () -> Unit,
 ) {
     var rebootOpen by remember { mutableStateOf(false) }
     var speedOpen by remember { mutableStateOf(false) }
     var guestOpen by remember { mutableStateOf(false) }
+    var iotOpen by remember { mutableStateOf(false) }
     if (rebootOpen && ops != null) {
         RebootDialog(ops, routerName, onDismiss = { rebootOpen = false })
     }
@@ -150,15 +152,21 @@ fun DashboardScreen(
                     onClick = if (guest != null) ({ guestOpen = true }) else null,
                 )
                 QuickAction(
+                    Modifier.weight(1f), WrtIcons.IotWifi, "IoT Wi-Fi",
+                    onClick = if (iot != null) ({ iotOpen = true }) else null,
+                )
+                QuickAction(
                     Modifier.weight(1f), WrtIcons.Speedtest, "Speedtest",
                     onClick = if (ops != null) ({ speedOpen = true }) else null,
                 )
-                QuickAction(Modifier.weight(1f), WrtIcons.Prompt, "Terminal", onClick = onOpenTerminal)
             }
         }
     }
     SheetHost(visible = guestOpen, onDismiss = { guestOpen = false }) {
         GuestSheet(guest, board?.hostname, onDismiss = { guestOpen = false })
+    }
+    SheetHost(visible = iotOpen, onDismiss = { iotOpen = false }) {
+        GuestSheet(iot, board?.hostname, onDismiss = { iotOpen = false })
     }
   }
 }
