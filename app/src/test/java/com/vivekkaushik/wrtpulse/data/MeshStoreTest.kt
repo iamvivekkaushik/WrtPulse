@@ -62,6 +62,17 @@ private val PRIMARY_NETWORK = """
     network.lan.device='br-lan'
     network.lan.proto='static'
     network.lan.ipaddr='192.168.0.1/24'
+    network.br_lan=device
+    network.br_lan.name='br-lan'
+    network.br_lan.type='bridge'
+    network.br_lan.ports='lan1' 'lan2'
+    network.wrtpulse_guest=interface
+    network.wrtpulse_guest.device='br-guest'
+    network.wrtpulse_guest.proto='static'
+    network.wrtpulse_guest.ipaddr='192.168.3.1'
+    network.wrtpulse_guest_dev=device
+    network.wrtpulse_guest_dev.name='br-guest'
+    network.wrtpulse_guest_dev.type='bridge'
 """.trimIndent()
 
 private val PRIMARY_DHCP = """
@@ -163,6 +174,40 @@ class MeshStoreTest {
         assertEquals(listOf(renamed.ssid), s.staleDomains.map { it.ssid })
         // The repair writes the domain the new name derives.
         assertTrue(MeshOps.roamingOps(s.lanAps).contains("set wireless.${renamed.section}.mobility_domain='${MeshOps.mobilityDomain(renamed.ssid)}'"))
+    }
+
+    /** The guest network beside the LAN becomes an extra the nodes mirror, with a VLAN of its own. */
+    @Test
+    fun `a bridged guest network is an extra with vlan 3, and the trunk ops carry it over mesh and sockets`() {
+        val s = store()
+        val p = s.profileFrom()
+        assertEquals(listOf("guest"), p.extras.map { it.name })
+        assertEquals(3, p.extras.single().vid)
+        assertEquals("Casa-Guest", p.extras.single().ssids.single().ssid)
+        val ops = s.trunkOps()
+        assertTrue(ops.contains("set network.wrtpulse_trunk_guest_mesh.ifname='phy0-mesh0'"))
+        assertTrue(ops.contains("set network.wrtpulse_trunk_guest_mesh.name='phy0-mesh0.3'"))
+        assertTrue(ops.contains("set network.wrtpulse_trunk_guest_lan1.name='lan1.3'"))
+        assertTrue(ops.contains("add_list network.wrtpulse_guest_dev.ports='phy0-mesh0.3'"))
+        assertTrue(ops.contains("add_list network.wrtpulse_guest_dev.ports='lan2.3'"))
+        assertFalse(s.trunksReady)
+    }
+
+    /** The snapshot a node keeps on its own flash, read alongside everything else. */
+    @Test
+    fun `a pre-mesh snapshot on the router is reported with what it would bring back`() {
+        val s = store()
+        s.ingest(mapOf("uci" to PRIMARY_WIRELESS, "presnap" to "present\n192.168.0.1/24\nOpenWrt\n"))
+        assertTrue(s.onRouterSnapshot)
+        assertEquals("192.168.0.1", s.onRouterSnapshotLan)
+        assertEquals("OpenWrt", s.onRouterSnapshotHostname)
+        s.ingest(mapOf("uci" to PRIMARY_WIRELESS, "presnap" to "absent\n"))
+        assertFalse(s.onRouterSnapshot)
+        assertNull(s.onRouterSnapshotLan)
+        // The commands: kept before the batch, removed by the restore so it is not carried forward.
+        assertTrue(com.vivekkaushik.wrtpulse.ops.Commands.NODE_KEEP_SNAPSHOT.contains("sysupgrade -b /etc/wrtpulse/pre-mesh.tar.gz"))
+        assertTrue(com.vivekkaushik.wrtpulse.ops.Commands.NODE_RESTORE_SNAPSHOT.contains("sysupgrade -r /etc/wrtpulse/pre-mesh.tar.gz"))
+        assertTrue(com.vivekkaushik.wrtpulse.ops.Commands.NODE_RESTORE_SNAPSHOT.contains("rm -f /etc/wrtpulse/pre-mesh.tar.gz"))
     }
 
     /** The Deco after its join, read as the current router: gateway set, DHCP off, copied SSIDs. */

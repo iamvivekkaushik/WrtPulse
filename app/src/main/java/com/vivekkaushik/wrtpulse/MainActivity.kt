@@ -282,6 +282,13 @@ private fun WrtPulseApp() {
     val activity = LocalActivity.current as FragmentActivity
 
     fun doConnect(entity: RouterEntity) {
+        if (entity.host.contains('/')) {
+            // A row written with a prefix on its address by an earlier build: mend it and knock on the address.
+            val fixed = entity.copy(host = entity.host.substringBefore('/'))
+            scope.launch { runCatching { WrtRuntime.db.routers().rehost(entity.id, fixed.host, entity.port) } }
+            doConnect(fixed)
+            return
+        }
         val keyPem = runCatching { entity.privateKey?.let { WrtRuntime.vault.open(it) } }.getOrNull()
         val secret = runCatching { entity.credential?.let { WrtRuntime.vault.open(it) } }.getOrNull()
         flow.startSaved(entity)
@@ -471,6 +478,13 @@ private fun WrtPulseApp() {
                                     guest = guestStore,
                                     iot = iotStore,
                                     board = flow.board,
+                                    nodeOf = savedEntity?.meshPrimary?.let { id ->
+                                        val primary = savedRouters?.firstOrNull { it.identity == id }
+                                        com.vivekkaushik.wrtpulse.ui.screens.NodeOf(
+                                            primaryName = primary?.name ?: "its primary",
+                                            openPrimary = primary?.let { p -> { connectSaved(p) } },
+                                        )
+                                    },
                                     routerName = currentRouter,
                                     onRouterTap = { showSwitcher = true },
                                 )
@@ -574,7 +588,7 @@ private fun WrtPulseApp() {
                                                 row?.let {
                                                     val dao = WrtRuntime.db.routers()
                                                     runCatching { dao.setMesh(it.id, null, null, null, null) }
-                                                    if (lan != null) runCatching { dao.rehost(it.id, lan, it.port) }
+                                                    if (lan != null) runCatching { dao.rehost(it.id, lan.substringBefore('/'), it.port) }
                                                 }
                                                 if (lan != null) {
                                                     runCatching { WrtRuntime.session?.disconnect() }
@@ -610,6 +624,56 @@ private fun WrtPulseApp() {
                                             ?.takeIf { it != savedEntity?.identity }
                                             ?.let { id -> savedRouters?.firstOrNull { it.identity == id } },
                                         consumePendingJoin = { pendingJoinPrimary = null },
+                                        newSetup = {
+                                            WrtRuntime.session?.let { com.vivekkaushik.wrtpulse.data.NodeSetup(it, WrtRuntime.hostKeys) }
+                                        },
+                                        // A router with no row yet: the join gets a stand-in
+                                        // entity carrying the identity the setup chose, and the
+                                        // profile straight from this primary, live.
+                                        newJoinVia = { setup ->
+                                            val jump = setup.jump
+                                            val ms = meshStore
+                                            val profile = ms?.profile ?: ms?.takeIf { it.loaded }?.profileFrom()
+                                            if (jump == null || profile == null) null
+                                            else com.vivekkaushik.wrtpulse.data.MeshJoin(
+                                                session = jump,
+                                                client = WrtRuntime.client,
+                                                initialProfile = profile,
+                                                entity = RouterEntity(
+                                                    name = "Node", host = jump.target.host, port = 22, username = "root",
+                                                    model = setup.board?.model.orEmpty(), summary = setup.board?.summary.orEmpty(),
+                                                    credential = null, lastSeenEpoch = System.currentTimeMillis() / 1000,
+                                                    identity = setup.identity,
+                                                ),
+                                                backups = File(context.filesDir, "backups"),
+                                                existingKeyPem = null,
+                                                existingNodes = savedRouters.orEmpty().count { it.meshPrimary == savedEntity?.identity },
+                                            )
+                                        },
+                                        persistVia = { setup, join, outcome ->
+                                            val dao = WrtRuntime.db.routers()
+                                            val primaryId = savedEntity?.identity
+                                            runCatching {
+                                                val existing = dao.byIdentity(setup.identity)
+                                                if (!outcome.joined) {
+                                                    // Rolled back: it is a factory router on a cable again, not a saved one.
+                                                    existing?.let { dao.delete(it.id) }
+                                                    WrtRuntime.hostKeys.forget(com.vivekkaushik.wrtpulse.net.SshTarget("x", 22, "root", setup.identity))
+                                                    return@runCatching
+                                                }
+                                                val id = existing?.id ?: dao.upsert(
+                                                    RouterEntity(
+                                                        name = join.name.trim().ifEmpty { "Node" }, host = outcome.host, port = 22, username = "root",
+                                                        model = setup.board?.model.orEmpty(), summary = setup.board?.summary.orEmpty(),
+                                                        credential = null, lastSeenEpoch = System.currentTimeMillis() / 1000,
+                                                        identity = setup.identity,
+                                                    )
+                                                )
+                                                dao.rehost(id, outcome.host, 22)
+                                                outcome.installedKeyPem?.let { dao.setPrivateKey(id, WrtRuntime.vault.seal(it)) }
+                                                dao.setMesh(id, primaryId, outcome.backhaul.uci, outcome.snapshot, outcome.meshMac)
+                                            }
+                                        },
                                         // The snapshot Leave mesh would restore: the newest
                                         // archive of this router on the phone, which for a join
                                         // this app ran is the one taken just before it.

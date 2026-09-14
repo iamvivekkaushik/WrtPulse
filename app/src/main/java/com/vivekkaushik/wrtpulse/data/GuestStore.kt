@@ -28,6 +28,15 @@ data class GuestNetwork(
     val address: String?,
 )
 
+/** A mesh node's copy of the primary's guest or IoT SSID — read-only from here. */
+data class MirroredNetwork(
+    val ssid: String,
+    val open: Boolean,
+    val enabled: Boolean,
+    /** The radios that broadcast it — only the bands this node has. */
+    val bands: List<String>,
+)
+
 /**
  * One kind of walled-off Wi-Fi the dashboard can put up in a tap: the names it is written
  * under and the traffic it lets through. Guest and IoT are the same recipe — an SSID on its
@@ -110,6 +119,13 @@ class GuestStore(private val session: RouterSession, val kind: NetworkKind = Net
     /** The guest network the router has, or null when there is none to manage. */
     var existing by mutableStateOf<GuestNetwork?>(null); private set
 
+    /**
+     * The copy of the primary's network a mesh node carries, or null. It is not this
+     * router's to manage: the SSID, key and firewall live on the primary and a push
+     * rewrites the copy, so the sheet only shows it.
+     */
+    var mirrored by mutableStateOf<MirroredNetwork?>(null); private set
+
     /** Router addresses already in use, so a new guest subnet does not collide. */
     private var takenAddresses by mutableStateOf<List<String>>(emptyList())
 
@@ -142,6 +158,7 @@ class GuestStore(private val session: RouterSession, val kind: NetworkKind = Net
                 .map { it.value.substringBefore('/') }
                 .filter { it.isNotBlank() }
             existing = detect(nets, Parsers.firewallConfig(firewall), kind)
+            mirrored = mirrored(nets, kind)
             error = null
             loaded = true
         } catch (e: SshException) {
@@ -365,6 +382,23 @@ class GuestStore(private val session: RouterSession, val kind: NetworkKind = Net
          * Finds a network of this kind in the config: the app's own, or a stock one recognised
          * by a zone of the kind's name. The APs are the wifi-ifaces bound to that zone's networks.
          */
+        /**
+         * The APs a mesh node broadcasts for the primary's network of this [kind]: they sit on
+         * the node's `wrtpulse_x_<name>` interface, a VLAN trunked to the primary's bridge.
+         */
+        fun mirrored(networks: List<WifiNetwork>, kind: NetworkKind): MirroredNetwork? {
+            val net = com.vivekkaushik.wrtpulse.ops.MeshOps.EXTRA_PREFIX + kind.net.removePrefix("wrtpulse_")
+            val aps = networks.filter { it.mode == "ap" && it.network == net }
+            if (aps.isEmpty()) return null
+            val first = aps.first()
+            return MirroredNetwork(
+                ssid = first.ssid,
+                open = first.encryption == "none" || first.encryption.isEmpty(),
+                enabled = aps.any { !it.disabled },
+                bands = aps.map { it.device },
+            )
+        }
+
         fun detect(
             networks: List<WifiNetwork>,
             firewall: Parsers.FirewallConfig,

@@ -271,8 +271,10 @@ class BackupStore(private val session: RouterSession, private val directory: Fil
             entries = tar.entries,
             hostname = tar.readText("etc/config/system")
                 ?.let { Parsers.uciFileOption(it, "system", null, "hostname") },
+            // `ipaddr '192.168.0.1/24'` is a legal spelling; the address alone is what a saved
+            // row and a reconnect want.
             lanAddress = tar.readText("etc/config/network")
-                ?.let { Parsers.uciFileOption(it, "interface", "lan", "ipaddr") },
+                ?.let { Parsers.uciFileOption(it, "interface", "lan", "ipaddr") }?.substringBefore('/'),
         )
         restoreOutput = null
         return "Ready: ${tar.entries.count { !it.isDirectory }} files, ${bytes.size / 1024} kB"

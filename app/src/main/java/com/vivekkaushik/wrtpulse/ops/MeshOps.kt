@@ -40,6 +40,8 @@ data class MeshProfile(
     /** The primary's own radio MACs, so a node can tell which peer is the primary. */
     val primaryMacs: List<String>,
     val capturedEpoch: Long,
+    /** Guest, IoT and any other bridged Wi-Fi network the primary carries beside the LAN. */
+    val extras: List<MeshExtraNet> = emptyList(),
 ) {
     val wirelessReady: Boolean get() = meshId != null && meshKey != null && meshBand != null
 
@@ -75,6 +77,21 @@ data class MeshProfile(
         put("taken", JSONArray(taken))
         put("primaryMacs", JSONArray(primaryMacs))
         put("capturedEpoch", capturedEpoch)
+        put("extras", JSONArray().apply {
+            extras.forEach { x ->
+                put(JSONObject().apply {
+                    put("name", x.name); put("vid", x.vid); put("isolate", x.isolate)
+                    put("ssids", JSONArray().apply {
+                        x.ssids.forEach {
+                            put(JSONObject().apply {
+                                put("band", it.band); put("ssid", it.ssid); put("encryption", it.encryption)
+                                put("key", it.key); put("hidden", it.hidden)
+                            })
+                        }
+                    })
+                })
+            }
+        })
     }.toString()
 
     companion object {
@@ -84,10 +101,17 @@ data class MeshProfile(
                 val a = o.optJSONArray(key) ?: return emptyList()
                 return (0 until a.length()).map { a.optString(it) }.filter { it.isNotEmpty() }
             }
-            val ssids = o.optJSONArray("ssids")?.let { a ->
+            fun ssidsOf(holder: JSONObject) = holder.optJSONArray("ssids")?.let { a ->
                 (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map {
                     MeshSsid(it.optString("band"), it.optString("ssid"), it.optString("encryption"),
                         it.optString("key"), it.optBoolean("hidden"))
+                }
+            }.orEmpty()
+            val ssids = ssidsOf(o)
+            val extras = o.optJSONArray("extras")?.let { a ->
+                (0 until a.length()).mapNotNull { a.optJSONObject(it) }.mapNotNull { x ->
+                    val name = x.optString("name"); val vid = x.optInt("vid", 0)
+                    if (name.isEmpty() || vid <= 0) null else MeshExtraNet(name, vid, x.optBoolean("isolate"), ssidsOf(x))
                 }
             }.orEmpty()
             val radios = o.optJSONArray("radios")?.let { a ->
@@ -111,9 +135,28 @@ data class MeshProfile(
                 taken = strings("taken"),
                 primaryMacs = strings("primaryMacs"),
                 capturedEpoch = o.optLong("capturedEpoch"),
+                extras = extras,
             )
         }
     }
+}
+
+/**
+ * A network beside the LAN that nodes mirror: the primary's guest or IoT Wi-Fi. Its traffic
+ * has to land in the primary's own bridge for it, not the LAN, so it rides the backhaul in
+ * a VLAN of its own — [vid] — tagged over the mesh point and over the LAN sockets alike.
+ */
+data class MeshExtraNet(
+    /** Short name, from the primary's interface: `guest`, `iot`. */
+    val name: String,
+    val vid: Int,
+    val isolate: Boolean,
+    val ssids: List<MeshSsid>,
+) {
+    /** `wrtpulse_x_guest` — the node's interface and the stem of its sections. */
+    val section: String get() = "wrtpulse_x_$name"
+    /** `br-x-guest`, inside the 15-character netdev limit for any short name. */
+    val bridge: String get() = "br-x-${name.take(8)}"
 }
 
 /** How a node reaches its primary. */
@@ -181,6 +224,205 @@ object MeshOps {
 
     /** The section the primary's and every node's mesh point is written to. */
     const val MESH_SECTION = "wrtpulse_mesh"
+
+    // -----------------------------------------------------------------------
+    // The setup port: a LAN socket on the primary, held apart for a new router
+    // -----------------------------------------------------------------------
+
+    const val SETUP_IFACE = "wrtpulse_setup"
+    const val SETUP_DEVICE = "wrtpulse_setup_dev"
+    const val SETUP_VLAN = "wrtpulse_setup_vlan"
+    const val SETUP_BRIDGE = "br-setup"
+
+    /**
+     * Takes one LAN socket out of the primary's LAN and gives it a bridge of its own, so the
+     * router cabled into it — still 192.168.1.1 with its own DHCP server — is on a wire the
+     * household never sees. The primary reaches it there over IPv6 link-local, which needs no
+     * IPv4 agreement at all. On DSA the socket is a netdev in `br-lan`; on swconfig it is a
+     * chip port that has to be carved into a VLAN of its own first.
+     *
+     * [port] is a netdev (`lan3`) or `sw:<n>`. Returns null when the port cannot be found in
+     * the LAN.
+     */
+    fun setupPortOps(networkUci: Map<String, String>, port: String): List<String>? {
+        val ops = mutableListOf<String>()
+        val lanDevice = networkUci["network.lan.device"].orEmpty()
+        val bridge = Parsers.netDevices(networkUci).firstOrNull { it.name == lanDevice }
+        val member: String
+        if (port.startsWith("sw:")) {
+            val n = port.removePrefix("sw:").toIntOrNull() ?: return null
+            val vlans = Parsers.switchVlans(networkUci)
+            val lanVid = Parsers.lanSwitchVlan(networkUci) ?: return null
+            val lanVlan = vlans.firstOrNull { it.vlan == lanVid } ?: return null
+            val lanPorts = Parsers.swPorts(lanVlan.ports)
+            if (lanPorts.none { it.port == n && !it.tagged }) return null
+            val cpu = lanPorts.firstOrNull { it.tagged } ?: return null
+            val vid = (3..4000).first { id -> vlans.none { it.vlan == id } }
+            val base = Parsers.lanSwitchMember(networkUci)?.substringBefore('.') ?: "eth0"
+            ops += "set network.${lanVlan.section}.ports='${Parsers.swPortsValue(lanPorts.filterNot { it.port == n })}'"
+            ops += "set network.$SETUP_VLAN=switch_vlan"
+            ops += "set network.$SETUP_VLAN.device='${lanVlan.device}'"
+            ops += "set network.$SETUP_VLAN.vlan='$vid'"
+            ops += "set network.$SETUP_VLAN.ports='${Parsers.swPortsValue(listOf(SwPort(n, false), cpu))}'"
+            member = "$base.$vid"
+        } else {
+            if (bridge == null || port !in bridge.ports) return null
+            ops += Commands.listOps("network.${bridge.section}.ports", bridge.ports.filterNot { it == port })
+            Parsers.bridgeVlans(networkUci).filter { v -> v.ports.any { it.name == port } }.forEach { v ->
+                ops += Commands.listOps("network.${v.section}.ports", v.ports.filterNot { it.name == port }.map { it.token() })
+            }
+            member = port
+        }
+        ops += "set network.$SETUP_DEVICE=device"
+        ops += "set network.$SETUP_DEVICE.name='$SETUP_BRIDGE'"
+        ops += "set network.$SETUP_DEVICE.type='bridge'"
+        ops += "add_list network.$SETUP_DEVICE.ports='$member'"
+        ops += "set network.$SETUP_IFACE=interface"
+        ops += "set network.$SETUP_IFACE.device='$SETUP_BRIDGE'"
+        // No address: the kernel gives the bridge a link-local one on its own, which is all
+        // the hop needs, and nothing here can collide with anything.
+        ops += "set network.$SETUP_IFACE.proto='none'"
+        // A zone of its own, or fw4 rejects input on the unzoned interface — including the
+        // neighbour advertisements without which the router on it can never be reached.
+        // Input from one router the user is setting up, for the minutes it takes; no forwarding.
+        ops += "set firewall.$SETUP_ZONE=zone"
+        ops += "set firewall.$SETUP_ZONE.name='$SETUP_ZONE_NAME'"
+        ops += "set firewall.$SETUP_ZONE.input='ACCEPT'"
+        ops += "set firewall.$SETUP_ZONE.output='ACCEPT'"
+        ops += "set firewall.$SETUP_ZONE.forward='REJECT'"
+        ops += "add_list firewall.$SETUP_ZONE.network='$SETUP_IFACE'"
+        return ops
+    }
+
+    const val SETUP_ZONE = "wrtpulse_setup"
+    const val SETUP_ZONE_NAME = "setup"
+
+    /** The config files [setupPortOps] and [setupReleaseOps] touch, in commit order. */
+    val SETUP_PACKAGES = listOf("network", "firewall")
+
+    /**
+     * The `uci show network` map as it will read once [setupPortOps] has applied — what the
+     * undo has to be computed against, and it has to exist before the isolation runs so the
+     * router can hold it. Lists are spelled the way `uci show` prints them, quotes stripped.
+     */
+    fun afterIsolation(networkUci: Map<String, String>, port: String): Map<String, String> {
+        val out = networkUci.toMutableMap()
+        val lanDevice = networkUci["network.lan.device"].orEmpty()
+        val bridge = Parsers.netDevices(networkUci).firstOrNull { it.name == lanDevice }
+        val member: String
+        if (port.startsWith("sw:")) {
+            val n = port.removePrefix("sw:").toIntOrNull() ?: return out
+            val vlans = Parsers.switchVlans(networkUci)
+            val lanVlan = vlans.firstOrNull { it.vlan == Parsers.lanSwitchVlan(networkUci) } ?: return out
+            val lanPorts = Parsers.swPorts(lanVlan.ports)
+            val cpu = lanPorts.firstOrNull { it.tagged } ?: return out
+            val vid = (3..4000).first { id -> vlans.none { it.vlan == id } }
+            out["network.${lanVlan.section}.ports"] = Parsers.swPortsValue(lanPorts.filterNot { it.port == n })
+            out["network.$SETUP_VLAN"] = "switch_vlan"
+            out["network.$SETUP_VLAN.device"] = lanVlan.device
+            out["network.$SETUP_VLAN.vlan"] = vid.toString()
+            out["network.$SETUP_VLAN.ports"] = Parsers.swPortsValue(listOf(SwPort(n, false), cpu))
+            member = (Parsers.lanSwitchMember(networkUci)?.substringBefore('.') ?: "eth0") + ".$vid"
+        } else {
+            if (bridge != null) out["network.${bridge.section}.ports"] = bridge.ports.filterNot { it == port }.joinToString("' '")
+            Parsers.bridgeVlans(networkUci).filter { v -> v.ports.any { it.name == port } }.forEach { v ->
+                out["network.${v.section}.ports"] = v.ports.filterNot { it.name == port }.joinToString("' '") { it.token() }
+            }
+            member = port
+        }
+        out["network.$SETUP_DEVICE"] = "device"
+        out["network.$SETUP_DEVICE.name"] = SETUP_BRIDGE
+        out["network.$SETUP_DEVICE.type"] = "bridge"
+        out["network.$SETUP_DEVICE.ports"] = member
+        out["network.$SETUP_IFACE"] = "interface"
+        out["network.$SETUP_IFACE.device"] = SETUP_BRIDGE
+        out["network.$SETUP_IFACE.proto"] = "none"
+        return out
+    }
+
+    /** The mirror image: the setup sections go, and the socket rejoins the LAN it came from. */
+    fun setupReleaseOps(networkUci: Map<String, String>, port: String): List<String> {
+        val ops = mutableListOf<String>()
+        val lanDevice = networkUci["network.lan.device"].orEmpty()
+        val bridge = Parsers.netDevices(networkUci).firstOrNull { it.name == lanDevice }
+        if (port.startsWith("sw:")) {
+            val n = port.removePrefix("sw:").toIntOrNull()
+            val lanVid = Parsers.lanSwitchVlan(networkUci)
+            val lanVlan = Parsers.switchVlans(networkUci).firstOrNull { it.vlan == lanVid }
+            if (n != null && lanVlan != null) {
+                val ports = Parsers.swPorts(lanVlan.ports)
+                if (ports.none { it.port == n }) {
+                    ops += "set network.${lanVlan.section}.ports='${Parsers.swPortsValue(ports + SwPort(n, false))}'"
+                }
+            }
+            if (networkUci.containsKey("network.$SETUP_VLAN")) ops += "delete network.$SETUP_VLAN"
+        } else if (bridge != null) {
+            if (port !in bridge.ports) ops += Commands.listOps("network.${bridge.section}.ports", bridge.ports + port)
+            Parsers.bridgeVlans(networkUci).filter { v -> v.device == lanDevice && v.ports.none { it.name == port } && v.ports.any { !it.tagged } }
+                .forEach { v -> ops += Commands.listOps("network.${v.section}.ports", v.ports.map { it.token() } + "$port:u*") }
+        }
+        if (networkUci.containsKey("network.$SETUP_IFACE")) ops += "delete network.$SETUP_IFACE"
+        if (networkUci.containsKey("network.$SETUP_DEVICE")) ops += "delete network.$SETUP_DEVICE"
+        // The zone is written unconditionally: the network map says nothing about the
+        // firewall file, and deleting an absent section is a no-op in a batch.
+        ops += "delete firewall.$SETUP_ZONE"
+        return ops
+    }
+
+    /** The socket a primary is holding apart, from its config: `lan3`, `sw:4`, or null. */
+    fun heldSetupPort(networkUci: Map<String, String>): String? {
+        val member = Parsers.uciList(networkUci["network.$SETUP_DEVICE.ports"].orEmpty()).firstOrNull() ?: return null
+        val vid = networkUci["network.$SETUP_VLAN.vlan"]
+        if (vid != null && member.endsWith(".$vid")) {
+            val n = Parsers.swPorts(networkUci["network.$SETUP_VLAN.ports"].orEmpty()).firstOrNull { !it.tagged }?.port ?: return null
+            return "sw:$n"
+        }
+        return member
+    }
+
+    /** LAN sockets with nothing plugged in — the ones the setup can hold apart before a cable arrives. */
+    fun freeLanSockets(devs: List<NetDev>, sw: List<SwitchDev>, networkUci: Map<String, String>): List<String> {
+        val lanDevice = networkUci["network.lan.device"].orEmpty()
+        val lanPorts = Parsers.netDevices(networkUci).firstOrNull { it.name == lanDevice }?.ports.orEmpty()
+        val dsa = Parsers.switchPorts(devs).filter { !it.carrier && (lanPorts.isEmpty() || it.name in lanPorts) && !it.name.startsWith("wan") }.map { it.name }
+        if (dsa.isNotEmpty() || sw.isEmpty()) return dsa
+        val lanVid = Parsers.lanSwitchVlan(networkUci)
+        val lanSw = Parsers.switchVlans(networkUci).firstOrNull { it.vlan == lanVid }?.let { Parsers.swPorts(it.ports) }
+            ?.filterNot { it.tagged }?.map { it.port }.orEmpty()
+        return sw.flatMap { dev -> lanSw.filter { p -> dev.links[p]?.up != true && p != dev.cpuPort }.map { "sw:$it" } }
+    }
+
+    /** Whether one socket has a link right now. */
+    fun socketUp(port: String, devs: List<NetDev>, sw: List<SwitchDev>): Boolean =
+        if (port.startsWith("sw:")) {
+            val n = port.removePrefix("sw:").toIntOrNull()
+            sw.any { dev -> dev.links[n]?.up == true }
+        } else devs.firstOrNull { it.name == port }?.carrier == true
+
+    /**
+     * The socket a cable just went into: physical, wired, in the LAN, down before and up now.
+     * DSA sockets are netdevs with carrier; swconfig sockets are chip ports with link state.
+     */
+    fun newlyUpPort(
+        before: List<NetDev>, after: List<NetDev>,
+        beforeSw: List<SwitchDev>, afterSw: List<SwitchDev>,
+        networkUci: Map<String, String>,
+    ): String? {
+        val lanDevice = networkUci["network.lan.device"].orEmpty()
+        val lanPorts = Parsers.netDevices(networkUci).firstOrNull { it.name == lanDevice }?.ports.orEmpty()
+        val wasUp = before.filter { it.carrier }.map { it.name }.toSet()
+        Parsers.switchPorts(after).firstOrNull { it.carrier && it.name !in wasUp && (lanPorts.isEmpty() || it.name in lanPorts) }
+            ?.let { return it.name }
+        val lanVid = Parsers.lanSwitchVlan(networkUci)
+        val lanSw = Parsers.switchVlans(networkUci).firstOrNull { it.vlan == lanVid }?.let { Parsers.swPorts(it.ports) }
+            ?.filterNot { it.tagged }?.map { it.port }.orEmpty()
+        afterSw.forEach { dev ->
+            val was = beforeSw.firstOrNull { it.name == dev.name }?.links.orEmpty()
+            dev.links.values.firstOrNull { l -> l.up && was[l.port]?.up != true && l.port != dev.cpuPort && (lanSw.isEmpty() || l.port in lanSw) }
+                ?.let { return "sw:${it.port}" }
+        }
+        return null
+    }
 
     /** Sections a node's copied SSIDs land in: `wrtpulse_ap_radio0`, then `wrtpulse_ap_radio0_2`. */
     const val AP_PREFIX = "wrtpulse_ap_"
@@ -381,6 +623,7 @@ object MeshOps {
         val meshRadio = if (backhaul == Backhaul.Wireless) meshRadioOf(profile, node) else null
         ops += nodeRadioOps(profile, node.radios, meshRadio)
         ops += nodeApOps(profile, node.radios, existing = emptyList())
+        ops += nodeExtraOps(profile, node.radios, meshRadio, meshIfname = null, node.networkUci, node.swDevs, existingNetworks = emptyList())
         if (meshRadio != null && profile.meshId != null && profile.meshKey != null) {
             ops += meshIfaceOps(MESH_SECTION, meshRadio, profile.meshId, profile.meshKey)
         }
@@ -464,8 +707,105 @@ object MeshOps {
         return ops
     }
 
+    const val EXTRA_PREFIX = "wrtpulse_x_"
+
+    /** `phy0-mesh0` for `radio0` — how the wifi scripts name a mesh point, absent a live reading. */
+    fun meshIfnameFor(radio: String): String = "phy${radio.filter { it.isDigit() }.ifEmpty { "0" }}-mesh0"
+
+    /** The node's wired sockets on DSA: the plain netdevs in its LAN bridge. Empty on swconfig. */
+    private fun dsaLanPorts(networkUci: Map<String, String>): List<String> {
+        val lanDevice = networkUci["network.lan.device"].orEmpty()
+        return Parsers.netDevices(networkUci).firstOrNull { it.name == lanDevice }?.ports.orEmpty()
+            .filter { !it.contains('.') && !it.startsWith("phy") && !it.startsWith("wlan") }
+    }
+
+    /**
+     * Everything a node needs for the primary's extra networks: per network a bridge of its
+     * own, the VLAN that carries it over the mesh point and over every wired socket, an
+     * interface with no address (the primary owns the subnet), and an AP per band the node
+     * has. A band the node lacks is left out, as is a network the primary has no SSID for.
+     * Existing `wrtpulse_x_*` sections are replaced wholesale, so a sync cannot drift.
+     */
+    fun nodeExtraOps(
+        profile: MeshProfile,
+        radios: List<WifiRadio>,
+        meshRadio: String?,
+        /** The mesh point's live netdev when known; derived from the radio otherwise. */
+        meshIfname: String?,
+        networkUci: Map<String, String>,
+        swDevs: List<SwitchDev>,
+        existingNetworks: List<WifiNetwork>,
+    ): List<String> {
+        val ops = mutableListOf<String>()
+        existingNetworks.filter { it.section.startsWith(EXTRA_PREFIX) }.forEach { ops += "delete wireless.${it.section}" }
+        networkUci.keys.filter { it.startsWith("network.$EXTRA_PREFIX") && it.count { c -> c == '.' } == 1 }
+            .forEach { ops += "delete ${it}" }
+        val mesh = meshRadio?.let { meshIfname ?: meshIfnameFor(it) }
+        val lanPorts = dsaLanPorts(networkUci)
+        val vlans = Parsers.switchVlans(networkUci)
+        val lanVlan = Parsers.lanSwitchVlan(networkUci)?.let { id -> vlans.firstOrNull { it.vlan == id } }
+        val base = Parsers.lanSwitchMember(networkUci)?.substringBefore('.') ?: "eth0"
+        profile.extras.forEach { x ->
+            val bands = radios.map { it.band }.toSet()
+            val carried = x.ssids.filter { it.band in bands }
+            if (carried.isEmpty()) return@forEach
+            val sec = x.section
+            val ports = mutableListOf<String>()
+            if (mesh != null) {
+                ops += "set network.${sec}_mesh=device"
+                ops += "set network.${sec}_mesh.type='8021q'"
+                ops += "set network.${sec}_mesh.ifname='$mesh'"
+                ops += "set network.${sec}_mesh.vid='${x.vid}'"
+                ops += "set network.${sec}_mesh.name='$mesh.${x.vid}'"
+                ports += "$mesh.${x.vid}"
+            }
+            if (swDevs.isNotEmpty() && lanVlan != null) {
+                // One tagged VLAN across the LAN's sockets and the CPU; the CPU side is eth0.<vid>.
+                val members = Parsers.swPorts(lanVlan.ports).map { SwPort(it.port, true) }
+                ops += "set network.${sec}_vlan=switch_vlan"
+                ops += "set network.${sec}_vlan.device='${lanVlan.device}'"
+                ops += "set network.${sec}_vlan.vlan='${x.vid}'"
+                ops += "set network.${sec}_vlan.ports='${Parsers.swPortsValue(members)}'"
+                ports += "$base.${x.vid}"
+            } else {
+                lanPorts.forEach { p ->
+                    val d = "${sec}_${p.filter { it.isLetterOrDigit() }}"
+                    ops += "set network.$d=device"
+                    ops += "set network.$d.type='8021q'"
+                    ops += "set network.$d.ifname='$p'"
+                    ops += "set network.$d.vid='${x.vid}'"
+                    ops += "set network.$d.name='$p.${x.vid}'"
+                    ports += "$p.${x.vid}"
+                }
+            }
+            ops += "set network.${sec}_dev=device"
+            ops += "set network.${sec}_dev.name='${x.bridge}'"
+            ops += "set network.${sec}_dev.type='bridge'"
+            ports.forEach { ops += "add_list network.${sec}_dev.ports='$it'" }
+            ops += "set network.$sec=interface"
+            ops += "set network.$sec.device='${x.bridge}'"
+            ops += "set network.$sec.proto='none'"
+            radios.forEach { radio ->
+                carried.filter { it.band == radio.band }.forEachIndexed { index, ssid ->
+                    val ap = "${sec}_ap_${radio.section}" + if (index == 0) "" else "_${index + 1}"
+                    ops += "set wireless.$ap=wifi-iface"
+                    ops += "set wireless.$ap.device='${radio.section}'"
+                    ops += "set wireless.$ap.mode='ap'"
+                    ops += "set wireless.$ap.ssid='${Commands.escapeValue(ssid.ssid)}'"
+                    ops += "set wireless.$ap.network='$sec'"
+                    ops += "set wireless.$ap.encryption='${ssid.encryption}'"
+                    if (ssid.encryption != "none" && ssid.key.isNotEmpty()) ops += "set wireless.$ap.key='${Commands.escapeValue(ssid.key)}'"
+                    if (ssid.hidden) ops += "set wireless.$ap.hidden='1'"
+                    if (x.isolate) ops += "set wireless.$ap.isolate='1'"
+                    roamingOptions(ssid.ssid, ssid.encryption).forEach { (option, value) -> ops += "set wireless.$ap.$option='$value'" }
+                }
+            }
+        }
+        return ops
+    }
+
     /** What one AP amounts to, for telling a node's copy from the primary's original. */
-    private data class ApShape(val device: String, val ssid: String, val encryption: String, val key: String, val hidden: Boolean, val ft: Boolean, val domain: String)
+    private data class ApShape(val device: String, val ssid: String, val encryption: String, val key: String, val hidden: Boolean, val ft: Boolean, val domain: String, val net: String = "lan", val isolate: Boolean = false)
 
     /**
      * True when a node's copied APs match what the primary would write today. Compared as
@@ -473,29 +813,38 @@ object MeshOps {
      * hidden flag or an added LAN SSID all count as drift.
      */
     fun apsInSync(profile: MeshProfile, radios: List<WifiRadio>, existing: List<WifiNetwork>): Boolean {
+        val bands = radios.map { it.band }.toSet()
         val wanted = radios.flatMap { radio ->
             ssidsFor(profile, radio.band).map { s ->
                 val ft = roamingCapable(s.encryption)
                 ApShape(radio.section, s.ssid, s.encryption, if (s.encryption == "none") "" else s.key, s.hidden, ft, if (ft) mobilityDomain(s.ssid) else "")
+            } + profile.extras.flatMap { x ->
+                x.ssids.filter { it.band == radio.band && it.band in bands }.map { s ->
+                    val ft = roamingCapable(s.encryption)
+                    ApShape(radio.section, s.ssid, s.encryption, if (s.encryption == "none") "" else s.key, s.hidden, ft, if (ft) mobilityDomain(s.ssid) else "", x.section, x.isolate)
+                }
             }
         }.toSet()
-        val have = existing.filter { it.section.startsWith(AP_PREFIX) && it.mode == "ap" }.map { n ->
-            ApShape(n.device, n.ssid, n.encryption, if (n.encryption == "none") "" else n.key, n.hidden, n.ieee80211r, if (n.ieee80211r) n.mobilityDomain else "")
+        val have = existing.filter { (it.section.startsWith(AP_PREFIX) || it.section.startsWith(EXTRA_PREFIX)) && it.mode == "ap" }.map { n ->
+            val net = if (n.section.startsWith(EXTRA_PREFIX)) n.network else "lan"
+            ApShape(n.device, n.ssid, n.encryption, if (n.encryption == "none") "" else n.key, n.hidden, n.ieee80211r, if (n.ieee80211r) n.mobilityDomain else "", net, n.isolate && net != "lan")
         }.toSet()
         return wanted == have
     }
 
     /** "SSID or password changed" / "1 SSID added" — what a node's drift looks like. */
     fun driftSummary(profile: MeshProfile, radios: List<WifiRadio>, existing: List<WifiNetwork>): String {
-        val wanted = radios.flatMap { r -> ssidsFor(profile, r.band).map { it.ssid } }.toSet()
-        val have = existing.filter { it.section.startsWith(AP_PREFIX) && it.mode == "ap" }.map { it.ssid }.toSet()
+        val bands = radios.map { it.band }.toSet()
+        val wanted = (radios.flatMap { r -> ssidsFor(profile, r.band).map { it.ssid } } +
+            profile.extras.flatMap { x -> x.ssids.filter { it.band in bands }.map { it.ssid } }).toSet()
+        val have = existing.filter { (it.section.startsWith(AP_PREFIX) || it.section.startsWith(EXTRA_PREFIX)) && it.mode == "ap" }.map { it.ssid }.toSet()
         val added = wanted - have
         val gone = have - wanted
         return when {
             added.isNotEmpty() && gone.isEmpty() -> "${added.size} SSID${if (added.size == 1) "" else "s"} to add: ${added.joinToString(", ")}"
             gone.isNotEmpty() && added.isEmpty() -> "${gone.size} SSID${if (gone.size == 1) "" else "s"} to drop: ${gone.joinToString(", ")}"
             added.isNotEmpty() -> "SSIDs differ: ${gone.joinToString(", ")} → ${added.joinToString(", ")}"
-            existing.any { it.section.startsWith(AP_PREFIX) && it.ieee80211r && it.mobilityDomain != mobilityDomain(it.ssid) } ->
+            existing.any { (it.section.startsWith(AP_PREFIX) || it.section.startsWith(EXTRA_PREFIX)) && it.ieee80211r && it.mobilityDomain != mobilityDomain(it.ssid) } ->
                 "hand-off domain does not match the SSID"
             else -> "password, security or hand-off differs"
         }

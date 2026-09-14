@@ -52,8 +52,11 @@ import kotlinx.coroutines.launch
  * which bands, and the one-line honesty about what the network is: internet but not your
  * LAN for guests, and the same plus your LAN reaching in for IoT.
  */
+/** The router is a mesh node: its guest and IoT networks belong to [primaryName]. */
+class NodeOf(val primaryName: String, val openPrimary: (() -> Unit)?)
+
 @Composable
-fun GuestSheet(store: GuestStore?, hostname: String?, onDismiss: () -> Unit) {
+fun GuestSheet(store: GuestStore?, hostname: String?, onDismiss: () -> Unit, node: NodeOf? = null) {
     if (store == null) return
     val kind = store.kind
     LaunchedEffect(store) { if (!store.loaded) store.load() }
@@ -73,6 +76,8 @@ fun GuestSheet(store: GuestStore?, hostname: String?, onDismiss: () -> Unit) {
             !store.loaded && store.error == null ->
                 Text("Reading the router…", style = sans(12f, 400, Wrt.TextDim), modifier = Modifier.padding(vertical = 20.dp))
             store.existing != null -> ManageGuest(store, onDismiss)
+            // A node carries the primary's copy, or nothing until the primary has one to push.
+            store.mirrored != null || node != null -> MirroredGuest(store, node)
             else -> CreateGuest(store, hostname, onDismiss)
         }
         Spacer(Modifier.height(20.dp))
@@ -197,6 +202,44 @@ private fun CreateGuest(store: GuestStore, hostname: String?, onDismiss: () -> U
     }
     Spacer(Modifier.height(6.dp))
     GhostButton("Cancel", onClick = onDismiss)
+}
+
+@Composable
+private fun MirroredGuest(store: GuestStore, node: NodeOf?) {
+    val kind = store.kind
+    val net = store.mirrored
+    val primary = node?.primaryName ?: "its primary"
+    if (net != null) {
+        Column(Modifier.padding(top = 8.dp)) {
+            Text(net.ssid.ifBlank { kind.noun.replaceFirstChar { it.uppercase() } }, style = sans(15f, 650))
+            Text(
+                (if (net.enabled) "on the air" else "switched off") +
+                    (if (net.open) " · open" else " · WPA2") +
+                    " · " + net.bands.joinToString(", ") { d -> store.radios.firstOrNull { it.section == d }?.band ?: d },
+                style = sans(11f, 400, if (net.enabled) Wrt.Green else Wrt.TextDim),
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
+        Text(
+            "A copy of $primary's ${kind.noun}. This router is a mesh node, so the SSID, password " +
+                "and firewall are set on $primary and pushed here; devices on it get their address from $primary.",
+            style = sans(11f, 400, Wrt.TextDim, lineHeight = 16.sp),
+            modifier = Modifier.padding(top = 12.dp),
+        )
+    } else {
+        Text(
+            "This router is a mesh node of $primary, so it does not run a ${kind.noun} of its own. " +
+                "Create one on $primary and push Wi-Fi to the nodes from its Mesh page; it appears here " +
+                "on the bands this router has.",
+            style = sans(11f, 400, Wrt.TextDim, lineHeight = 16.sp),
+            modifier = Modifier.padding(top = 12.dp),
+        )
+    }
+    store.error?.let { Text(it, style = mono(10.5f, 500, Wrt.Red, lineHeight = 16.sp), modifier = Modifier.padding(top = 10.dp)) }
+    node?.openPrimary?.let { open ->
+        Spacer(Modifier.height(16.dp))
+        GhostButton("Open $primary", Modifier.fillMaxWidth(), onClick = open)
+    }
 }
 
 @Composable

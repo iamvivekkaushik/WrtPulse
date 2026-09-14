@@ -94,6 +94,12 @@ class MeshHooks(
     val adoptPeer: suspend (node: RouterEntity, mac: String) -> Unit = { _, _ -> },
     /** A short session to a node on its saved credentials, or null when it has none. Closed by the caller. */
     val openNode: suspend (RouterEntity) -> com.vivekkaushik.wrtpulse.net.RouterSession? = { null },
+    /** A cable-only setup from this primary's side, or null when not connected. */
+    val newSetup: () -> com.vivekkaushik.wrtpulse.data.NodeSetup? = { null },
+    /** The join of a router reached through [newSetup]'s hop, once it has answered. */
+    val newJoinVia: (com.vivekkaushik.wrtpulse.data.NodeSetup) -> MeshJoin? = { null },
+    /** Writes the saved row for a router that had none before the join — created on the way. */
+    val persistVia: suspend (setup: com.vivekkaushik.wrtpulse.data.NodeSetup, join: MeshJoin, outcome: JoinOutcome) -> Unit = { _, _, _ -> },
     /** Records that the connected router is a node of [primary] — its config already says so. */
     val markNode: suspend (node: RouterEntity, primary: RouterEntity, backhaul: Backhaul, meshMac: String?) -> Unit = { _, _, _, _ -> },
 )
@@ -113,6 +119,7 @@ fun MeshScreen(
     onAddNode: () -> Unit = {},
 ) {
     val store = hooks.store
+    val scope = rememberCoroutineScope()
     val current = hooks.current
     val nodes = hooks.saved.filter { store != null && it.meshPrimary == store.identity }
     LaunchedEffect(store, nodes) { store?.nodeEntities = nodes }
@@ -156,8 +163,15 @@ fun MeshScreen(
                             Text("Reading the router…", style = sans(12f, 400, Wrt.TextDim))
                         }
                         store.error?.let { Text(it, style = sans(11.5f, 500, Wrt.Red)) }
+                        store.heldSetupPort?.let { held ->
+                            MeshCard("A socket is held for a node setup", "${if (held.startsWith("sw:")) "Port ${held.removePrefix("sw:")}" else held} is kept apart from the LAN by an add-a-node that did not finish. It goes back on its own once nothing is plugged into it, or now — unplug the cable first, because whatever is on it is not a node.") {
+                                GhostButton("Release it", Modifier.padding(top = 10.dp)) { scope.launch { store.releaseSetupPort() } }
+                                store.setupNotice?.let { NoteLine(it, Wrt.Amber) }
+                            }
+                        }
                         RoamingCard(store)
                         MeshLinkCard(store)
+                        ExtrasCard(store)
                         val candidates = hooks.saved.filter {
                             it.identity != store.identity && it.meshProfile != null && !it.isMeshNode
                         }
@@ -166,7 +180,7 @@ fun MeshScreen(
                         if (store.loaded && !store.actsAsPrimary && nodes.isEmpty() && candidates.isNotEmpty()) JoinCard(candidates, onJoin)
                         NodesCard(store, hooks, onAddNode)
                         Text(
-                            "Guest and IoT networks stay on the primary; nodes carry the LAN's SSIDs only.",
+                            "Nodes mirror every SSID this router carries — LAN, guest and IoT — on the bands they have; guest and IoT traffic rides the backhaul in a VLAN of its own back to this router.",
                             style = sans(10.5f, 400, Wrt.TextDim, lineHeight = 15.sp),
                             modifier = Modifier.padding(top = 2.dp, bottom = 12.dp),
                         )
@@ -355,6 +369,33 @@ private fun MeshLinkCard(store: MeshStore) {
     }
 }
 
+/** Guest and IoT on the nodes: what would be mirrored, and whether the backhaul carries it yet. */
+@Composable
+private fun ExtrasCard(store: MeshStore) {
+    val scope = rememberCoroutineScope()
+    val extras = store.profile?.extras.orEmpty()
+    if (!store.loaded || extras.isEmpty()) return
+    MeshCard(
+        "Guest and IoT on nodes",
+        "Nodes broadcast these too, on the bands they have. Their traffic rides the backhaul in a VLAN " +
+            "of its own back to this router's guest or IoT network, so the isolation holds on a node exactly as it does here.",
+    ) {
+        extras.forEach { x ->
+            val names = x.ssids.map { it.ssid }.distinct().joinToString(", ")
+            Text("${x.name}  ·  $names  ·  vlan ${x.vid}", style = mono(10.5f, 500, Wrt.TextSecondary), modifier = Modifier.padding(top = 8.dp))
+        }
+        if (store.trunksReady) {
+            StateLine("trunk in place on the mesh point and the LAN sockets", Wrt.Green)
+        } else {
+            StateLine("trunk not set up on this router yet", Wrt.Amber)
+            NoteLine("A push sets it up first. It can also be done now; guest and IoT Wi-Fi here blink for a moment.", Wrt.TextDim)
+            GhostButton(if (store.applying) "Setting up…" else "Set up the trunk", Modifier.padding(top = 10.dp)) {
+                if (!store.applying) scope.launch { store.ensureTrunks() }
+            }
+        }
+    }
+}
+
 @Composable
 private fun NodesCard(store: MeshStore, hooks: MeshHooks, onAdd: () -> Unit) {
     val scope = rememberCoroutineScope()
@@ -494,9 +535,18 @@ private fun JoinCard(candidates: List<RouterEntity>, onJoin: (RouterEntity) -> U
  * the app across to whichever the user picks — straight into the join for this primary.
  */
 @Composable
-fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit) {
+fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit, onJoin: (com.vivekkaushik.wrtpulse.data.NodeSetup, MeshJoin) -> Unit = { _, _ -> }) {
     val primary = hooks.current
     val store = hooks.store
+    val scope = rememberCoroutineScope()
+    val setup = remember { hooks.newSetup() }
+    var handedOver by remember { mutableStateOf(false) }
+    var connecting by remember { mutableStateOf(false) }
+    LaunchedEffect(setup) { setup?.run() }
+    // Leaving before the join has the socket: give it back now rather than in twenty minutes.
+    DisposableEffect(setup) {
+        onDispose { if (setup != null && !handedOver) CoroutineScope(Dispatchers.IO).launch { setup.release() } }
+    }
     BackHandler(onBack = onBack)
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         FormTopBar("Add a node", onBack) { primary?.let { MonoTag(it.name, size = 10.5f) } }
@@ -504,34 +554,84 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit) {
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (primary == null || store == null) {
+            if (primary == null || store == null || setup == null) {
                 Text("Not connected.", style = sans(12f, 400, Wrt.TextDim))
                 return@Column
             }
             MeshCard(
-                "How it works",
-                "A node is a second router running OpenWrt. The app connects to it, and its Mesh page " +
-                    "offers to join ${primary.name}: a backup is saved, the config is written under a " +
-                    "rollback, and the app follows it to its new address. Three things to have ready:",
+                "Plug in the new router",
+                "This phone stays on ${primary.name}'s Wi-Fi; the new router is reached through ${primary.name} " +
+                    "over a cable. It can be a fresh OpenWrt install, Wi-Fi off, 192.168.1.1 and its own DHCP " +
+                    "server and all: the socket named below is taken off your network before the cable goes in, " +
+                    "so nothing on it can reach your devices until it has become a node.",
             ) {
-                GuideLine("1", "OpenWrt on the second router, and a way for this phone to reach it: its own Wi-Fi, " +
-                    "or a cable from your phone or laptop to one of its LAN sockets. A fresh install has Wi-Fi off and " +
-                    "answers at 192.168.1.1 over the cable.")
-                GuideLine("2", if (store.meshIface != null) {
-                    "For a wired node, a cable from its WAN socket to a LAN socket of ${primary.name}. " +
-                        "For a wireless node the cable is only needed during the join, while it downloads the mesh-capable wpad."
+                val socket = setup.port
+                GuideLine("1", if (socket != null && setup.phase != com.vivekkaushik.wrtpulse.data.NodeSetup.Phase.Isolating) {
+                    "Run a cable from any LAN socket of the new router into socket ${setup.portLabel} of ${primary.name} — that one is held apart now."
                 } else {
-                    "A cable from its WAN socket to a LAN socket of ${primary.name}. Wireless nodes need the mesh link " +
-                        "turned on here first."
+                    "Wait a moment: ${primary.name} is setting a free LAN socket apart for it."
                 })
-                GuideLine("3", "This phone knows the ${store.lanAps.firstOrNull()?.ssid ?: "home"} Wi-Fi, because the node " +
-                    "starts carrying it partway through and the phone has to follow it there on its own.")
+                GuideLine("2", "Use one of the new router's LAN sockets, not its WAN socket. On most routers the WAN socket is the odd-coloured one.")
+                GuideLine("3", "Leave the cable in once it has joined: that is its wired backhaul. A wireless node unplugs at the end.")
+                val (line, tone) = when (setup.phase) {
+                    com.vivekkaushik.wrtpulse.data.NodeSetup.Phase.Isolating -> "setting a socket apart…" to Wrt.Accent
+                    com.vivekkaushik.wrtpulse.data.NodeSetup.Phase.Watching -> "socket ${setup.portLabel} held; waiting for the cable…" to Wrt.TextDim
+                    com.vivekkaushik.wrtpulse.data.NodeSetup.Phase.Finding -> "cable in ${setup.portLabel}; looking for the router…" to Wrt.Accent
+                    com.vivekkaushik.wrtpulse.data.NodeSetup.Phase.Found -> "a router answers on ${setup.portLabel}" to Wrt.Green
+                    com.vivekkaushik.wrtpulse.data.NodeSetup.Phase.Connecting -> "signing in through ${primary.name}…" to Wrt.Accent
+                    com.vivekkaushik.wrtpulse.data.NodeSetup.Phase.Ready -> "${setup.board?.model ?: "router"} reached" to Wrt.Green
+                    com.vivekkaushik.wrtpulse.data.NodeSetup.Phase.Failed -> (setup.error ?: "failed") to Wrt.Red
+                }
+                Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatusDot(tone, 8.dp, pulse = tone == Wrt.Accent || tone == Wrt.TextDim, periodMs = 1600)
+                    Text(line, style = mono(11f, 500, tone), modifier = Modifier.weight(1f))
+                }
+                setup.note?.let { NoteLine(it, Wrt.TextDim) }
+                if (setup.phase == com.vivekkaushik.wrtpulse.data.NodeSetup.Phase.Failed) {
+                    GhostButton("Try again", Modifier.padding(top = 10.dp)) { scope.launch { setup.release(); setup.run() } }
+                }
+            }
+            if (setup.phase == com.vivekkaushik.wrtpulse.data.NodeSetup.Phase.Found || setup.phase == com.vivekkaushik.wrtpulse.data.NodeSetup.Phase.Connecting ||
+                setup.phase == com.vivekkaushik.wrtpulse.data.NodeSetup.Phase.Ready
+            ) {
+                MeshCard(
+                    "Sign in to it",
+                    "Its root password. A fresh OpenWrt install has none, so leave this empty. " +
+                        "The password never leaves ${primary.name}: it is used there, over the cable.",
+                ) {
+                    if (setup.candidates.size > 1) {
+                        NoteLine("${setup.candidates.size} devices answer on that socket; the first is tried. Unplug anything else on it.", Wrt.Amber)
+                    }
+                    FieldLabel("ROOT PASSWORD")
+                    FormTextField(setup.password, { setup.password = it }, password = true, masked = true)
+                    setup.error?.takeIf { setup.phase != com.vivekkaushik.wrtpulse.data.NodeSetup.Phase.Failed }?.let { NoteLine(it, Wrt.Red) }
+                    PrimaryButton(
+                        if (connecting) "Signing in…" else "Connect through ${primary.name}",
+                        Modifier.padding(top = 12.dp),
+                    ) {
+                        if (!connecting) scope.launch {
+                            connecting = true
+                            val session = setup.connect()
+                            if (session != null) {
+                                // The guest and IoT trunks on this router, before the node is told to use them.
+                                runCatching { store.ensureTrunks() }
+                                val join = hooks.newJoinVia(setup)
+                                if (join != null) {
+                                    join.beforeFollow = { setup.release(keepCable = true) }
+                                    handedOver = true
+                                    onJoin(setup, join)
+                                }
+                            }
+                            connecting = false
+                        }
+                    }
+                }
             }
             val candidates = hooks.saved.filter { it.identity != primary.identity && !it.isMeshNode }
             MeshCard(
-                "Pick the router",
-                if (candidates.isEmpty()) "No other saved router yet. Add the one that should become a node."
-                else "The app connects to it and opens the join for ${primary.name} there.",
+                "Already in this app?",
+                if (candidates.isEmpty()) "A router this app can already reach can join from its own Mesh page instead."
+                else "A router this app can already reach joins from its own Mesh page: the app connects to it and opens the join for ${primary.name} there.",
             ) {
                 candidates.forEach { r ->
                     Row(
@@ -548,8 +648,6 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit) {
                         }
                     }
                 }
-                PrimaryButton("Add a new router", Modifier.padding(top = 14.dp)) { hooks.onAddRouterToJoin(primary) }
-                NoteLine("Adding it works like any router: address, password, fingerprint. Once it is in, the join opens by itself.", Wrt.TextDim)
             }
         }
     }
@@ -577,7 +675,8 @@ private fun NodeRecoveryCard(hooks: MeshHooks, store: MeshStore, entity: RouterE
         "Set up as a node",
         "This router's config is a node's: its LAN points at $gateway as gateway, its DHCP server " +
             "serves nobody, and it carries copied SSIDs" + (if (store.meshIface != null) " and a mesh point" else "") +
-            ". This phone has no record of that — the join ran from elsewhere, or the record was lost.",
+            ". This phone has no record of that — the join ran from elsewhere, or the record was lost." +
+            (if (store.onRouterSnapshot) " Its pre-mesh config is kept on the router, so Leave mesh works from here regardless." else ""),
     ) {
         if (primary == null) {
             NoteLine("No saved router answers at $gateway. Add the primary to this app first, then come back here.", Wrt.Amber)
@@ -662,23 +761,32 @@ fun JoinMeshScreen(
     }
     LaunchedEffect(join) {
         if (!join.loaded) join.load()
-        refresh(loud = false)
+        if (!join.viaPrimary) refresh(loud = false)
     }
     DisposableEffect(join) { onDispose { CoroutineScope(Dispatchers.IO).launch { join.close() } } }
     val canGoBack = !join.applying && !join.done
-    fun back() { if (step > 0 && step < 3) step-- else onBack() }
+    // Through the primary the cable is already in, so the cable step is skipped both ways.
+    fun back() {
+        when {
+            step == 2 && join.viaPrimary -> step = 0
+            step > 0 && step < 3 -> step--
+            else -> onBack()
+        }
+    }
     BackHandler(enabled = canGoBack) { back() }
+    val stepCount = if (join.viaPrimary) 3 else 4
+    val shown = if (join.viaPrimary && step >= 2) step else step + 1
 
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
-        FormTopBar("Join ${join.profile.primaryName}", onBack = { if (canGoBack) back() }) {
-            MonoTag("step ${minOf(step + 1, 4)} of 4", size = 10f)
+        FormTopBar(if (join.viaPrimary) "Add ${join.name.ifBlank { "a node" }}" else "Join ${join.profile.primaryName}", onBack = { if (canGoBack) back() }) {
+            MonoTag("step ${minOf(shown, stepCount)} of $stepCount", size = 10f)
         }
         Column(
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             when (step) {
-                0 -> NameStep(join, refreshing, refreshNote, onRefresh = { scope.launch { refresh(loud = true) } }) { step = 1 }
+                0 -> NameStep(join, refreshing, refreshNote, onRefresh = { scope.launch { refresh(loud = true) } }) { step = if (join.viaPrimary) 2 else 1 }
                 1 -> CableStep(join, scope) { step = 2 }
                 2 -> ReviewStep(join) {
                     step = 3
@@ -832,7 +940,9 @@ private fun ReviewLine(label: String, value: String) {
 private fun ApplyStep(join: MeshJoin, onFinished: () -> Unit, onBack: () -> Unit) {
     MeshCard(
         if (join.done) "Joined" else if (join.rolledBack) "Rolled back" else if (join.error != null) "Stopped" else "Joining…",
-        if (join.done) "This router is a node of ${join.profile.primaryName} at ${join.newAddress}." else "Stay near ${join.profile.primaryName}; the phone changes Wi-Fi on its own partway through.",
+        if (join.done) "${if (join.viaPrimary) join.name else "This router"} is a node of ${join.profile.primaryName} at ${join.newAddress}."
+        else if (join.viaPrimary) "Everything runs through ${join.profile.primaryName} over the cable; this phone stays where it is."
+        else "Stay near ${join.profile.primaryName}; the phone changes Wi-Fi on its own partway through.",
     ) {
         Column(Modifier.padding(top = 8.dp)) {
             join.steps.forEach { s ->
@@ -878,7 +988,7 @@ private fun ApplyStep(join: MeshJoin, onFinished: () -> Unit, onBack: () -> Unit
         }
     }
     if (join.done || join.rolledBack) {
-        PrimaryButton(if (join.done) "Open the node" else "Back to the router") {
+        PrimaryButton(if (join.done && !join.viaPrimary) "Open the node" else if (join.done) "Done" else if (join.viaPrimary) "Back" else "Back to the router") {
             onFinished()
         }
     }
@@ -891,6 +1001,7 @@ private fun ApplyStep(join: MeshJoin, onFinished: () -> Unit, onBack: () -> Unit
 @Composable
 fun LeaveMeshScreen(
     backup: BackupStore?,
+    store: MeshStore?,
     entity: RouterEntity,
     onBack: () -> Unit,
     onLeft: (lanAddress: String?) -> Unit,
@@ -898,26 +1009,58 @@ fun LeaveMeshScreen(
     val scope = rememberCoroutineScope()
     var result by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var routerRestored by remember { mutableStateOf(false) }
     val snapshotName = entity.meshSnapshot
-    LaunchedEffect(backup) {
-        if (backup == null || snapshotName == null) return@LaunchedEffect
+    // The router's own copy is the one to use: it is there whatever phone this is. The
+    // phone's copy is the fallback for a node joined before routers kept one.
+    val onRouter = store?.onRouterSnapshot == true
+    LaunchedEffect(store) { if (store != null && !store.loaded) store.load() }
+    LaunchedEffect(backup, onRouter) {
+        if (onRouter || backup == null || snapshotName == null) return@LaunchedEffect
         if (!backup.loaded) backup.load()
         backup.refreshLocal()
         val local = backup.local.firstOrNull { it.file.name == snapshotName }
         result = if (local != null) backup.stageLocal(local) else "Failed: $snapshotName is not on this phone."
     }
-    BackHandler(enabled = !busy && backup?.restoring != true) { onBack() }
+    val rebooting = routerRestored || backup?.restoring == true
+    BackHandler(enabled = !busy && !rebooting) { onBack() }
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
-        FormTopBar("Leave the mesh", onBack = { if (!busy && backup?.restoring != true) onBack() })
+        FormTopBar("Leave the mesh", onBack = { if (!busy && !rebooting) onBack() })
         Column(
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             val candidate = backup?.candidate
-            if (backup?.restoring == true) {
+            if (rebooting) {
+                val lan = if (routerRestored) store?.onRouterSnapshotLan else candidate?.lanAddress
                 MeshCard("Restored — rebooting", "The pre-mesh config is unpacked and the router is restarting with it. The connection has already dropped; that is expected.") {
-                    candidate?.lanAddress?.let { NoteLine("It comes back at $it, on its own subnet, behind its own WAN socket. The saved entry follows it there.", Wrt.Amber) }
-                    PrimaryButton("Done", Modifier.padding(top = 12.dp)) { onLeft(candidate?.lanAddress) }
+                    lan?.let { NoteLine("It comes back at $it, on its own subnet, behind its own WAN socket. The saved entry follows it there.", Wrt.Amber) }
+                    PrimaryButton("Done", Modifier.padding(top = 12.dp)) { onLeft(lan) }
+                }
+                return@Column
+            }
+            if (onRouter && store != null) {
+                MeshCard(
+                    "What happens",
+                    "The config this router had before it joined is kept on the router itself. It goes back on with " +
+                        "sysupgrade -r and the router reboots as exactly the router it was: its own address, its own " +
+                        "DHCP and firewall, its own SSIDs. No phone needs to hold anything for this.",
+                ) {
+                    ReviewLine("archive", "on the router")
+                    store.onRouterSnapshotLan?.let { ReviewLine("comes back at", it) }
+                    store.onRouterSnapshotHostname?.let { ReviewLine("hostname", it) }
+                    result?.let { NoteLine(it, if (it.startsWith("Failed")) Wrt.Red else Wrt.TextDim) }
+                    TwoTapButton(if (busy) "Restoring…" else "Restore and leave", "Tap again — the router reboots", danger = true, enabled = !busy) {
+                        scope.launch {
+                            busy = true
+                            val out = store.restoreOnRouterSnapshot()
+                            if (out == "restored") routerRestored = true else result = out
+                            busy = false
+                        }
+                    }
+                    if (result?.startsWith("Failed") == true) {
+                        TwoTapButton("Forget the mesh anyway", "Tap again to forget", danger = true) { onLeft(null) }
+                    }
                 }
                 return@Column
             }

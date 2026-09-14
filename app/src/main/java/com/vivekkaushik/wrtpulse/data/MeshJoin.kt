@@ -77,6 +77,17 @@ class MeshJoin(
     var name by mutableStateOf(MeshOps.defaultNodeName(existingNodes))
     var backhaul by mutableStateOf(Backhaul.Wired)
 
+    /**
+     * True when the router is reached through the primary over a cable into one of its LAN
+     * sockets, rather than by the phone directly. The cable step is moot, the wpad swap has
+     * to wait until the node is on the primary's LAN with internet, and the socket the primary
+     * held apart must go back before the node can be found at its new address.
+     */
+    val viaPrimary: Boolean = session is com.vivekkaushik.wrtpulse.net.JumpSession
+
+    /** Runs after the batch and before the node is looked for: the setup socket's release. */
+    var beforeFollow: (suspend () -> Unit)? = null
+
     val steps = mutableStateListOf<JoinStep>()
     var applying by mutableStateOf(false); private set
     var done by mutableStateOf(false); private set
@@ -152,7 +163,7 @@ class MeshJoin(
         val address = MeshOps.freeNodeAddress(profile, alsoTaken = setOf(session.target.host))
         val swap = if (backhaul == Backhaul.Wireless) MeshOps.wpadSwap(node.wpad, node.meshCapable) else null
         val problems = MeshOps.nodeProblems(profile, node, backhaul, address, entity.meshPrimary) +
-            (if (cableRequired && !cabledToPrimary && loaded) listOf(
+            (if (!viaPrimary && cableRequired && !cabledToPrimary && loaded) listOf(
                 if (backhaul == Backhaul.Wired) "Plug a cable from this router's WAN socket into a LAN socket of ${profile.primaryName} first."
                 else "The wpad swap downloads a package, so this router needs internet: plug its WAN socket into ${profile.primaryName} for now."
             ) else emptyList())
@@ -193,11 +204,13 @@ class MeshJoin(
         error = null
         steps.clear()
         steps += JoinStep("Install the app's SSH key", JoinStep.State.Pending)
-        steps += JoinStep("Save a backup to this phone", JoinStep.State.Pending)
-        if (plan.swap != null) steps += JoinStep("Install ${plan.swap.install}", JoinStep.State.Pending)
+        steps += JoinStep("Save a backup to this phone and the router", JoinStep.State.Pending)
+        if (plan.swap != null && !viaPrimary) steps += JoinStep("Install ${plan.swap.install}", JoinStep.State.Pending)
         steps += JoinStep("Write the node config", JoinStep.State.Pending)
+        if (viaPrimary) steps += JoinStep("Return the socket to ${profile.primaryName}'s LAN", JoinStep.State.Pending)
         steps += JoinStep("Find the node at ${plan.address}", JoinStep.State.Pending)
-        steps += JoinStep("Switch off DHCP, DNS and the firewall here", JoinStep.State.Pending)
+        steps += JoinStep("Switch off DHCP, DNS and the firewall on the node", JoinStep.State.Pending)
+        if (plan.swap != null && viaPrimary) steps += JoinStep("Install ${plan.swap.install}", JoinStep.State.Pending)
         var i = 0
         var installedKey: ByteArray? = null
         var snapshot: String? = null
@@ -216,7 +229,12 @@ class MeshJoin(
             // 2. The snapshot.
             step(i, JoinStep.State.Running)
             when (val pulled = ConfigArchive.pull(session, backups, board?.release) { step(i, JoinStep.State.Running, it) }) {
-                is ConfigArchive.Pull.Done -> { snapshot = pulled.file.name; step(i, JoinStep.State.Done, pulled.file.name) }
+                is ConfigArchive.Pull.Done -> {
+                    snapshot = pulled.file.name
+                    // A second copy on the node's own flash, so any phone can undo the join.
+                    val kept = runCatching { session.exec(Commands.NODE_KEEP_SNAPSHOT, timeoutMs = 60_000).ok }.getOrDefault(false)
+                    step(i, JoinStep.State.Done, pulled.file.name + if (kept) " · copy kept on the router" else " · no copy on the router")
+                }
                 is ConfigArchive.Pull.Failed -> {
                     step(i, JoinStep.State.Failed, pulled.why)
                     error = "No backup, no join: ${pulled.why}"
@@ -225,10 +243,11 @@ class MeshJoin(
             }
             i++
 
-            // 3. The swap, while the node still has internet through its WAN.
-            if (plan.swap != null) {
+            // 3. The swap, while the node still has internet through its WAN. Through the
+            // primary the node has no internet yet, so this waits until it is on the LAN.
+            if (plan.swap != null && !viaPrimary) {
                 step(i, JoinStep.State.Running, "downloading; Wi-Fi here drops for about a minute")
-                val ok = swapWpad(plan.swap.remove, plan.swap.install) { step(i, JoinStep.State.Running, it) }
+                val ok = swapWpad(session, plan.swap.remove, plan.swap.install) { step(i, JoinStep.State.Running, it) }
                 if (!ok) {
                     step(i, JoinStep.State.Failed, "the router kept ${plan.swap.remove}")
                     error = "${plan.swap.install} did not install. Nothing else was changed."
@@ -252,16 +271,46 @@ class MeshJoin(
             newAddress = plan.address
             persist(JoinOutcome(plan.address, joined = true, plan.backhaul, snapshot, null, installedKey))
 
+            // 4b. Through the primary: the node's link-local address survives its reload, so
+            // it is confirmed over the same hop it was written through. Only a confirmed node
+            // gets its socket handed to the LAN; one that rolls back stays where it is.
+            if (viaPrimary) {
+                step(i, JoinStep.State.Running, "confirming over the cable")
+                val confirmDeadline = System.nanoTime() + MeshOps.ROLLBACK_SECONDS * 1_000_000_000L
+                var confirmed = false
+                while (System.nanoTime() < confirmDeadline && !confirmed) {
+                    delay(5_000)
+                    confirmed = runCatching { session.exec(Commands.NODE_CONFIRM, timeoutMs = 10_000).stdout.contains("confirmed") }.getOrDefault(false)
+                    if (!confirmed) step(i, JoinStep.State.Running, "waiting for the node to reload…")
+                }
+                if (!confirmed) {
+                    step(i, JoinStep.State.Failed, "not reached in ${MeshOps.ROLLBACK_SECONDS} s")
+                    rolledBack = true
+                    persist(JoinOutcome(entity.host, joined = false, plan.backhaul, snapshot, null, installedKey))
+                    error = "The node did not answer over the cable in time, so it put its old config back on its own. " +
+                        "The socket stays held; unplug the cable, plug it in again, and retry."
+                    return false
+                }
+                beforeFollow?.invoke()
+                step(i, JoinStep.State.Done, "socket back in the LAN")
+                i++
+            }
+
             // 5. Find it. Fresh sessions, one dial each, short timeout, until the window closes.
-            step(i, JoinStep.State.Running, "your phone joins ${profile.ssids.firstOrNull()?.ssid ?: "the home Wi-Fi"} on its own — stay near ${profile.primaryName}")
+            step(i, JoinStep.State.Running, if (viaPrimary) "over the cable, on ${profile.primaryName}'s LAN" else "your phone joins ${profile.ssids.firstOrNull()?.ssid ?: "the home Wi-Fi"} on its own — stay near ${profile.primaryName}")
             val target = SshTarget(plan.address, entity.port, entity.username, entity.identity)
             val found = findNode(target, keyPem) { step(i, JoinStep.State.Running, it) }
             if (found == null) {
                 step(i, JoinStep.State.Failed, "not reached in ${MeshOps.ROLLBACK_SECONDS} s")
                 rolledBack = true
                 persist(JoinOutcome(entity.host, joined = false, plan.backhaul, snapshot, null, installedKey))
-                error = "The node was not reachable at ${plan.address} in time, so it put its old config back on its own. " +
-                    "It is still at ${entity.host}."
+                error = if (viaPrimary) {
+                    "The node was not reachable at ${plan.address} in time, so it put its old config back on its own. " +
+                        "It is as it was, on the cable; unplug it, plug it in again, and retry."
+                } else {
+                    "The node was not reachable at ${plan.address} in time, so it put its old config back on its own. " +
+                        "It is still at ${entity.host}."
+                }
                 return false
             }
             follow = found
@@ -272,12 +321,27 @@ class MeshJoin(
             step(i, JoinStep.State.Running)
             runCatching { found.exec(Commands.NODE_SERVICES_OFF, timeoutMs = 40_000) }
             if (plan.backhaul == Backhaul.Wireless) runCatching { found.exec(Commands.MESH_WATCH_INSTALL, timeoutMs = 20_000) }
+            step(i, JoinStep.State.Done)
+            i++
+
+            // 7. Through the primary, the swap runs now: the node reaches the internet through
+            // the primary at last. The mesh point the batch wrote comes up on the reload.
+            if (plan.swap != null && viaPrimary) {
+                step(i, JoinStep.State.Running, "downloading through ${profile.primaryName}")
+                val ok = swapWpad(found, plan.swap.remove, plan.swap.install) { step(i, JoinStep.State.Running, it) }
+                if (!ok) {
+                    step(i, JoinStep.State.Failed, "the node kept ${plan.swap.remove}")
+                    error = "${plan.swap.install} did not install, so the node has no mesh point yet. It works wired; retry the swap from its Mesh page."
+                } else {
+                    step(i, JoinStep.State.Done)
+                }
+                i++
+            }
             meshMac = runCatching {
                 Parsers.iwDevs(found.exec(Commands.WIFI_MACS, timeoutMs = 8_000).stdout)
                     .firstOrNull { it.type.contains("mesh") }?.mac
             }.getOrNull()
             persist(JoinOutcome(plan.address, joined = true, plan.backhaul, snapshot, meshMac, installedKey))
-            step(i, JoinStep.State.Done)
             done = true
             return true
         } catch (e: SshException) {
@@ -289,10 +353,10 @@ class MeshJoin(
         }
     }
 
-    private suspend fun swapWpad(remove: String, install: String, onProgress: (String) -> Unit): Boolean {
+    private suspend fun swapWpad(on: RouterSession, remove: String, install: String, onProgress: (String) -> Unit): Boolean {
         val manager = state?.manager ?: "opkg"
         try {
-            session.exec(Commands.wpadSwap(remove, install, manager), timeoutMs = 20_000).requireOk("swap wpad")
+            on.exec(Commands.wpadSwap(remove, install, manager), timeoutMs = 20_000).requireOk("swap wpad")
         } catch (e: SshException) {
             if (e !is SshException.Disconnected && e !is SshException.Timeout) throw e
         }
@@ -300,7 +364,7 @@ class MeshJoin(
         while (System.nanoTime() < deadline) {
             delay(5_000)
             val text = try {
-                session.exec(Commands.SWAP_STATE, timeoutMs = 8_000).stdout
+                on.exec(Commands.SWAP_STATE, timeoutMs = 8_000).stdout
             } catch (e: SshException) {
                 onProgress("waiting for the radios to come back…")
                 continue

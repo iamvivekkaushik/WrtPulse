@@ -14,12 +14,15 @@ import com.vivekkaushik.wrtpulse.ops.DhcpPool
 import com.vivekkaushik.wrtpulse.ops.IpMath
 import com.vivekkaushik.wrtpulse.ops.LanNet
 import com.vivekkaushik.wrtpulse.ops.Lease
+import com.vivekkaushik.wrtpulse.ops.MeshExtraNet
 import com.vivekkaushik.wrtpulse.ops.MeshOps
 import com.vivekkaushik.wrtpulse.ops.MeshPeer
 import com.vivekkaushik.wrtpulse.ops.MeshProfile
 import com.vivekkaushik.wrtpulse.ops.MeshRadioPlan
 import com.vivekkaushik.wrtpulse.ops.MeshSsid
 import com.vivekkaushik.wrtpulse.ops.Parsers
+import com.vivekkaushik.wrtpulse.ops.SwPort
+import com.vivekkaushik.wrtpulse.ops.SwitchDev
 import com.vivekkaushik.wrtpulse.ops.WifiNetwork
 import com.vivekkaushik.wrtpulse.ops.WifiRadio
 import com.vivekkaushik.wrtpulse.ops.WpadSwap
@@ -76,6 +79,28 @@ class MeshStore(private val session: RouterSession) : Refreshable {
     /** The mesh-point netdevs `iw dev` lists: the config has one, and the driver brought it up. */
     private val meshIfnames = mutableStateListOf<String>()
 
+    /** A pre-mesh snapshot on this router's own flash: present, and the LAN address and hostname it holds. */
+    var onRouterSnapshot by mutableStateOf(false); private set
+    var onRouterSnapshotLan by mutableStateOf<String?>(null); private set
+    var onRouterSnapshotHostname by mutableStateOf<String?>(null); private set
+
+    /**
+     * Restores the snapshot the node keeps and reboots it. "restored" when the reboot is
+     * away; the link drops right after, which is the expected end of this.
+     */
+    suspend fun restoreOnRouterSnapshot(): String {
+        val out = try {
+            session.exec(Commands.NODE_RESTORE_SNAPSHOT, timeoutMs = 120_000).stdout.trim()
+        } catch (e: SshException) {
+            return "Failed: ${e.message}"
+        }
+        return when {
+            out.contains("restored") -> "restored"
+            out.contains("absent") -> "Failed: the router holds no pre-mesh snapshot."
+            else -> "Failed: sysupgrade -r refused the archive. Nothing was rebooted."
+        }
+    }
+
     /** This router's own mesh point MAC, which is how a primary's peer list names it. */
     var ownMeshMac by mutableStateOf<String?>(null); private set
 
@@ -94,6 +119,22 @@ class MeshStore(private val session: RouterSession) : Refreshable {
     /** The wpad swap is running detached and the radios are restarting. */
     var swapping by mutableStateOf(false); private set
     var swapLog by mutableStateOf<String?>(null); private set
+
+    /** The `network` config as read, for the trunk and extra-network lookups. */
+    private val networkUci = mutableStateMapOf<String, String>()
+    private val swDevs = mutableStateListOf<SwitchDev>()
+
+    /** A LAN socket this router is holding apart for a node setup — left behind if a setup was abandoned. */
+    var heldSetupPort by mutableStateOf<String?>(null); private set
+
+    var setupNotice by mutableStateOf<String?>(null); private set
+
+    /** Puts a held socket back into the LAN — unless a cable is still in it, which it says. */
+    suspend fun releaseSetupPort() {
+        val out = runCatching { session.exec(Commands.SETUP_RELEASE, timeoutMs = 40_000).stdout }.getOrNull().orEmpty()
+        setupNotice = if (out.contains("still-cabled")) "Something is still plugged into that socket. Unplug it, then release." else null
+        load()
+    }
 
     /** identity → whether the node's copied SSIDs match this router's, from [checkNodes]. */
     val nodeSync = mutableStateMapOf<String, NodeSync>()
@@ -133,6 +174,9 @@ class MeshStore(private val session: RouterSession) : Refreshable {
         radios.clear(); radios.addAll(r)
         networks.clear(); networks.addAll(n)
         val network = Parsers.uciShow(parts["net"].orEmpty())
+        networkUci.clear(); networkUci.putAll(network)
+        swDevs.clear(); swDevs.addAll(Parsers.switchDevs(parts["swconfig"].orEmpty()))
+        heldSetupPort = MeshOps.heldSetupPort(network)
         lan = Parsers.lanNet(network)
         pool = Parsers.dhcpPools(Parsers.uciShow(parts["dhcp"].orEmpty())).firstOrNull { it.interfaceName == "lan" }
         board = parts["board"]?.takeIf { it.isNotBlank() }?.let { runCatching { Parsers.board(it) }.getOrNull() }
@@ -163,6 +207,10 @@ class MeshStore(private val session: RouterSession) : Refreshable {
             iface.channel?.let { operatingChannels.putIfAbsent(radio, it) }
         }
         pings.clear(); pings.putAll(Parsers.pingResults(parts["ping"].orEmpty()))
+        val snap = parts["presnap"].orEmpty().trim().lines().map { it.trim() }
+        onRouterSnapshot = snap.firstOrNull() == "present"
+        onRouterSnapshotLan = snap.getOrNull(1)?.substringBefore('/')?.takeIf { onRouterSnapshot && it.isNotEmpty() }
+        onRouterSnapshotHostname = snap.getOrNull(2)?.takeIf { onRouterSnapshot && it.isNotEmpty() }
     }
 
     /** `phy0-ap0` → `radio0`, the naming every release since 21.02 uses. */
@@ -280,6 +328,7 @@ class MeshStore(private val session: RouterSession) : Refreshable {
             MeshRadioPlan(r.band, channel, r.htmode, r.country)
         }
         val mesh = networksIn.firstOrNull { it.section == MeshOps.MESH_SECTION }
+        val extras = extraNets(networksIn, bandOf)
         val lanNet = lan
         val prefix = lanNet?.cidrPrefix ?: IpMath.prefixOf(lanNet?.netmask.orEmpty()) ?: 24
         return MeshProfile(
@@ -297,7 +346,103 @@ class MeshStore(private val session: RouterSession) : Refreshable {
             taken = (leases.map { it.ip } + neighbourIps + nodeEntities.map { it.host }).distinct(),
             primaryMacs = radioMacs.values.toList(),
             capturedEpoch = System.currentTimeMillis() / 1000,
+            extras = extras,
         )
+    }
+
+    /**
+     * The bridged Wi-Fi networks beside the LAN — guest, IoT, anything shaped like them: an
+     * interface on a bridge device of its own with at least one enabled AP. Each gets a VLAN
+     * id from 3 up, skipping ids the switch or bridge VLANs already use, in section order so
+     * the number is stable across reads.
+     */
+    fun extraNets(networksIn: List<WifiNetwork>, bandOf: Map<String, String>): List<MeshExtraNet> {
+        val used = (Parsers.switchVlans(networkUci).map { it.vlan } + Parsers.bridgeVlans(networkUci).map { it.vlan } + 1).toMutableSet()
+        return extraIfaces().entries.sortedBy { it.value }.mapNotNull { (name, iface) ->
+            val aps = networksIn.filter { it.mode == "ap" && it.network == iface && !it.disabled && it.ssid.isNotEmpty() }
+            if (aps.isEmpty()) return@mapNotNull null
+            val vid = (3..4000).first { it !in used }.also { used += it }
+            MeshExtraNet(
+                name = name,
+                vid = vid,
+                isolate = aps.any { it.isolate },
+                ssids = aps.sortedBy { it.hidden }.mapNotNull { ap ->
+                    val band = bandOf[ap.device].orEmpty()
+                    if (band.isEmpty()) null else MeshSsid(band, ap.ssid, ap.encryption, ap.key, ap.hidden)
+                },
+            )
+        }
+    }
+
+    /** short name → this primary's interface for each bridged network beside the LAN. */
+    private fun extraIfaces(): Map<String, String> {
+        val bridges = Parsers.netDevices(networkUci).filter { it.type == "bridge" }.map { it.name }.toSet()
+        return networkUci.filter { (k, v) -> v == "interface" && k.count { it == '.' } == 1 }
+            .keys.map { it.removePrefix("network.") }
+            .filter { it != "lan" && it != "loopback" && it != MeshOps.SETUP_IFACE && networkUci["network.$it.device"] in bridges }
+            .associateBy { it.removePrefix("wrtpulse_").filter { c -> c.isLetterOrDigit() }.lowercase().ifEmpty { it } }
+    }
+
+    /**
+     * What this primary still lacks to carry its extra networks to the nodes: per network,
+     * a tagged sub-interface of the mesh point and of every wired LAN socket, in the
+     * network's own bridge. Idempotent; empty when everything is in place.
+     */
+    fun trunkOps(): List<String> {
+        val p = profile ?: (if (radios.isNotEmpty()) profileFrom() else return emptyList())
+        val ops = mutableListOf<String>()
+        val ifaces = extraIfaces()
+        val devices = Parsers.netDevices(networkUci)
+        val lanDevice = networkUci["network.lan.device"].orEmpty()
+        val lanPorts = devices.firstOrNull { it.name == lanDevice }?.ports.orEmpty()
+            .filter { !it.contains('.') && !it.startsWith("phy") && !it.startsWith("wlan") }
+        val vlans = Parsers.switchVlans(networkUci)
+        val lanVlan = Parsers.lanSwitchVlan(networkUci)?.let { id -> vlans.firstOrNull { it.vlan == id } }
+        val base = Parsers.lanSwitchMember(networkUci)?.substringBefore('.') ?: "eth0"
+        val mesh = meshIfnames.firstOrNull()
+        p.extras.forEach { x ->
+            val iface = ifaces[x.name] ?: return@forEach
+            val bridge = devices.firstOrNull { it.name == networkUci["network.$iface.device"].orEmpty() } ?: return@forEach
+            val wanted = mutableListOf<String>()
+            fun tagged(ifname: String, suffix: String) {
+                val section = "wrtpulse_trunk_${x.name}_$suffix"
+                if (networkUci["network.$section"] != "device") {
+                    ops += "set network.$section=device"
+                    ops += "set network.$section.type='8021q'"
+                    ops += "set network.$section.ifname='$ifname'"
+                    ops += "set network.$section.vid='${x.vid}'"
+                    ops += "set network.$section.name='$ifname.${x.vid}'"
+                }
+                wanted += "$ifname.${x.vid}"
+            }
+            if (mesh != null) tagged(mesh, "mesh")
+            if (swDevs.isNotEmpty() && lanVlan != null) {
+                val section = "wrtpulse_trunk_${x.name}_sw"
+                if (networkUci["network.$section"] != "switch_vlan") {
+                    val members = Parsers.swPorts(lanVlan.ports).map { SwPort(it.port, true) }
+                    ops += "set network.$section=switch_vlan"
+                    ops += "set network.$section.device='${lanVlan.device}'"
+                    ops += "set network.$section.vlan='${x.vid}'"
+                    ops += "set network.$section.ports='${Parsers.swPortsValue(members)}'"
+                }
+                wanted += "$base.${x.vid}"
+            } else {
+                lanPorts.forEach { port -> tagged(port, port.filter { it.isLetterOrDigit() }) }
+            }
+            val missing = wanted.filter { it !in bridge.ports }
+            if (missing.isNotEmpty()) ops += Commands.listOps("network.${bridge.section}.ports", bridge.ports + missing)
+        }
+        return ops
+    }
+
+    /** True when every extra network already rides the backhaul. */
+    val trunksReady: Boolean get() = loaded && trunkOps().isEmpty()
+
+    /** Writes the trunks this primary lacks, if any; a no-op otherwise. */
+    suspend fun ensureTrunks(): Boolean {
+        val ops = trunkOps()
+        if (ops.isEmpty()) return true
+        return run(ops, "Guest and IoT now ride the backhaul to the nodes.", packages = listOf("network"), reload = Commands.NETWORK_RELOAD)
     }
 
     // -----------------------------------------------------------------------
@@ -448,6 +593,8 @@ class MeshStore(private val session: RouterSession) : Refreshable {
     ) {
         val p = profileToPush ?: return
         if (syncing) return
+        // The primary's side first: the trunks the nodes' guest and IoT traffic will ride.
+        if (p.extras.isNotEmpty()) ensureTrunks()
         syncing = true
         syncNotice = null
         var pushed = 0
@@ -457,15 +604,24 @@ class MeshStore(private val session: RouterSession) : Refreshable {
                 val session = open(node)
                 if (session == null) { failed++; return@forEach }
                 try {
-                    val out = session.exec(Commands.WIRELESS_CONFIG, timeoutMs = 12_000).requireOk("read node wireless").stdout
-                    val (radios, networks) = Parsers.wireless(Parsers.uciShow(out))
+                    val out = session.exec(
+                        Commands.WIRELESS_CONFIG + "; echo ${Commands.SECTION} net; " + Commands.NETWORK_CONFIG +
+                            "; echo ${Commands.SECTION} swconfig; " + Commands.SWCONFIG + "; echo ${Commands.SECTION} macs; " + Commands.WIFI_MACS,
+                        timeoutMs = 20_000,
+                    ).requireOk("read node").stdout
+                    val parts = Parsers.sections("${Commands.SECTION} uci\n" + out)
+                    val (radios, networks) = Parsers.wireless(Parsers.uciShow(parts["uci"].orEmpty()))
+                    val nodeNet = Parsers.uciShow(parts["net"].orEmpty())
+                    val nodeSw = Parsers.switchDevs(parts["swconfig"].orEmpty())
+                    val meshDev = Parsers.iwDevs(parts["macs"].orEmpty()).firstOrNull { it.type.contains("mesh", ignoreCase = true) }
                     val meshRadio = networks.firstOrNull { it.section == MeshOps.MESH_SECTION }?.device
-                    val ops = MeshOps.nodeRadioOps(p, radios, meshRadio) + MeshOps.nodeApOps(p, radios, networks)
+                    val ops = MeshOps.nodeRadioOps(p, radios, meshRadio) + MeshOps.nodeApOps(p, radios, networks) +
+                        MeshOps.nodeExtraOps(p, radios, meshRadio, meshDev?.ifname, nodeNet, nodeSw, networks)
                     // The watchdog first, so a node whose reload moves it off this channel can
                     // still find its way back; then the batch. A reload that takes the link is
                     // expected and treated below as delivered.
                     if (meshRadio != null) runCatching { session.exec(Commands.MESH_WATCH_INSTALL, timeoutMs = 20_000) }
-                    session.exec(Commands.uciBatch(ops, listOf("wireless"), "(sleep 1; wifi reload) >/dev/null 2>&1 & echo scheduled"), timeoutMs = 30_000)
+                    session.exec(Commands.uciBatch(ops, listOf("network", "wireless"), "(sleep 1; /etc/init.d/network reload; wifi reload) >/dev/null 2>&1 & echo scheduled"), timeoutMs = 30_000)
                         .requireOk("uci batch")
                     nodeSync[node.identity] = NodeSync.InSync
                     pushed++
@@ -491,13 +647,18 @@ class MeshStore(private val session: RouterSession) : Refreshable {
         }
     }
 
-    private suspend fun run(ops: List<String>, done: String): Boolean {
+    private suspend fun run(
+        ops: List<String>,
+        done: String,
+        packages: List<String> = listOf("wireless"),
+        reload: String = "wifi reload",
+    ): Boolean {
         if (ops.isEmpty() || applying) return true
         applying = true
         error = null
         notice = null
         return try {
-            session.exec(Commands.uciBatch(ops, listOf("wireless"), "wifi reload"), timeoutMs = 60_000)
+            session.exec(Commands.uciBatch(ops, packages, reload), timeoutMs = 60_000)
                 .requireOk("uci batch")
             load()
             notice = done

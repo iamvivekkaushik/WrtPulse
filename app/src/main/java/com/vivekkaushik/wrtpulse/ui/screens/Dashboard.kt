@@ -75,6 +75,8 @@ fun DashboardScreen(
     /** The same store, told to be the IoT network. */
     iot: com.vivekkaushik.wrtpulse.data.GuestStore? = null,
     board: com.vivekkaushik.wrtpulse.ops.BoardInfo? = null,
+    /** Set when this router is a mesh node: guest and IoT Wi-Fi are the primary's to run. */
+    nodeOf: NodeOf? = null,
     routerName: String,
     onRouterTap: () -> Unit,
 ) {
@@ -163,10 +165,10 @@ fun DashboardScreen(
         }
     }
     SheetHost(visible = guestOpen, onDismiss = { guestOpen = false }) {
-        GuestSheet(guest, board?.hostname, onDismiss = { guestOpen = false })
+        GuestSheet(guest, board?.hostname, onDismiss = { guestOpen = false }, node = nodeOf)
     }
     SheetHost(visible = iotOpen, onDismiss = { iotOpen = false }) {
-        GuestSheet(iot, board?.hostname, onDismiss = { iotOpen = false })
+        GuestSheet(iot, board?.hostname, onDismiss = { iotOpen = false }, node = nodeOf)
     }
   }
 }

@@ -26,7 +26,7 @@ sealed interface ConnectionState {
  *
  * Reconnect follows the design's rule — amber is non-blocking and retries, red never does.
  */
-class RouterSession(
+open class RouterSession(
     val target: SshTarget,
     private val client: SshClient,
     private val credentials: suspend () -> SshAuth,
@@ -40,7 +40,7 @@ class RouterSession(
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
 
-    val isConnected: Boolean get() = connection?.isConnected == true
+    open val isConnected: Boolean get() = connection?.isConnected == true
 
     /** Opens the connection, or returns the live one. Backs off between attempts. */
     suspend fun ensureConnected(): SshConnection = mutex.withLock { connectLocked() }
@@ -84,7 +84,7 @@ class RouterSession(
     }
 
     /** Runs a command on the shared connection, reconnecting once if the link dropped. */
-    suspend fun exec(command: String, timeoutMs: Long = 15_000): ExecResult {
+    open suspend fun exec(command: String, timeoutMs: Long = 15_000): ExecResult {
         val existing = connection?.takeIf { it.isConnected } ?: ensureConnected()
         return try {
             existing.exec(command, timeoutMs)
@@ -95,7 +95,7 @@ class RouterSession(
     }
 
     /** [exec] with bytes on the command's stdin — how a file gets onto the router. */
-    suspend fun execWithInput(command: String, input: ByteArray, timeoutMs: Long = 60_000): ExecResult {
+    open suspend fun execWithInput(command: String, input: ByteArray, timeoutMs: Long = 60_000): ExecResult {
         val existing = connection?.takeIf { it.isConnected } ?: ensureConnected()
         return try {
             existing.execWithInput(command, input, timeoutMs)
@@ -137,7 +137,7 @@ class RouterSession(
         if (_state.value is ConnectionState.Blocked) _state.value = ConnectionState.Idle
     }
 
-    suspend fun disconnect() = mutex.withLock {
+    open suspend fun disconnect(): Unit = mutex.withLock {
         connection?.close()
         connection = null
         _state.value = ConnectionState.Idle

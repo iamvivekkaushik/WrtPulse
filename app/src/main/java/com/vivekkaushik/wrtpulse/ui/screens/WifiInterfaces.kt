@@ -1985,6 +1985,8 @@ fun WifiSection(
         route !is WifiRoute.Routes && route !is WifiRoute.Mesh
     // The join in progress, if any. Lives here so a recomposition of the route does not lose it.
     var join by remember { mutableStateOf<com.vivekkaushik.wrtpulse.data.MeshJoin?>(null) }
+    // The cable setup a join through the primary came from, for its persist and its release.
+    var setup by remember { mutableStateOf<com.vivekkaushik.wrtpulse.data.NodeSetup?>(null) }
     androidx.compose.runtime.LaunchedEffect(fullScreen) { onFullScreen(fullScreen) }
 
     // A router swap resets the flow — the sections it referred to are gone.
@@ -2072,18 +2074,29 @@ fun WifiSection(
             onLeave = { push(WifiRoute.MeshLeave) },
             onAddNode = { push(WifiRoute.MeshAddNode) },
         ) else pop()
-        is WifiRoute.MeshAddNode -> if (meshHooks != null) AddNodeScreen(meshHooks, onBack = { pop() }) else pop()
+        is WifiRoute.MeshAddNode -> if (meshHooks != null) AddNodeScreen(
+            meshHooks,
+            onBack = { pop() },
+            onJoin = { s, j ->
+                setup = s
+                join = j
+                push(WifiRoute.MeshJoin(meshHooks.current?.identity.orEmpty()))
+            },
+        ) else pop()
         is WifiRoute.MeshJoin -> {
             val j = join
+            val s = setup
             if (j == null || meshHooks == null) pop() else JoinMeshScreen(
                 join = j,
                 hooks = meshHooks,
-                persist = meshHooks.persist,
-                onBack = { join = null; pop() },
+                persist = if (j.viaPrimary && s != null) ({ outcome -> meshHooks.persistVia(s, j, outcome) }) else meshHooks.persist,
+                onBack = { join = null; setup = null; pop() },
                 onFinished = {
                     val row = meshHooks.current
                     join = null
-                    if (j.done && row != null) meshHooks.onJoined(row) else resetTo(WifiRoute.Mesh)
+                    setup = null
+                    if (j.viaPrimary) resetTo(WifiRoute.Home).also { push(WifiRoute.Mesh) }
+                    else if (j.done && row != null) meshHooks.onJoined(row) else resetTo(WifiRoute.Mesh)
                 },
             )
         }
@@ -2091,6 +2104,7 @@ fun WifiSection(
             val row = meshHooks?.current
             if (row == null) pop() else LeaveMeshScreen(
                 backup = meshHooks.backup,
+                store = meshHooks.store,
                 entity = row,
                 onBack = { pop() },
                 onLeft = { lan -> meshHooks.onLeft(lan) },

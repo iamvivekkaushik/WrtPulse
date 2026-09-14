@@ -621,3 +621,80 @@ class MeshParsersTest {
         assertEquals("true", Commands.pingHosts(emptyList()))
     }
 }
+
+class ExtraNetsTest {
+
+    private val guest = MeshExtraNet(
+        "guest", 3, isolate = true,
+        ssids = listOf(MeshSsid("2.4G", "Casa-Guest", "psk2", "guestpass", hidden = false), MeshSsid("5G", "Casa-Guest", "psk2", "guestpass", hidden = false)),
+    )
+    private val iot5only = MeshExtraNet("iot", 4, isolate = false, ssids = listOf(MeshSsid("5G", "Casa-IoT", "psk2", "iotpass1", hidden = false)))
+    private val withExtras = profile().copy(extras = listOf(guest, iot5only))
+    private val radios = Parsers.wireless(Parsers.uciShow(FRESH_WIRELESS)).first
+
+    @Test
+    fun `the profile carries its extra networks through json`() {
+        val back = MeshProfile.fromJson(withExtras.toJson())!!
+        assertEquals(listOf("guest", "iot"), back.extras.map { it.name })
+        assertEquals(3, back.extras[0].vid)
+        assertTrue(back.extras[0].isolate)
+        assertEquals("Casa-IoT", back.extras[1].ssids.single().ssid)
+        // An old profile without the field reads as having none.
+        assertTrue(MeshProfile.fromJson(profile().toJson())!!.extras.isEmpty())
+    }
+
+    @Test
+    fun `a dsa wireless node gets a bridge, a mesh vlan, socket vlans and an ap per band it has`() {
+        val net = Parsers.uciShow(FRESH_DSA_NETWORK)
+        val ops = MeshOps.nodeExtraOps(withExtras, radios, meshRadio = "radio1", meshIfname = null, net, emptyList(), existingNetworks = emptyList())
+        assertTrue(ops.contains("set network.wrtpulse_x_guest_dev.name='br-x-guest'"))
+        assertTrue(ops.contains("set network.wrtpulse_x_guest_mesh.name='phy1-mesh0.3'"))
+        assertTrue(ops.contains("add_list network.wrtpulse_x_guest_dev.ports='phy1-mesh0.3'"))
+        assertTrue(ops.any { it.startsWith("set network.wrtpulse_x_guest_lan1.name='lan1.3'") })
+        assertTrue(ops.contains("set network.wrtpulse_x_guest.proto='none'"))
+        assertTrue(ops.contains("set wireless.wrtpulse_x_guest_ap_radio0.ssid='Casa-Guest'"))
+        assertTrue(ops.contains("set wireless.wrtpulse_x_guest_ap_radio0.isolate='1'"))
+        assertTrue(ops.contains("set wireless.wrtpulse_x_guest_ap_radio0.network='wrtpulse_x_guest'"))
+        assertTrue(ops.contains("set wireless.wrtpulse_x_iot_ap_radio1.ssid='Casa-IoT'"))
+        // IoT is 5 GHz only on the primary, so the 2.4 GHz radio gets no IoT AP.
+        assertFalse(ops.any { it.startsWith("set wireless.wrtpulse_x_iot_ap_radio0") })
+        assertFalse(ops.any { it.contains("wrtpulse_x_iot_ap_radio1.isolate") })
+        // A node with only a 2.4 GHz radio leaves a 5 GHz-only network out entirely.
+        val only24 = radios.filter { it.band == "2.4G" }
+        val ops24 = MeshOps.nodeExtraOps(withExtras, only24, meshRadio = null, meshIfname = null, net, emptyList(), emptyList())
+        assertFalse(ops24.any { it.contains("wrtpulse_x_iot") })
+        assertTrue(ops24.any { it.contains("wrtpulse_x_guest_ap_radio0") })
+    }
+
+    @Test
+    fun `a swconfig node carries the vlans tagged across its lan ports to the cpu`() {
+        val net = Parsers.uciShow(SWCONFIG_NODE_NETWORK)
+        val sw = Parsers.switchDevs(SWCONFIG_OUT)
+        val ops = MeshOps.nodeExtraOps(withExtras, radios, meshRadio = "radio1", meshIfname = "phy1-mesh0", net, sw, emptyList())
+        assertTrue(ops.contains("set network.wrtpulse_x_guest_vlan=switch_vlan"))
+        assertTrue(ops.contains("set network.wrtpulse_x_guest_vlan.vlan='3'"))
+        assertTrue(ops.any { it.startsWith("set network.wrtpulse_x_guest_vlan.ports='") && it.contains("0t") })
+        assertTrue(ops.contains("add_list network.wrtpulse_x_guest_dev.ports='eth0.3'"))
+        assertTrue(ops.contains("add_list network.wrtpulse_x_guest_dev.ports='phy1-mesh0.3'"))
+    }
+
+    @Test
+    fun `a sync rewrites the extra sections and counts a missing guest ap as drift`() {
+        val net = Parsers.uciShow(FRESH_DSA_NETWORK + "\nnetwork.wrtpulse_x_guest=interface\nnetwork.wrtpulse_x_guest_dev=device")
+        val old = WifiNetwork("wrtpulse_x_guest_ap_radio0", "radio0", "Old-Guest", "psk2", "x", disabled = false, network = "wrtpulse_x_guest")
+        val ops = MeshOps.nodeExtraOps(withExtras, radios, null, null, net, emptyList(), listOf(old))
+        assertTrue(ops.contains("delete wireless.wrtpulse_x_guest_ap_radio0"))
+        assertTrue(ops.contains("delete network.wrtpulse_x_guest"))
+        assertTrue(ops.contains("delete network.wrtpulse_x_guest_dev"))
+        assertTrue(ops.indexOf("delete network.wrtpulse_x_guest_dev") < ops.indexOf("set network.wrtpulse_x_guest_dev=device"))
+        // Only LAN copies present: out of date until the guest AP exists.
+        val lanOnly = radios.flatMap { r ->
+            MeshOps.ssidsFor(withExtras, r.band).mapIndexed { i, s ->
+                WifiNetwork(MeshOps.apSection(r.section, i), r.section, s.ssid, s.encryption, s.key, disabled = false, network = "lan",
+                    ieee80211r = true, mobilityDomain = MeshOps.mobilityDomain(s.ssid))
+            }
+        }
+        assertFalse(MeshOps.apsInSync(withExtras, radios, lanOnly))
+        assertTrue(MeshOps.driftSummary(withExtras, radios, lanOnly).contains("Casa-Guest"))
+    }
+}

@@ -1279,6 +1279,8 @@ object Commands {
         "echo $SECTION neigh" to "ip neigh show",
         "echo $SECTION df" to OVERLAY_FREE,
         "echo $SECTION board" to BOARD,
+        "echo $SECTION presnap" to NODE_SNAPSHOT_STATE,
+        "echo $SECTION swconfig" to SWCONFIG,
         "echo $SECTION ping" to pingHosts(nodeIps),
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
@@ -1408,6 +1410,109 @@ object Commands {
     const val MESH_WATCH_REMOVE =
         "rm -f $MESH_WATCH_PATH; [ -f /etc/crontabs/root ] && sed -i '/wrtpulse-meshwatch/d' /etc/crontabs/root; " +
         "/etc/init.d/cron restart >/dev/null 2>&1; echo unwatched"
+
+    /**
+     * The router's own SSH host keys as public lines — what the app pins for a router it has
+     * only ever reached through the primary, so its first direct contact is not a first contact.
+     */
+    const val HOST_KEY_LINES =
+        "for f in /etc/dropbear/dropbear_ed25519_host_key /etc/dropbear/dropbear_rsa_host_key /etc/dropbear/dropbear_ecdsa_host_key; do " +
+        "[ -f \$f ] && dropbearkey -y -f \$f 2>/dev/null | grep -E '^(ssh|ecdsa)-'; done; :"
+
+    // ── The setup port on a primary ─────────────────────────────────────────
+    const val SETUP_DIR = "/tmp/wrtpulse-setup"
+
+    /** Terminator for a heredoc that carries another heredoc inside it. */
+    const val FILE_EOF = "WRTPULSE_FILE_EOF"
+
+    /**
+     * Applies the isolation and, in the same breath, arms its undoing: a detached timer puts
+     * the socket back in the LAN by itself if the app never does — a phone that died mid-setup
+     * must not leave a LAN socket dead. [release] is the batch that undoes it, kept on the
+     * router so the timer needs nothing from the phone.
+     */
+    fun setupApply(isolate: List<String>, release: List<String>, linkCheck: String, seconds: Int = 1200): String = buildString {
+        // The stored script carries a `uci batch` heredoc of its own, so the wrapper's
+        // terminator has to differ from the batch's, or the wrapper ends where the batch does
+        // and the rest of the script runs on the spot.
+        append("mkdir -p $SETUP_DIR && cat > $SETUP_DIR/release.sh <<'$FILE_EOF'\n")
+        append(uciBatch(release, MeshOps.SETUP_PACKAGES, "/etc/init.d/network reload >/dev/null 2>&1; $FIREWALL_RELOAD >/dev/null 2>&1; echo released"))
+        append("\nrm -f $SETUP_DIR/release.sh $SETUP_DIR/timer.pid $SETUP_DIR/link.sh\n$FILE_EOF\n")
+        // Whether the held socket still has a cable in it. A router left cabled there must
+        // never be handed to the LAN by a timer: its DHCP server would be too.
+        append("cat > $SETUP_DIR/link.sh <<'$FILE_EOF'\n").append(linkCheck).append("\n$FILE_EOF\n")
+        append("[ -f $SETUP_DIR/timer.pid ] && kill \$(cat $SETUP_DIR/timer.pid) 2>/dev/null; ")
+        append("(sleep $seconds; while [ -f $SETUP_DIR/release.sh ]; do ")
+        append("if [ \"\$(sh $SETUP_DIR/link.sh)\" = \"up\" ]; then sleep 300; else sh $SETUP_DIR/release.sh; fi; done) ")
+        append(">/dev/null 2>&1 & echo \$! > $SETUP_DIR/timer.pid; ")
+        append(uciBatch(isolate, MeshOps.SETUP_PACKAGES, "/etc/init.d/network reload >/dev/null 2>&1; $FIREWALL_RELOAD >/dev/null 2>&1; echo isolated"))
+    }
+
+    /** `up` or `down` for one socket: a netdev's carrier, or a chip port's link. */
+    fun socketLinkCheck(port: String): String =
+        if (port.startsWith("sw:")) {
+            val n = port.removePrefix("sw:")
+            "swconfig dev \$(swconfig list | sed -n 's/^Found:*[[:space:]]*\\([^ ]*\\).*/\\1/p' | head -1) port $n get link 2>/dev/null | grep -q 'link:up' && echo up || echo down"
+        } else {
+            "[ \"\$(cat /sys/class/net/$port/carrier 2>/dev/null)\" = 1 ] && echo up || echo down"
+        }
+
+    /**
+     * Runs the stored undo now and cancels the timer — unless a cable is still in the held
+     * socket, in which case it says so and holds on. Safe when nothing is held.
+     */
+    const val SETUP_RELEASE =
+        "if [ ! -f $SETUP_DIR/release.sh ]; then echo nothing-held; " +
+        "elif [ -f $SETUP_DIR/link.sh ] && [ \"\$(sh $SETUP_DIR/link.sh)\" = \"up\" ]; then echo still-cabled; " +
+        "else [ -f $SETUP_DIR/timer.pid ] && kill \$(cat $SETUP_DIR/timer.pid) 2>/dev/null; sh $SETUP_DIR/release.sh; fi"
+
+    /** The release a finished join runs: the node is on the LAN now, the cable is meant to stay. */
+    const val SETUP_RELEASE_KEEP_CABLE =
+        "[ -f $SETUP_DIR/timer.pid ] && kill \$(cat $SETUP_DIR/timer.pid) 2>/dev/null; " +
+        "if [ -f $SETUP_DIR/release.sh ]; then sh $SETUP_DIR/release.sh; else echo nothing-held; fi"
+
+    /**
+     * Who answers on the setup bridge: the all-hosts ping makes every neighbour speak, and the
+     * neighbour table then lists their link-local addresses. One entry is the new router.
+     */
+    const val SETUP_DISCOVER =
+        "ping -6 -c2 -W1 -I ${MeshOps.SETUP_BRIDGE} ff02::1 >/dev/null 2>&1; " +
+        "ip -6 neigh show dev ${MeshOps.SETUP_BRIDGE} 2>/dev/null | awk '/^fe80/ && !/FAILED/ {print \$1}'"
+
+    /** The link state the cable watch polls: netdevs on DSA, chip ports on swconfig. */
+    val SETUP_LINKS: String = listOf(
+        "echo $SECTION links" to NETDEVS,
+        "echo $SECTION swconfig" to SWCONFIG,
+    ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    // ── The pre-mesh snapshot kept on the node itself ─────────────────────
+    /**
+     * Where a node keeps the config it had before it joined. On its own flash, so any phone —
+     * or this app freshly installed — can put it back; the copy on the phone is a second one.
+     * Not in the archive's own file list, so a restore does not carry it forward.
+     */
+    const val NODE_SNAPSHOT = "/etc/wrtpulse/pre-mesh.tar.gz"
+
+    /** Taken before the batch, while the config is still the router's own. */
+    const val NODE_KEEP_SNAPSHOT =
+        "mkdir -p /etc/wrtpulse && rm -f $NODE_SNAPSHOT && sysupgrade -b $NODE_SNAPSHOT >/dev/null 2>&1 && wc -c < $NODE_SNAPSHOT"
+
+    /** Whether the node holds one, and the LAN address inside it — what Leave would bring back. */
+    const val NODE_SNAPSHOT_STATE =
+        "if [ -f $NODE_SNAPSHOT ]; then echo present; " +
+        "tar -xzOf $NODE_SNAPSHOT etc/config/network 2>/dev/null | sed -n \"s/.*option ipaddr '\\(.*\\)'/\\1/p\" | head -1; " +
+        "tar -xzOf $NODE_SNAPSHOT etc/config/system 2>/dev/null | sed -n \"s/.*option hostname '\\(.*\\)'/\\1/p\" | head -1; " +
+        "else echo absent; fi"
+
+    /**
+     * Puts the snapshot back and reboots, the way the backup screen restores: `sysupgrade -r`
+     * unpacks over /, the file is removed so the restored router does not carry it, and the
+     * reboot is detached because the reply cannot outlive it.
+     */
+    const val NODE_RESTORE_SNAPSHOT =
+        "[ -f $NODE_SNAPSHOT ] || { echo absent; exit 0; }; " +
+        "if sysupgrade -r $NODE_SNAPSHOT >/dev/null 2>&1; then rm -f $NODE_SNAPSHOT; " +
+        "(sleep 1; reboot) >/dev/null 2>&1 & echo restored; else echo failed; fi"
 
     const val NODE_SERVICES_OFF =
         "for s in firewall dnsmasq odhcpd; do [ -x /etc/init.d/\$s ] && " +

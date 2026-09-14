@@ -132,6 +132,34 @@ class GuestDetectTest {
     ).let { Parsers.firewallConfig(it) }
 
     @Test
+    fun `a node's copy of the primary's guest network is mirrored, not managed`() {
+        val nets = listOf(
+            ap("wrtpulse_x_guest_ap_radio0", "wrtpulse_x_guest"),
+            ap("wrtpulse_x_guest_ap_radio1", "wrtpulse_x_guest").copy(device = "radio1"),
+            ap("wrtpulse_x_iot_ap_radio0", "wrtpulse_x_iot").copy(ssid = "Casa-IoT"),
+            ap("wrtpulse_ap_radio0", "lan"),
+        )
+        // Nothing of its own to manage on either kind…
+        assertNull(GuestStore.detect(nets, zone("guest", "wrtpulse_guest")))
+        assertNull(GuestStore.detect(nets, Parsers.firewallConfig(emptyMap()), NetworkKind.IOT))
+        // …but the primary's copies are there to show.
+        val guest = GuestStore.mirrored(nets, NetworkKind.GUEST)!!
+        assertEquals("Casa-Guest", guest.ssid)
+        assertEquals(listOf("radio0", "radio1"), guest.bands)
+        assertTrue(guest.enabled)
+        assertFalse(guest.open)
+        assertEquals("Casa-IoT", GuestStore.mirrored(nets, NetworkKind.IOT)!!.ssid)
+        assertEquals(listOf("radio0"), GuestStore.mirrored(nets, NetworkKind.IOT)!!.bands)
+    }
+
+    @Test
+    fun `a router with its own guest network mirrors nothing`() {
+        val nets = listOf(ap("wrtpulse_guest", "wrtpulse_guest"), ap("default_radio0", "lan"))
+        assertNull(GuestStore.mirrored(nets, NetworkKind.GUEST))
+        assertNull(GuestStore.mirrored(nets, NetworkKind.IOT))
+    }
+
+    @Test
     fun `a network with a guest zone is detected with its APs`() {
         val net = GuestStore.detect(
             listOf(ap("wrtpulse_guest", "wrtpulse_guest"), ap("default_radio0", "lan")),
