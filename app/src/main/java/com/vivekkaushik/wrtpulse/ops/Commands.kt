@@ -15,14 +15,6 @@ object Commands {
     const val BOARD = "ubus call system board"
 
     /**
-     * The first thing asked of a router reached over the setup cable. Failsafe mode has no
-     * ubus and no overlay, so the board call alone would look like a dead router; the marker
-     * file names the state instead, and the board name comes from sysinfo either way.
-     */
-    const val HOP_PROBE =
-        "[ -f /tmp/.failsafe ] && echo wrtpulse-failsafe; cat /tmp/sysinfo/board_name 2>/dev/null; $BOARD 2>/dev/null; true"
-
-    /**
      * From failsafe mode: mount the overlay, wipe it, reboot into a fresh install. The reboot
      * is detached because the reply cannot outlive it.
      */
@@ -1084,6 +1076,15 @@ object Commands {
         "for d in \$(swconfig list | sed -n 's/^Found:*[[:space:]]*\\([^ ]*\\).*/\\1/p'); do " +
         "echo \"# \$d\"; swconfig dev \$d help 2>/dev/null; " +
         "swconfig dev \$d show 2>/dev/null; done; fi"
+
+    /**
+     * The first thing asked of a router reached over the setup cable. Failsafe mode has no
+     * ubus and no overlay, so the board call alone would look like a dead router; the marker
+     * file names the state instead, and the board name comes from sysinfo either way.
+     */
+    const val HOP_PROBE =
+        "[ -f /tmp/.failsafe ] && echo wrtpulse-failsafe; cat /tmp/sysinfo/board_name 2>/dev/null; " +
+            "echo $SECTION board; $BOARD 2>/dev/null; true"
 
     /**
      * A uci list is replaced wholesale: `set` on a list option collapses it to one value, so

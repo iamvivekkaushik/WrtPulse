@@ -199,7 +199,11 @@ class NodeSetup(
         val out = runCatching {
             primary.exec(if (keepCable) Commands.SETUP_RELEASE_KEEP_CABLE else Commands.SETUP_RELEASE, timeoutMs = 40_000).stdout
         }.getOrNull().orEmpty()
-        released = !out.contains("still-cabled")
+        if (out.contains("still-cabled")) return
+        // The stored script lives in /tmp: a reboot wipes it while the uci change that holds
+        // the socket survives, and "nothing held" would then leave the socket dead for good.
+        if (!out.contains("released")) runCatching { releaseHeldSocketFromConfig(primary) }
+        released = true
     }
 
     private fun fail(why: String) {
@@ -226,11 +230,13 @@ class NodeSetup(
          * and the board name but no ubus; a normal router answers with the board JSON.
          */
         fun hopVerdict(out: com.vivekkaushik.wrtpulse.net.ExecResult): HopVerdict {
-            val lines = out.stdout.lines().map { it.trim() }
-            val brace = out.stdout.indexOf('{')
-            if (brace >= 0 && out.stdout.contains("board_name")) return HopVerdict.Board(out.stdout.substring(brace))
-            if (lines.contains("wrtpulse-failsafe")) {
-                return HopVerdict.Failsafe(lines.firstOrNull { it.isNotEmpty() && it != "wrtpulse-failsafe" }.orEmpty())
+            val parts = Parsers.sections(out.stdout)
+            val head = out.stdout.substringBefore(Commands.SECTION).lines().map { it.trim() }
+            val board = parts["board"].orEmpty()
+            val brace = board.indexOf('{')
+            if (brace >= 0 && board.contains("board_name")) return HopVerdict.Board(board.substring(brace))
+            if (head.contains("wrtpulse-failsafe")) {
+                return HopVerdict.Failsafe(head.firstOrNull { it.isNotEmpty() && it != "wrtpulse-failsafe" }.orEmpty())
             }
             val err = out.stderr.trim()
             if (out.stdout.isBlank() && (err.contains("closed", ignoreCase = true) || err.contains("auth", ignoreCase = true))) return HopVerdict.Refused
@@ -245,4 +251,21 @@ class NodeSetup(
             HostKey(f[0], f[1], HostKeyStore.fingerprint(raw))
         }.toList()
     }
+}
+
+/**
+ * Puts a held setup socket back from the config alone, for when the router's stored undo
+ * script is gone — consumed without effect, or lost to a reboot — while the uci sections that
+ * isolate the socket are still there. True when something was put back.
+ */
+suspend fun releaseHeldSocketFromConfig(session: RouterSession): Boolean {
+    val uci = Parsers.uciShow(session.exec(Commands.NETWORK_CONFIG, timeoutMs = 10_000).stdout)
+    val held = MeshOps.heldSetupPort(uci) ?: return false
+    val ops = MeshOps.setupReleaseOps(uci, held)
+    if (ops.isEmpty()) return false
+    val out = session.exec(
+        Commands.uciBatch(ops, MeshOps.SETUP_PACKAGES, "/etc/init.d/network reload >/dev/null 2>&1; ${Commands.FIREWALL_RELOAD} >/dev/null 2>&1; echo released"),
+        timeoutMs = 40_000,
+    )
+    return out.stdout.contains("released")
 }

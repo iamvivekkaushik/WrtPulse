@@ -1,0 +1,182 @@
+___wrt___ net
+network.loopback=interface
+network.loopback.device='lo'
+network.loopback.proto='static'
+network.loopback.ipaddr='127.0.0.1/8'
+network.globals=globals
+network.globals.dhcp_default_duid='f435350a7ac6add7d5db28e9c8893719e30e'
+network.globals.ula_prefix='fd09:8f39:28b5::/48'
+network.@device[0]=device
+network.@device[0].name='br-lan'
+network.@device[0].type='bridge'
+network.@device[0].ports='eth0.1'
+network.lan=interface
+network.lan.device='br-lan'
+network.lan.proto='static'
+network.lan.ipaddr='192.168.1.1/24'
+network.lan.ip6assign='60'
+network.lan.dns='1.1.1.1' '8.8.8.8'
+network.@switch[0]=switch
+network.@switch[0].name='switch0'
+network.@switch[0].reset='1'
+network.@switch[0].enable_vlan='1'
+network.@switch_vlan[0]=switch_vlan
+network.@switch_vlan[0].device='switch0'
+network.@switch_vlan[0].vlan='1'
+network.@switch_vlan[0].ports='0t'
+network.swvlan2=switch_vlan
+network.swvlan2.device='switch0'
+network.swvlan2.vlan='2'
+network.swvlan2.ports='0t 3'
+network.wan=interface
+network.wan.device='eth0.2'
+network.wan.metric='10'
+network.wan.proto='dhcp'
+network.wrtpulse_guest_dev=device
+network.wrtpulse_guest_dev.type='bridge'
+network.wrtpulse_guest_dev.name='br-guest'
+network.wrtpulse_guest=interface
+network.wrtpulse_guest.proto='static'
+network.wrtpulse_guest.device='br-guest'
+network.wrtpulse_guest.ipaddr='192.168.3.1'
+network.wrtpulse_guest.netmask='255.255.255.0'
+network.wrtpulse_iot_dev=device
+network.wrtpulse_iot_dev.type='bridge'
+network.wrtpulse_iot_dev.name='br-iot'
+network.wrtpulse_iot=interface
+network.wrtpulse_iot.proto='static'
+network.wrtpulse_iot.device='br-iot'
+network.wrtpulse_iot.ipaddr='192.168.4.1'
+network.wrtpulse_iot.netmask='255.255.255.0'
+network.wrtpulse_setup_vlan=switch_vlan
+network.wrtpulse_setup_vlan.device='switch0'
+network.wrtpulse_setup_vlan.vlan='3'
+network.wrtpulse_setup_vlan.ports='0t 5'
+network.wrtpulse_setup_dev=device
+network.wrtpulse_setup_dev.name='br-setup'
+network.wrtpulse_setup_dev.type='bridge'
+network.wrtpulse_setup_dev.ports='eth0.3'
+network.wrtpulse_setup=interface
+network.wrtpulse_setup.device='br-setup'
+network.wrtpulse_setup.proto='none'
+___wrt___ swconfig
+Found: switch0 - mdio.0
+# switch0
+switch0: mdio.0(Atheros AR8337), ports: 7 (cpu @ 0), vlans: 4096
+     --switch
+	Attribute 1 (int): enable_vlan (Enable VLAN mode)
+	Attribute 2 (none): reset_mibs (Reset all MIB counters)
+	Attribute 3 (int): ar8xxx_mib_poll_interval (MIB polling interval in msecs (0 to disable))
+	Attribute 4 (int): ar8xxx_mib_type (MIB type (0=basic 1=extended))
+	Attribute 5 (int): enable_mirror_rx (Enable mirroring of RX packets)
+	Attribute 6 (int): enable_mirror_tx (Enable mirroring of TX packets)
+	Attribute 7 (int): mirror_monitor_port (Mirror monitor port)
+	Attribute 8 (int): mirror_source_port (Mirror source port)
+	Attribute 9 (int): arl_age_time (ARL age time (secs))
+	Attribute 10 (string): arl_table (Get ARL table)
+	Attribute 11 (none): flush_arl_table (Flush ARL table)
+	Attribute 12 (int): igmp_snooping (Enable IGMP Snooping)
+	Attribute 13 (int): igmp_v3 (Enable IGMPv3 support)
+	Attribute 14 (none): apply (Activate changes in the hardware)
+	Attribute 15 (none): reset (Reset the switch)
+     --vlan
+	Attribute 1 (int): vid (VLAN ID (0-4094))
+	Attribute 2 (ports): ports (VLAN port mapping)
+     --port
+	Attribute 1 (none): reset_mib (Reset single port MIB counters)
+	Attribute 2 (string): mib (Get port's MIB counters)
+	Attribute 3 (int): enable_eee (Enable EEE PHY sleep mode)
+	Attribute 4 (none): flush_arl_table (Flush port's ARL table entries)
+	Attribute 5 (int): igmp_snooping (Enable port's IGMP Snooping)
+	Attribute 6 (int): vlan_prio (Port VLAN default priority (VLAN PCP) (0-7))
+	Attribute 7 (int): pvid (Primary VLAN ID)
+	Attribute 8 (unknown): link (Get port link information)
+Global attributes:
+	enable_vlan: 1
+	ar8xxx_mib_poll_interval: 500
+	ar8xxx_mib_type: 0
+	enable_mirror_rx: 0
+	enable_mirror_tx: 0
+	mirror_monitor_port: 0
+	mirror_source_port: 0
+	arl_age_time: 300
+	arl_table: address resolution table
+Port 0: MAC 56:f8:c3:d6:22:31
+Port 0: MAC d6:bb:35:e8:69:52
+Port 0: MAC 2e:25:11:93:bd:75
+Port 0: MAC f6:30:25:77:99:f1
+Port 0: MAC 06:84:6e:d6:49:b1
+Port 0: MAC 66:a4:17:50:97:02
+Port 3: MAC e2:e8:30:22:8e:0b
+
+	igmp_snooping: 0
+	igmp_v3: 0
+Port 0:
+	mib: MIB counters
+RxGoodByte  : 2291229310 (2.1 GiB)
+TxByte      : 2626509051 (2.4 GiB)
+
+	enable_eee: ???
+	igmp_snooping: 0
+	vlan_prio: 0
+	pvid: 0
+	link: port:0 link:up speed:1000baseT full-duplex txflow rxflow 
+Port 1:
+	mib: No MIB data
+	enable_eee: 0
+	igmp_snooping: 0
+	vlan_prio: 0
+	pvid: 0
+	link: port:1 link:down
+Port 2:
+	mib: No MIB data
+	enable_eee: 0
+	igmp_snooping: 0
+	vlan_prio: 0
+	pvid: 0
+	link: port:2 link:down
+Port 3:
+	mib: MIB counters
+RxGoodByte  : 1831032365 (1.7 GiB)
+TxByte      : 2010603717 (1.8 GiB)
+
+	enable_eee: 0
+	igmp_snooping: 0
+	vlan_prio: 0
+	pvid: 2
+	link: port:3 link:up speed:1000baseT full-duplex txflow rxflow auto
+Port 4:
+	mib: No MIB data
+	enable_eee: 0
+	igmp_snooping: 0
+	vlan_prio: 0
+	pvid: 0
+	link: port:4 link:down
+Port 5:
+	mib: MIB counters
+RxGoodByte  : 785717531 (749.3 MiB)
+TxByte      : 269175954 (256.7 MiB)
+
+	enable_eee: 0
+	igmp_snooping: 0
+	vlan_prio: 0
+	pvid: 3
+	link: port:5 link:down
+Port 6:
+	mib: No MIB data
+	enable_eee: ???
+	igmp_snooping: 0
+	vlan_prio: 0
+	pvid: 0
+	link: port:6 link:up speed:10baseT half-duplex 
+VLAN 1:
+	vid: 1
+	ports: 0t 
+VLAN 2:
+	vid: 2
+	ports: 0t 3 
+VLAN 3:
+	vid: 3
+	ports: 0t 5 
+___wrt___ boardsw
+{ "switch0": { "enable": true, "reset": true, "ports": [ { "num": 0, "device": "eth0", "need_tag": false, "want_untag": false }, { "num": 3, "role": "lan", "index": 1 }, { "num": 5, "role": "lan", "index": 2 } ], "roles": [ { "role": "lan", "ports": "3 5 0t", "device": "eth0.1" } ] } }

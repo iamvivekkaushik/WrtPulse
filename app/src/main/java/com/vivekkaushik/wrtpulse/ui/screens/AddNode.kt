@@ -127,7 +127,11 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit, onDone: () -> Unit) {
     DisposableEffect(setup) {
         onDispose {
             val j = join
-            if (setup != null && (j == null || (!j.applying && !j.done))) CoroutineScope(Dispatchers.IO).launch { setup.release() }
+            // Then a fresh read, so the Mesh page underneath stops showing the socket as held.
+            if (setup != null && (j == null || (!j.applying && !j.done))) CoroutineScope(Dispatchers.IO).launch {
+                setup.release()
+                runCatching { store?.load() }
+            }
         }
     }
     DisposableEffect(join) {
@@ -199,7 +203,9 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit, onDone: () -> Unit) {
     val candidates = hooks.saved.filter { primary != null && it.identity != primary.identity && !it.isMeshNode }
     val model = setup?.board?.model?.ifBlank { null }
     val socket = setup?.portLabel ?: "?"
-    // The primary's real sockets, the held one marked from the setup's own reading.
+    // The primary's real sockets, the held one marked from the setup's own reading. The Mesh
+    // page's read is cancelled when this screen replaces it, so the wizard reads for itself.
+    LaunchedEffect(store) { if (store != null && !store.loaded) runCatching { store.load() } }
     val sockets = store?.caseSockets(setup?.port).orEmpty()
 
     Box(Modifier.fillMaxSize()) {
@@ -659,7 +665,8 @@ internal fun targetIndex(sockets: List<CaseSocket>, socketLabel: String, isPrima
 @Composable
 private fun BigRouter(name: String, isPrimary: Boolean, sockets: List<CaseSocket>, socketLabel: String, reduced: Boolean) {
     val measurer = rememberTextMeasurer()
-    // The primary is drawn as it is; a router nobody has read yet is drawn as the stock one.
+    // The primary is drawn as it is. The new router is one nobody has read yet, so it is
+    // always the stock one: how many sockets it has is not known until it has signed in.
     val socks = if (isPrimary) sockets.ifEmpty { stockSockets() } else stockSockets()
     val loop = rememberInfiniteTransition(label = "bigRouter")
     val t by loop.animateFloat(0f, 1f, infiniteRepeatable(tween(2600, easing = LinearEasing), RepeatMode.Restart), label = "plug")
@@ -803,10 +810,11 @@ private fun RouterPair(phase: PairPhase, primaryName: String, nodeName: String, 
         }
         val isFound = phase != PairPhase.Finding
         val nodeSocks = stockSockets()
+        val nodeLit = targetIndex(nodeSocks, socketLabel, isPrimary = false)
         val primaryXs = router(14f, primaryName, primarySocks, held, Wrt.Green)
-        val nodeXs = router(198f, if (isFound) nodeName else "new router", nodeSocks, 1, if (!isFound) Wrt.DotOff else if (phase == PairPhase.Failed) Wrt.Red else Wrt.Green)
+        val nodeXs = router(198f, if (isFound) nodeName else "new router", nodeSocks, nodeLit, if (!isFound) Wrt.DotOff else if (phase == PairPhase.Failed) Wrt.Red else Wrt.Green)
         // cable: from the primary's held socket to the new router's first LAN socket
-        val a = primaryXs.getOrElse(held) { primaryXs.last() }; val b = nodeXs[1]
+        val a = primaryXs.getOrElse(held) { primaryXs.last() }; val b = nodeXs.getOrElse(nodeLit) { nodeXs.last() }
         val cable = Path().apply { moveTo(a * u, 66f * u); cubicTo(a * u, 120f * u, b * u, 120f * u, b * u, 66f * u) }
         val cableCol = when (phase) { PairPhase.Failed -> Wrt.Red; PairPhase.Signing -> Wrt.Accent; else -> Wrt.TextSecondary }
         drawPath(cable, cableCol, style = Stroke(stroke))

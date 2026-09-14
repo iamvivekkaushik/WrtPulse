@@ -147,6 +147,9 @@ class MeshStore(private val session: RouterSession) : Refreshable {
     suspend fun releaseSetupPort() {
         val out = runCatching { session.exec(Commands.SETUP_RELEASE, timeoutMs = 40_000).stdout }.getOrNull().orEmpty()
         setupNotice = if (out.contains("still-cabled")) "Something is still plugged into that socket. Unplug it, then release." else null
+        // The router's own undo script is gone (a reboot clears /tmp) but the hold is still in
+        // its config: undo it from the config instead.
+        if (!out.contains("still-cabled") && !out.contains("released")) runCatching { releaseHeldSocketFromConfig(session) }
         load()
     }
 

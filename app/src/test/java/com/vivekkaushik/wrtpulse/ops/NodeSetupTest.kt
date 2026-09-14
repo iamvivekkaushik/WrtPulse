@@ -2,6 +2,8 @@ package com.vivekkaushik.wrtpulse.ops
 
 import com.vivekkaushik.wrtpulse.data.NodeSetup
 import com.vivekkaushik.wrtpulse.net.ExecResult
+import com.vivekkaushik.wrtpulse.ops.Parsers
+import com.vivekkaushik.wrtpulse.ops.Commands
 import com.vivekkaushik.wrtpulse.net.JumpSession
 import com.vivekkaushik.wrtpulse.net.SshTarget
 import org.junit.Assert.assertEquals
@@ -182,11 +184,22 @@ class JumpSessionTest {
         assertTrue(JumpSession.wrap(target, "", "true").startsWith("DROPBEAR_PASSWORD='' dbclient"))
     }
 
+    private val M = Commands.SECTION
+
+    /** A fresh Deco M4R answering the probe on a normal boot: two switch holes, WAN on port 3. */
+    private val decoProbe = """
+        tplink,deco-m4r-v1
+        $M board
+        { "board_name": "tplink,deco-m4r-v1", "model": "TP-Link Deco M4R v1" }
+    """.trimIndent()
+
     @Test
     fun `a normal router answers the probe with its board`() {
-        val v = NodeSetup.hopVerdict(ExecResult("tplink,deco-m4r-v1\n{ \"board_name\": \"tplink,deco-m4r-v1\", \"model\": \"TP-Link Deco M4R v1\" }\n", "", 0))
+        val v = NodeSetup.hopVerdict(ExecResult(decoProbe, "", 0))
         assertTrue(v is NodeSetup.HopVerdict.Board)
-        assertTrue((v as NodeSetup.HopVerdict.Board).json.startsWith("{"))
+        val board = v as NodeSetup.HopVerdict.Board
+        assertTrue(board.json.startsWith("{"))
+        assertEquals("TP-Link Deco M4R v1", Parsers.board(board.json).model)
     }
 
     @Test
@@ -198,7 +211,7 @@ class JumpSessionTest {
     @Test
     fun `failsafe mode is named, not mistaken for a refused password`() {
         // No ubus in failsafe: the board call prints nothing and exits 255, which used to read as "refused".
-        val v = NodeSetup.hopVerdict(ExecResult("wrtpulse-failsafe\ntplink,deco-m4r-v1\n", "", 0))
+        val v = NodeSetup.hopVerdict(ExecResult("wrtpulse-failsafe\ntplink,deco-m4r-v1\n$M board\n", "", 0))
         assertEquals(NodeSetup.HopVerdict.Failsafe("tplink,deco-m4r-v1"), v)
     }
 
