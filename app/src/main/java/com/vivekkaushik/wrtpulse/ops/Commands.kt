@@ -1369,6 +1369,46 @@ object Commands {
      * What a node stops doing: the primary serves addresses, names and the firewall for the
      * whole LAN, and a second dnsmasq on the same wire hands out a second set of answers.
      */
+    /**
+     * A wireless node's safety net, run by cron every minute: when its mesh point has no peer,
+     * it scans for the primary's mesh id and moves its radio to whatever channel the primary
+     * is on now. A channel change on the primary — from this app, LuCI or a DFS radar event —
+     * otherwise strands the node on the old channel with no way to reach it and tell it.
+     */
+    const val MESH_WATCH_PATH = "/usr/bin/wrtpulse-meshwatch"
+    val MESH_WATCH_INSTALL: String = buildString {
+        append("cat > $MESH_WATCH_PATH <<'WRTPULSE_EOF'\n")
+        append(
+            """
+            #!/bin/sh
+            # WrtPulse: keep this node's mesh point on the primary's channel.
+            IF=${'$'}(iw dev 2>/dev/null | awk '/Interface/{i=${'$'}2} /type mesh/{print i}' | head -1)
+            [ -n "${'$'}IF" ] || exit 0
+            iw dev "${'$'}IF" station dump 2>/dev/null | grep -q 'mesh plink:.*ESTAB' && exit 0
+            MID=${'$'}(uci -q get wireless.wrtpulse_mesh.mesh_id); RADIO=${'$'}(uci -q get wireless.wrtpulse_mesh.device)
+            [ -n "${'$'}MID" ] && [ -n "${'$'}RADIO" ] || exit 0
+            CUR=${'$'}(uci -q get wireless.${'$'}RADIO.channel)
+            F=${'$'}(iw dev "${'$'}IF" scan 2>/dev/null | awk -v id="${'$'}MID" '/^BSS/{f=""} /freq:/{f=${'$'}2} /MESH ID: /{ if (substr(${'$'}0, index(${'$'}0, "MESH ID: ")+9)==id) print f }' | head -1)
+            [ -n "${'$'}F" ] || exit 0
+            F=${'$'}{F%.*}
+            if [ "${'$'}F" -ge 5000 ]; then CH=${'$'}(( (F-5000)/5 )); else CH=${'$'}(( (F-2407)/5 )); fi
+            [ "${'$'}CH" = "${'$'}CUR" ] && exit 0
+            logger -t wrtpulse "mesh peer lost; primary found on channel ${'$'}CH, moving from ${'$'}CUR"
+            uci set wireless.${'$'}RADIO.channel="${'$'}CH"; uci commit wireless; wifi reload
+            """.trimIndent()
+        )
+        append("\nWRTPULSE_EOF\n")
+        append("chmod +x $MESH_WATCH_PATH; ")
+        append("grep -q wrtpulse-meshwatch /etc/crontabs/root 2>/dev/null || ")
+        append("echo '* * * * * $MESH_WATCH_PATH' >> /etc/crontabs/root; ")
+        append("/etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1; echo watch")
+    }
+
+    /** Takes the watchdog and its cron line off a node that leaves the mesh or goes wired. */
+    const val MESH_WATCH_REMOVE =
+        "rm -f $MESH_WATCH_PATH; [ -f /etc/crontabs/root ] && sed -i '/wrtpulse-meshwatch/d' /etc/crontabs/root; " +
+        "/etc/init.d/cron restart >/dev/null 2>&1; echo unwatched"
+
     const val NODE_SERVICES_OFF =
         "for s in firewall dnsmasq odhcpd; do [ -x /etc/init.d/\$s ] && " +
         "{ /etc/init.d/\$s disable; /etc/init.d/\$s stop; } >/dev/null 2>&1; done; " +

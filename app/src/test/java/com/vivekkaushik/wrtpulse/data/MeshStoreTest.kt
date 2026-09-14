@@ -153,6 +153,18 @@ class MeshStoreTest {
             )
         }
 
+    /** An SSID renamed after hand-off went on keeps the old name's domain, which the store flags. */
+    @Test
+    fun `a renamed ssid with a stale mobility domain is reported and repaired`() {
+        val s = store()
+        val stale = s.lanAps.first()
+        val renamed = stale.copy(ssid = stale.ssid + "2", ieee80211r = true, mobilityDomain = MeshOps.mobilityDomain(stale.ssid))
+        s.networks.remove(stale); s.networks.add(renamed)
+        assertEquals(listOf(renamed.ssid), s.staleDomains.map { it.ssid })
+        // The repair writes the domain the new name derives.
+        assertTrue(MeshOps.roamingOps(s.lanAps).contains("set wireless.${renamed.section}.mobility_domain='${MeshOps.mobilityDomain(renamed.ssid)}'"))
+    }
+
     /** The Deco after its join, read as the current router: gateway set, DHCP off, copied SSIDs. */
     @Test
     fun `a router whose config is a node's is recognised without a record`() {

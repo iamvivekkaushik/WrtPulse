@@ -271,6 +271,7 @@ class MeshJoin(
             // 6. Only now the services. A rollback has nothing to switch back on.
             step(i, JoinStep.State.Running)
             runCatching { found.exec(Commands.NODE_SERVICES_OFF, timeoutMs = 40_000) }
+            if (plan.backhaul == Backhaul.Wireless) runCatching { found.exec(Commands.MESH_WATCH_INSTALL, timeoutMs = 20_000) }
             meshMac = runCatching {
                 Parsers.iwDevs(found.exec(Commands.WIFI_MACS, timeoutMs = 8_000).stdout)
                     .firstOrNull { it.type.contains("mesh") }?.mac

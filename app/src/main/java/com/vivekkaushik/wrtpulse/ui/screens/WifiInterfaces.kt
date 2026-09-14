@@ -967,6 +967,34 @@ fun ApFormScreen(
                     ft && ftPossible,
                     divider = false,
                 ) { if (ftPossible) ft = !ft }
+                if (ft && ftPossible) {
+                    // The domain follows the name: every AP and node carrying this SSID derives
+                    // the same one, so it is shown rather than asked for. A saved AP whose
+                    // domain belongs to an earlier name is said so, and the save moves it.
+                    val derived = com.vivekkaushik.wrtpulse.ops.MeshOps.mobilityDomain(ssid.trim())
+                    val current = existing?.mobilityDomain?.takeIf { existing.ieee80211r && it.isNotEmpty() }
+                    Row(
+                        Modifier.fillMaxWidth().padding(bottom = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("Mobility domain", style = sans(11f, 500, Wrt.TextDim), modifier = Modifier.weight(1f))
+                        if (current != null && current != derived) {
+                            MonoTag(current, color = Wrt.TextDim, border = Wrt.BorderFaint, size = 9f)
+                            Icon(WrtIcons.ArrowRight, null, Modifier.size(11.dp), tint = Wrt.TextDim)
+                        }
+                        MonoTag(derived, color = Wrt.Accent, border = Wrt.Accent.copy(alpha = 0.45f), size = 9f)
+                    }
+                    Text(
+                        if (current != null && current != derived) {
+                            "Derived from the SSID, the way hostapd does it. This AP still carries the domain of an earlier name; saving moves it, and every other AP or node named \"${ssid.trim()}\" will match."
+                        } else {
+                            "Derived from the SSID, the way hostapd does it. Every AP or mesh node named \"${ssid.trim()}\" with the same password lands in this domain and hands clients off to this one."
+                        },
+                        style = sans(10.5f, 400, Wrt.TextDim, lineHeight = 15.sp),
+                        modifier = Modifier.padding(bottom = 12.dp),
+                    )
+                }
             }
             Text(
                 if (editing) "$ uci set wireless.${existing?.section ?: "<new>"}.…"

@@ -476,8 +476,9 @@ class NodeSyncTest {
     private fun copied(p: MeshProfile): List<WifiNetwork> =
         radios.flatMap { r ->
             MeshOps.ssidsFor(p, r.band).mapIndexed { i, s ->
+                val ft = MeshOps.roamingCapable(s.encryption)
                 WifiNetwork(MeshOps.apSection(r.section, i), r.section, s.ssid, s.encryption, s.key, disabled = false,
-                    network = "lan", hidden = s.hidden, ieee80211r = MeshOps.roamingCapable(s.encryption))
+                    network = "lan", hidden = s.hidden, ieee80211r = ft, mobilityDomain = if (ft) MeshOps.mobilityDomain(s.ssid) else "")
             }
         }
 
@@ -505,6 +506,16 @@ class NodeSyncTest {
     }
 
     @Test
+    fun `a node whose hand-off domain belongs to an old name is out of date`() {
+        val p = profile()
+        val have = copied(p).map { it.copy(mobilityDomain = "e8df") }
+        assertFalse(MeshOps.apsInSync(p, radios, have))
+        assertEquals("hand-off domain does not match the SSID", MeshOps.driftSummary(p, radios, have))
+        val right = copied(p).map { it.copy(mobilityDomain = MeshOps.mobilityDomain(it.ssid)) }
+        assertTrue(MeshOps.apsInSync(p, radios, right))
+    }
+
+    @Test
     fun `a push drops every copied section and writes the current set, two per band if need be`() {
         val p = profile().let { it.copy(ssids = it.ssids + MeshSsid("5G", "Casa-Work", "sae", "workpass1", hidden = true)) }
         val ops = MeshOps.nodeApOps(p, radios, copied(profile()))
@@ -521,6 +532,37 @@ class NodeSyncTest {
         assertTrue(ops.indexOfLast { it.startsWith("delete ") } < ops.indexOfFirst { it.startsWith("set ") })
         // The same lines the join writes, so the two can never disagree.
         assertTrue(MeshOps.nodeOps(profile(), node(), "n", Backhaul.Wired, "192.168.0.2").containsAll(MeshOps.nodeApOps(profile(), radios, emptyList())))
+    }
+
+    @Test
+    fun `a wireless node follows the primary's channel and width, a wired one only the width`() {
+        val p = profile()
+        val plan5 = p.radioFor("5G")!!
+        // A fresh box's radios are off and have no country; a joined node's are on and carry the primary's.
+        val radios = this.radios.map { it.copy(disabled = false, country = p.radioFor(it.band)?.country.orEmpty(), htmode = p.radioFor(it.band)?.htmode ?: it.htmode) }
+        val wireless = MeshOps.nodeRadioOps(p, radios, meshRadio = "radio1")
+        assertTrue(wireless.contains("set wireless.radio1.channel='${plan5.channel}'"))
+        assertTrue(wireless.contains("set wireless.radio1.htmode='${plan5.htmode}'"))
+        val wired = MeshOps.nodeRadioOps(p, radios, meshRadio = null)
+        assertFalse(wired.any { it.startsWith("set wireless.radio1.channel=") && !it.endsWith("'auto'") })
+        // Drift is judged the same way: the mesh radio on the wrong channel is out of date, a wired one is not.
+        val moved = radios.map { if (it.section == "radio1") it.copy(channel = "36") else it }
+        assertEquals("5G channel 36 → ${plan5.channel}", MeshOps.radioDrift(p, moved, meshRadio = "radio1"))
+        assertNull(MeshOps.radioDrift(p, moved, meshRadio = null))
+        val synced = radios.map { if (it.section == "radio1") it.copy(channel = plan5.channel) else it }
+        assertTrue(MeshOps.radiosInSync(p, synced, meshRadio = "radio1"))
+    }
+
+    @Test
+    fun `the mesh watchdog script is installed once and runs from cron`() {
+        val script = Commands.MESH_WATCH_INSTALL
+        assertTrue(script.contains("cat > /usr/bin/wrtpulse-meshwatch <<'WRTPULSE_EOF'"))
+        assertTrue(script.contains("mesh plink:.*ESTAB"))
+        assertTrue(script.contains("MESH ID: "))
+        assertTrue(script.contains("uci commit wireless; wifi reload"))
+        assertTrue(script.contains("grep -q wrtpulse-meshwatch /etc/crontabs/root"))
+        assertTrue(script.contains("/etc/init.d/cron enable"))
+        assertTrue(Commands.MESH_WATCH_REMOVE.contains("sed -i '/wrtpulse-meshwatch/d'"))
     }
 
     @Test

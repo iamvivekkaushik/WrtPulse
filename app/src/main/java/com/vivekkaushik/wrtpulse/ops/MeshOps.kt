@@ -379,13 +379,29 @@ object MeshOps {
             .forEach { ops += "delete wireless.${it.section}" }
         node.networks.filter { it.section == MESH_SECTION }.forEach { ops += "delete wireless.${it.section}" }
         val meshRadio = if (backhaul == Backhaul.Wireless) meshRadioOf(profile, node) else null
-        node.radios.forEach { radio ->
+        ops += nodeRadioOps(profile, node.radios, meshRadio)
+        ops += nodeApOps(profile, node.radios, existing = emptyList())
+        if (meshRadio != null && profile.meshId != null && profile.meshKey != null) {
+            ops += meshIfaceOps(MESH_SECTION, meshRadio, profile.meshId, profile.meshKey)
+        }
+        return ops
+    }
+
+    /**
+     * The radio settings a node takes from the primary: country and width on every radio, and
+     * the channel on the radio that carries the mesh point — a mesh peer on another channel is
+     * no peer at all. A wired node keeps its own channel (auto when it had none), since two
+     * radios on one channel in one house only compete. Written at the join and again by every
+     * sync, so a channel change on the primary reaches the nodes.
+     */
+    fun nodeRadioOps(profile: MeshProfile, radios: List<WifiRadio>, meshRadio: String?): List<String> {
+        val ops = mutableListOf<String>()
+        radios.forEach { radio ->
             val plan = profile.radioFor(radio.band)
             ops += "set wireless.${radio.section}.disabled='0'"
             if (plan != null) {
                 if (plan.country.isNotBlank()) ops += "set wireless.${radio.section}.country='${plan.country}'"
-                // A wired node gets its own channel; a mesh radio has to sit where the primary is.
-                if (radio.section == meshRadio && plan.channel.isNotBlank()) {
+                if (radio.section == meshRadio && plan.channel.isNotBlank() && plan.channel != "auto") {
                     ops += "set wireless.${radio.section}.channel='${plan.channel}'"
                 } else if (radio.channel.isBlank()) {
                     ops += "set wireless.${radio.section}.channel='auto'"
@@ -393,11 +409,25 @@ object MeshOps {
                 if (plan.htmode.isNotBlank()) ops += "set wireless.${radio.section}.htmode='${plan.htmode}'"
             }
         }
-        ops += nodeApOps(profile, node.radios, existing = emptyList())
-        if (meshRadio != null && profile.meshId != null && profile.meshKey != null) {
-            ops += meshIfaceOps(MESH_SECTION, meshRadio, profile.meshId, profile.meshKey)
-        }
         return ops
+    }
+
+    /** True when a node's radios carry what [nodeRadioOps] would write; [meshRadio] is the node's mesh radio, if any. */
+    fun radiosInSync(profile: MeshProfile, radios: List<WifiRadio>, meshRadio: String?): Boolean =
+        radioDrift(profile, radios, meshRadio) == null
+
+    /** "5 GHz channel 149 → 36" — the first radio setting that differs, or null. */
+    fun radioDrift(profile: MeshProfile, radios: List<WifiRadio>, meshRadio: String?): String? {
+        radios.forEach { radio ->
+            val plan = profile.radioFor(radio.band) ?: return@forEach
+            if (radio.disabled) return "${radio.band} radio is off"
+            if (plan.country.isNotBlank() && radio.country != plan.country) return "country ${radio.country.ifBlank { "unset" }} → ${plan.country}"
+            if (radio.section == meshRadio && plan.channel.isNotBlank() && plan.channel != "auto" && radio.channel != plan.channel) {
+                return "${radio.band} channel ${radio.channel} → ${plan.channel}"
+            }
+            if (plan.htmode.isNotBlank() && radio.htmode != plan.htmode) return "${radio.band} width ${radio.htmode.ifBlank { "unset" }} → ${plan.htmode}"
+        }
+        return null
     }
 
     /** The SSIDs a node radio carries: every LAN SSID of its band, else the other band's. */
@@ -435,7 +465,7 @@ object MeshOps {
     }
 
     /** What one AP amounts to, for telling a node's copy from the primary's original. */
-    private data class ApShape(val device: String, val ssid: String, val encryption: String, val key: String, val hidden: Boolean, val ft: Boolean)
+    private data class ApShape(val device: String, val ssid: String, val encryption: String, val key: String, val hidden: Boolean, val ft: Boolean, val domain: String)
 
     /**
      * True when a node's copied APs match what the primary would write today. Compared as
@@ -445,11 +475,12 @@ object MeshOps {
     fun apsInSync(profile: MeshProfile, radios: List<WifiRadio>, existing: List<WifiNetwork>): Boolean {
         val wanted = radios.flatMap { radio ->
             ssidsFor(profile, radio.band).map { s ->
-                ApShape(radio.section, s.ssid, s.encryption, if (s.encryption == "none") "" else s.key, s.hidden, roamingCapable(s.encryption))
+                val ft = roamingCapable(s.encryption)
+                ApShape(radio.section, s.ssid, s.encryption, if (s.encryption == "none") "" else s.key, s.hidden, ft, if (ft) mobilityDomain(s.ssid) else "")
             }
         }.toSet()
         val have = existing.filter { it.section.startsWith(AP_PREFIX) && it.mode == "ap" }.map { n ->
-            ApShape(n.device, n.ssid, n.encryption, if (n.encryption == "none") "" else n.key, n.hidden, n.ieee80211r)
+            ApShape(n.device, n.ssid, n.encryption, if (n.encryption == "none") "" else n.key, n.hidden, n.ieee80211r, if (n.ieee80211r) n.mobilityDomain else "")
         }.toSet()
         return wanted == have
     }
@@ -464,6 +495,8 @@ object MeshOps {
             added.isNotEmpty() && gone.isEmpty() -> "${added.size} SSID${if (added.size == 1) "" else "s"} to add: ${added.joinToString(", ")}"
             gone.isNotEmpty() && added.isEmpty() -> "${gone.size} SSID${if (gone.size == 1) "" else "s"} to drop: ${gone.joinToString(", ")}"
             added.isNotEmpty() -> "SSIDs differ: ${gone.joinToString(", ")} → ${added.joinToString(", ")}"
+            existing.any { it.section.startsWith(AP_PREFIX) && it.ieee80211r && it.mobilityDomain != mobilityDomain(it.ssid) } ->
+                "hand-off domain does not match the SSID"
             else -> "password, security or hand-off differs"
         }
     }

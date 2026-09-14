@@ -104,6 +104,25 @@ class WifiStoreTest {
         assertTrue(s.ops().none { it.startsWith("set ") })
     }
 
+    /** What the nodes are told before this router changes: staged edits and drafts, minus deletions. */
+    @Test
+    fun `effective radios and networks are the config after apply`() {
+        val s = store()
+        s.radios.add(com.vivekkaushik.wrtpulse.ops.WifiRadio("radio1", "5G", "149", "VHT80", disabled = false, country = "IN"))
+        val home = WifiNetwork("home", "radio1", "Casa", "psk2", "hunter22", disabled = false, network = "lan")
+        val old = WifiNetwork("old", "radio1", "Legacy", "psk2", "hunter22", disabled = false, network = "lan")
+        s.networks.addAll(listOf(home, old))
+        s.stage("radio1", "channel", "149", "36")
+        s.stage("home", "ssid", "Casa", "Casa2")
+        s.stageDelete("old")
+        s.addDraft(listOf("radio1"), "ap", "Casa-Work", "sae", "workpass1", ft = true)
+        assertEquals("36", s.effectiveRadios().single().channel)
+        val nets = s.effectiveNetworks()
+        assertEquals(listOf("Casa2", "Casa-Work"), nets.map { it.ssid })
+        assertTrue(nets.last().ieee80211r)
+        assertEquals(com.vivekkaushik.wrtpulse.ops.MeshOps.mobilityDomain("Casa-Work"), nets.last().mobilityDomain)
+    }
+
     /** The mesh point's empty SSID once blocked every apply on a primary. */
     @Test
     fun `a mesh point is not a network without a name`() {

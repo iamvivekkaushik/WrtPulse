@@ -129,6 +129,12 @@ fun MeshScreen(
         val unnamed = nodes.filter { it.meshMac == null && it.meshBackhaul == Backhaul.Wireless.uci }
         if (strays.size == 1 && unnamed.size == 1) hooks.adoptPeer(unnamed.single(), strays.single().mac)
     }
+    // The check logs into each node and reads its mesh point's MAC; a record that differs is stale
+    // (mac80211 re-deals interface MACs when interfaces are added) and is brought up to date.
+    val liveMacs = store?.liveMeshMacs?.toMap().orEmpty()
+    LaunchedEffect(liveMacs, nodes) {
+        nodes.forEach { n -> liveMacs[n.identity]?.let { live -> if (live != n.meshMac) hooks.adoptPeer(n, live) } }
+    }
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         FormTopBar("Mesh", onBack) {
             latencyMs?.let { MonoTag("$it ms", size = 10f) }
@@ -265,6 +271,18 @@ private fun RoamingCard(store: MeshStore) {
                     if (!store.applying) scope.launch { store.enableRoaming() }
                 }
             } else if (store.roamingOn) {
+                val stale = store.staleDomains
+                if (stale.isNotEmpty()) {
+                    NoteLine(
+                        "${stale.joinToString(", ") { it.ssid }} ${if (stale.size == 1) "was" else "were"} renamed after hand-off went on, so " +
+                            "${if (stale.size == 1) "its" else "their"} hand-off domain still belongs to the old name. Phones will do a full " +
+                            "reconnect instead of a hand-off until it is rewritten. Wi-Fi drops for about 15 seconds.",
+                        Wrt.Amber,
+                    )
+                    PrimaryButton(if (store.applying) "Repairing…" else "Repair hand-off", Modifier.padding(top = 10.dp), color = Wrt.Amber) {
+                        if (!store.applying) scope.launch { store.repairRoaming() }
+                    }
+                }
                 TwoTapButton("Turn off hand-off", "Tap again to turn it off") { scope.launch { store.disableRoaming() } }
             }
         }
@@ -356,20 +374,28 @@ private fun NodesCard(store: MeshStore, hooks: MeshHooks, onAdd: () -> Unit) {
         if (store.loaded) {
             if (!ready) NoteLine("Turn on hand-off above first, so the nodes join a Wi-Fi that hands clients over cleanly.", Wrt.TextDim)
             PrimaryButton("Add a node", Modifier.padding(top = 12.dp), onClick = onAdd)
-            if (store.anyOutOfDate) {
-                val count = store.nodeSync.values.count { it is com.vivekkaushik.wrtpulse.data.NodeSync.OutOfDate }
-                NoteLine(
-                    "This router's Wi-Fi changed since $count node${if (count == 1) "" else "s"} copied it. " +
-                        "Pushing rewrites their SSIDs from what is here now; each reloads its Wi-Fi for about 15 s.",
-                    Wrt.Amber,
-                )
+            if (nodes.isNotEmpty()) {
+                val stale = store.nodeSync.values.count { it is com.vivekkaushik.wrtpulse.data.NodeSync.OutOfDate }
+                val unread = store.nodeSync.values.count { it is com.vivekkaushik.wrtpulse.data.NodeSync.Unreachable }
+                when {
+                    store.syncing -> NoteLine("Talking to the nodes…", Wrt.TextDim)
+                    stale > 0 -> NoteLine(
+                        "This router's Wi-Fi changed since $stale node${if (stale == 1) "" else "s"} copied it. " +
+                            "Pushing rewrites SSIDs, channels and hand-off from what is here now; each node reloads its Wi-Fi for about 15 s.",
+                        Wrt.Amber,
+                    )
+                    unread > 0 -> NoteLine(
+                        "$unread node${if (unread == 1) " could" else "s could"} not be read just now. A push still tries every node.",
+                        Wrt.TextDim,
+                    )
+                }
+                // Always offered: a node whose read failed is exactly the one that may need it.
                 PrimaryButton(
-                    if (store.syncing) "Pushing…" else "Push Wi-Fi to $count node${if (count == 1) "" else "s"}",
+                    if (store.syncing) "Working…" else "Push Wi-Fi to ${nodes.size} node${if (nodes.size == 1) "" else "s"}",
                     Modifier.padding(top = 10.dp),
-                    color = Wrt.Amber,
-                ) { if (!store.syncing) scope.launch { store.pushNodes(hooks.openNode) } }
-            } else if (store.syncing) {
-                NoteLine("Checking the nodes' Wi-Fi…", Wrt.TextDim)
+                    color = if (stale > 0) Wrt.Amber else Wrt.Accent,
+                ) { if (!store.syncing) scope.launch { store.pushNodes(hooks.openNode, all = true) } }
+                GhostButton("Check again", Modifier.padding(top = 8.dp)) { if (!store.syncing) scope.launch { store.checkNodes(hooks.openNode) } }
             }
             store.syncNotice?.let { NoteLine(it, Wrt.Accent) }
         }

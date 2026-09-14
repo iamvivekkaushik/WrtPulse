@@ -488,6 +488,48 @@ class WifiStore(private val session: RouterSession) : Refreshable {
     }
 
     /**
+     * The radios as they will be once the pending edits apply — what a mesh node has to be
+     * told before this router changes, since the change may take the link with it.
+     */
+    fun effectiveRadios(): List<WifiRadio> = radios.map { r ->
+        r.copy(
+            channel = value(r.section, "channel", r.channel),
+            htmode = value(r.section, "htmode", r.htmode),
+            country = value(r.section, "country", r.country),
+            disabled = value(r.section, "disabled", if (r.disabled) "1" else "0") == "1",
+        )
+    }
+
+    /** The wifi-iface sections as they will be after apply: staged edits laid over, deletions out, drafts in. */
+    fun effectiveNetworks(): List<WifiNetwork> {
+        val kept = networks.filterNot { it.section in deletions }.map { n ->
+            val ssid = value(n.section, "ssid", n.ssid)
+            val ftValue = value(n.section, "ieee80211r", if (n.ieee80211r) "1" else "")
+            n.copy(
+                ssid = ssid,
+                encryption = value(n.section, "encryption", n.encryption),
+                key = value(n.section, "key", n.key),
+                disabled = value(n.section, "disabled", if (n.disabled) "1" else "0") == "1",
+                network = value(n.section, "network", n.network),
+                hidden = value(n.section, "hidden", if (n.hidden) "1" else "0") == "1",
+                isolate = value(n.section, "isolate", if (n.isolate) "1" else "0") == "1",
+                ieee80211r = ftValue == "1",
+                mobilityDomain = value(n.section, "mobility_domain", n.mobilityDomain),
+            )
+        }
+        val drafted = drafts.filter { !it.isClient }.flatMap { d ->
+            d.devices.map { device ->
+                WifiNetwork(
+                    section = d.sections.getValue(device), device = device, ssid = d.ssid, encryption = d.encryption,
+                    key = d.key, disabled = false, mode = d.mode, network = d.network, hidden = d.hidden, isolate = d.isolate,
+                    ieee80211r = d.ft, mobilityDomain = if (d.ft) com.vivekkaushik.wrtpulse.ops.MeshOps.mobilityDomain(d.ssid) else "",
+                )
+            }
+        }
+        return kept + drafted
+    }
+
+    /**
      * Stages 802.11r (and the k/v steering that goes with it) on or off for a saved AP. The
      * mobility domain follows the SSID the way hostapd's own default does, so this AP and a
      * mesh node carrying the same name agree without either knowing about the other.

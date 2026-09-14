@@ -97,6 +97,9 @@ class MeshStore(private val session: RouterSession) : Refreshable {
 
     /** identity → whether the node's copied SSIDs match this router's, from [checkNodes]. */
     val nodeSync = mutableStateMapOf<String, NodeSync>()
+
+    /** identity → the mesh point MAC the node reported when last read; truer than the saved row. */
+    val liveMeshMacs = mutableStateMapOf<String, String>()
     var syncing by mutableStateOf(false); private set
     var syncNotice by mutableStateOf<String?>(null); private set
 
@@ -227,35 +230,56 @@ class MeshStore(private val session: RouterSession) : Refreshable {
 
     fun roamingNotes(): List<String> = MeshOps.roamingNotes(lanAps)
 
+    /**
+     * APs with hand-off on whose mobility domain no longer matches their SSID — an SSID renamed
+     * after 802.11r was switched on. Every AP and node with that name derives the domain from
+     * it, so a stale one is an AP the others cannot hand off to, though it looks configured.
+     */
+    val staleDomains: List<WifiNetwork>
+        get() = lanAps.filter { it.ieee80211r && it.mobilityDomain != MeshOps.mobilityDomain(it.ssid) }
+
+    /** Rewrites hand-off on every LAN SSID from its current name — the fix for [staleDomains]. */
+    suspend fun repairRoaming(): Boolean =
+        run(MeshOps.roamingOps(lanAps), "Hand-off domains now follow the SSIDs. Push the nodes if they are out of date.")
+
     /** The nodes, with whether each answered the last ping and how the mesh sees it. */
+    private fun macOf(e: RouterEntity): String? = liveMeshMacs[e.identity] ?: e.meshMac
+
     fun nodes(): List<MeshNode> = nodeEntities.map { e ->
         val rtt = pings[e.host]
-        val peer = e.meshMac?.let { mac -> peers.firstOrNull { it.mac == mac } }
+        val peer = macOf(e)?.let { mac -> peers.firstOrNull { it.mac == mac } }
         MeshNode(e, online = pings.containsKey(e.host) && rtt != null, rttMs = rtt, signalDbm = peer?.signalDbm)
     }
 
     /** Peers the primary's mesh point holds that no saved node claims — a node added by hand, or one the app forgot. */
-    fun strayPeers(): List<MeshPeer> = peers.filter { p -> nodeEntities.none { it.meshMac == p.mac } }
+    fun strayPeers(): List<MeshPeer> = peers.filter { p -> nodeEntities.none { macOf(it) == p.mac } }
 
     // -----------------------------------------------------------------------
     // The profile
     // -----------------------------------------------------------------------
 
-    fun profileFrom(): MeshProfile {
-        val bandOf = radios.associate { it.section to it.band }
+    fun profileFrom(): MeshProfile = profileWith(radios.toList(), networks.toList())
+
+    /**
+     * The profile this router WOULD offer with the given radios and sections in place of what
+     * it has — the shape it is about to take, so nodes can be told before it changes.
+     */
+    fun profileWith(radiosIn: List<WifiRadio>, networksIn: List<WifiNetwork>): MeshProfile {
+        val bandOf = radiosIn.associate { it.section to it.band }
+        val lanApsIn = networksIn.filter { it.mode == "ap" && it.section != MeshOps.MESH_SECTION && (it.network == "lan" || it.network.isEmpty()) }
         // Every LAN SSID, visible ones first within a band; a node carries them all.
-        val ssids = lanAps
+        val ssids = lanApsIn
             .filter { !it.disabled && it.ssid.isNotEmpty() }
             .sortedBy { it.hidden }
             .mapNotNull { ap ->
                 val band = bandOf[ap.device].orEmpty()
                 if (band.isEmpty()) null else MeshSsid(band, ap.ssid, ap.encryption, ap.key, ap.hidden)
             }
-        val plans = radios.map { r ->
+        val plans = radiosIn.map { r ->
             val channel = r.channel.toIntOrNull()?.toString() ?: operatingChannels[r.section]?.toString() ?: "auto"
             MeshRadioPlan(r.band, channel, r.htmode, r.country)
         }
-        val mesh = meshIface
+        val mesh = networksIn.firstOrNull { it.section == MeshOps.MESH_SECTION }
         val lanNet = lan
         val prefix = lanNet?.cidrPrefix ?: IpMath.prefixOf(lanNet?.netmask.orEmpty()) ?: 24
         return MeshProfile(
@@ -386,10 +410,19 @@ class MeshStore(private val session: RouterSession) : Refreshable {
             return null
         }
         return try {
-            val out = session.exec(Commands.WIRELESS_CONFIG, timeoutMs = 12_000).requireOk("read node wireless").stdout
-            val (radios, networks) = Parsers.wireless(Parsers.uciShow(out))
-            val verdict = if (MeshOps.apsInSync(p, radios, networks)) NodeSync.InSync
-                else NodeSync.OutOfDate(MeshOps.driftSummary(p, radios, networks))
+            val out = session.exec(Commands.WIRELESS_CONFIG + "; echo ${Commands.SECTION} macs; " + Commands.WIFI_MACS, timeoutMs = 12_000)
+                .requireOk("read node wireless").stdout
+            val parts = Parsers.sections("${Commands.SECTION} uci\n" + out)
+            val (radios, networks) = Parsers.wireless(Parsers.uciShow(parts["uci"].orEmpty()))
+            Parsers.iwDevs(parts["macs"].orEmpty()).firstOrNull { it.type.contains("mesh", ignoreCase = true) }
+                ?.mac?.takeIf { it.isNotEmpty() }?.let { liveMeshMacs[node.identity] = it }
+            val meshRadio = networks.firstOrNull { it.section == MeshOps.MESH_SECTION }?.device
+            val radioDrift = MeshOps.radioDrift(p, radios, meshRadio)
+            val verdict = when {
+                radioDrift != null -> NodeSync.OutOfDate(radioDrift)
+                MeshOps.apsInSync(p, radios, networks) -> NodeSync.InSync
+                else -> NodeSync.OutOfDate(MeshOps.driftSummary(p, radios, networks))
+            }
             verdict to (radios to networks)
         } catch (e: SshException) {
             NodeSync.Unreachable(e.message ?: "did not answer") to null
@@ -406,22 +439,33 @@ class MeshStore(private val session: RouterSession) : Refreshable {
      * `wifi reload` each. Only the wireless file changes and no address moves, so no rollback
      * is armed; a wireless node stays reachable over its mesh link whatever its APs do.
      */
-    suspend fun pushNodes(open: suspend (RouterEntity) -> RouterSession?) {
-        val p = profile ?: return
+    suspend fun pushNodes(
+        open: suspend (RouterEntity) -> RouterSession?,
+        /** What to write; the current profile unless the caller knows what this router is about to become. */
+        profileToPush: MeshProfile? = profile,
+        /** Every node, not only those last seen out of date — before a change that will cut the link. */
+        all: Boolean = false,
+    ) {
+        val p = profileToPush ?: return
         if (syncing) return
         syncing = true
         syncNotice = null
         var pushed = 0
         var failed = 0
         try {
-            nodeEntities.filter { nodeSync[it.identity] is NodeSync.OutOfDate }.forEach { node ->
+            nodeEntities.filter { all || nodeSync[it.identity] is NodeSync.OutOfDate }.forEach { node ->
                 val session = open(node)
                 if (session == null) { failed++; return@forEach }
                 try {
                     val out = session.exec(Commands.WIRELESS_CONFIG, timeoutMs = 12_000).requireOk("read node wireless").stdout
                     val (radios, networks) = Parsers.wireless(Parsers.uciShow(out))
-                    val ops = MeshOps.nodeApOps(p, radios, networks)
-                    session.exec(Commands.uciBatch(ops, listOf("wireless"), "wifi reload"), timeoutMs = 60_000)
+                    val meshRadio = networks.firstOrNull { it.section == MeshOps.MESH_SECTION }?.device
+                    val ops = MeshOps.nodeRadioOps(p, radios, meshRadio) + MeshOps.nodeApOps(p, radios, networks)
+                    // The watchdog first, so a node whose reload moves it off this channel can
+                    // still find its way back; then the batch. A reload that takes the link is
+                    // expected and treated below as delivered.
+                    if (meshRadio != null) runCatching { session.exec(Commands.MESH_WATCH_INSTALL, timeoutMs = 20_000) }
+                    session.exec(Commands.uciBatch(ops, listOf("wireless"), "(sleep 1; wifi reload) >/dev/null 2>&1 & echo scheduled"), timeoutMs = 30_000)
                         .requireOk("uci batch")
                     nodeSync[node.identity] = NodeSync.InSync
                     pushed++

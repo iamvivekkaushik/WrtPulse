@@ -187,6 +187,11 @@ private fun WrtPulseApp() {
     // The mesh page reads the router like the wireless screen does, plus a ping per node. Read
     // when the page opens; its profile is sealed into the saved row after every read.
     val meshStore = remember(session) { session?.let { com.vivekkaushik.wrtpulse.data.MeshStore(it) } }
+    // The mesh store needs to know its nodes wherever a Wi-Fi apply happens, not only on its page.
+    LaunchedEffect(meshStore, savedRouters) {
+        val me = savedRouters?.firstOrNull { it.identity == WrtRuntime.session?.target?.identity }
+        meshStore?.nodeEntities = savedRouters.orEmpty().filter { it.meshPrimary == me?.identity }
+    }
     LaunchedEffect(backupStore) {
         backupStore?.refreshLocal()
         // "Snapshot before every Apply" (design screen 38). The preference outlives the
@@ -822,8 +827,9 @@ private fun WrtPulseApp() {
                     routerName = currentRouter,
                     clientCount = inventory?.clients?.size?.takeIf { it > 0 },
                     meshNote = nodeCount.takeIf { it > 0 }?.let {
-                        "$it mesh node${if (it == 1) "" else "s"} carr${if (it == 1) "ies" else "y"} this router's SSIDs. " +
-                            "After applying, push the change to ${if (it == 1) "it" else "them"} from Network · Mesh."
+                        "$it mesh node${if (it == 1) "" else "s"} carr${if (it == 1) "ies" else "y"} this router's Wi-Fi. " +
+                            "${if (it == 1) "It gets" else "They get"} these changes first, then this router applies them, " +
+                            "so a channel change keeps the mesh link."
                     },
                     onApply = {
                         if (wifiStore != null) {
@@ -831,6 +837,20 @@ private fun WrtPulseApp() {
                             val touched = if (wifiStore.networkOps().isEmpty()) "wireless"
                                 else "wireless, network, firewall"
                             scope.launch {
+                                // A primary's nodes get the change FIRST, shaped from what this
+                                // router is about to become. A channel change on the mesh radio
+                                // takes the backhaul with it the moment it applies here, and a
+                                // node not told beforehand is stranded on the old channel; told
+                                // first, it moves, waits a few seconds, and the link re-forms.
+                                val mesh = meshStore
+                                val nodes = savedRouters.orEmpty().filter { it.meshPrimary == savedEntity?.identity }
+                                if (mesh != null && nodes.isNotEmpty()) {
+                                    mesh.nodeEntities = nodes
+                                    if (!mesh.loaded) runCatching { mesh.load() }
+                                    val future = mesh.profileWith(wifiStore.effectiveRadios(), wifiStore.effectiveNetworks())
+                                    mesh.pushNodes({ sideSession(it) }, profileToPush = future, all = true)
+                                    mesh.syncNotice?.let { termLines.add(TermLine(AnnotatedString("mesh: $it"), false)) }
+                                }
                                 if (wifiStore.apply()) {
                                     showDiff = false
                                     termLines.add(TermLine(AnnotatedString("uci: committed $touched · wifi reloading…"), false))
