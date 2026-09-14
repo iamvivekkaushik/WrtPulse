@@ -428,11 +428,12 @@ class ScanCommandTest {
         val cmd = com.vivekkaushik.wrtpulse.ops.Commands.scanViaTempInterface("phy0")
         org.junit.Assert.assertTrue(cmd.contains("iw phy phy0 interface add wrtpulse-scan type managed"))
         org.junit.Assert.assertTrue(cmd.contains("ip link set wrtpulse-scan up"))
-        org.junit.Assert.assertTrue(cmd.contains("iwinfo wrtpulse-scan scan"))
-        // Deleted before creating (stale leftovers) and after scanning, so nothing persists.
-        org.junit.Assert.assertEquals(2, Regex("iw dev wrtpulse-scan del").findAll(cmd).count())
+        org.junit.Assert.assertTrue(cmd.contains("wrt_scan wrtpulse-scan"))
+        // Deleted before creating (stale leftovers), when it cannot come up, and after
+        // scanning, so nothing persists whichever way it went.
+        org.junit.Assert.assertEquals(3, Regex("iw dev wrtpulse-scan del").findAll(cmd).count())
         // Output is captured first so the teardown cannot swallow the results.
-        org.junit.Assert.assertTrue(cmd.indexOf("R=") < cmd.lastIndexOf("iw dev wrtpulse-scan del"))
+        org.junit.Assert.assertTrue(cmd.indexOf("R=\$(wrt_scan") < cmd.lastIndexOf("iw dev wrtpulse-scan del"))
         org.junit.Assert.assertTrue(cmd.trimEnd().endsWith("echo \"\$R\""))
         org.junit.Assert.assertTrue(!cmd.contains("uci"))   // nothing persistent is written
     }
@@ -524,11 +525,42 @@ class SurveyHonestyTest {
         org.junit.Assert.assertTrue(cmd.contains("setsid sh -c '"))
         org.junit.Assert.assertTrue(cmd.contains("wifi down radio0; "))
         org.junit.Assert.assertTrue(cmd.contains("iw phy phy0 interface add wrtpulse-scan type managed"))
-        org.junit.Assert.assertTrue(cmd.contains("iwinfo wrtpulse-scan scan > /tmp/wrtpulse-survey-radio0.part"))
+        org.junit.Assert.assertTrue(cmd.contains("wrt_scan wrtpulse-scan > /tmp/wrtpulse-survey-radio0.part"))
+        // The scan function rides inside the detached job, so it is defined inside the quotes.
+        org.junit.Assert.assertTrue(cmd.contains("setsid sh -c 'wrt_scan() {"))
         org.junit.Assert.assertTrue(cmd.indexOf("wifi up radio0") > cmd.indexOf("wifi down radio0"))
         // The file only appears, with its marker, once the radio is back up.
         org.junit.Assert.assertTrue(cmd.contains("wifi up radio0; echo \"___wrt___ done\" >> /tmp/wrtpulse-survey-radio0.part; mv"))
         org.junit.Assert.assertEquals("cat /tmp/wrtpulse-survey-radio0 2>/dev/null", com.vivekkaushik.wrtpulse.ops.Commands.readSurvey("radio0"))
+    }
+
+    /**
+     * iwinfo gives up waiting for the scan-complete event after ~5 s, and an ath10k scan with
+     * the AP up takes 5–7 s: on the reference router's 5 GHz radio it failed 3 times in 4 with
+     * "No event received" while the kernel held the finished results. `iw` waits properly.
+     */
+    @org.junit.Test
+    fun `a scan triggers with iw, falls back to the kernel's cache, and only then to iwinfo`() {
+        val cmd = com.vivekkaushik.wrtpulse.ops.Commands.scan("phy0-ap0")
+        val trigger = cmd.indexOf("iw dev \"\$1\" scan 2>&1")
+        val dump = cmd.indexOf("iw dev \"\$1\" scan dump")
+        val legacy = cmd.indexOf("iwinfo \"\$1\" scan")
+        org.junit.Assert.assertTrue(trigger in 0 until dump && dump < legacy)
+        org.junit.Assert.assertTrue(cmd.contains("for i in 1 2 3; do R=\$(iwinfo \"\$1\" scan 2>&1) && break; sleep 2; done"))
+        org.junit.Assert.assertTrue(cmd.trimEnd().endsWith("wrt_scan phy0-ap0"))
+        // The radio-off survey wraps it in sh -c '…', so it must not contain a single quote.
+        org.junit.Assert.assertFalse(com.vivekkaushik.wrtpulse.ops.Commands.SCAN_FN.contains("'"))
+    }
+
+    /** ath10k refuses a station beside a live AP; the interface must not be left behind. */
+    @org.junit.Test
+    fun `a temporary scan interface that cannot come up is removed and reported`() {
+        val cmd = com.vivekkaushik.wrtpulse.ops.Commands.scanViaTempInterface("phy0")
+        org.junit.Assert.assertTrue(
+            cmd.contains("ip link set wrtpulse-scan up >/dev/null 2>&1 || { iw dev wrtpulse-scan del >/dev/null 2>&1; echo 'ERR up'; exit 1; }")
+        )
+        org.junit.Assert.assertTrue(cmd.contains("R=\$(wrt_scan wrtpulse-scan); iw dev wrtpulse-scan del"))
+        org.junit.Assert.assertTrue(cmd.indexOf("wrt_scan() {") < cmd.indexOf("iw phy phy0 interface add"))
     }
 }
 
@@ -594,6 +626,145 @@ class ScanParserTest {
         org.junit.Assert.assertEquals(-14, cells[0].signalDbm)
         org.junit.Assert.assertEquals(40, cells[1].widthMhz)
         org.junit.Assert.assertEquals(8, cells[1].centerChannel)   // HT40+, two channels up
+    }
+
+    /** `iw dev phy0-ap0 scan dump` as the Deco M4R printed it — a named 80 MHz cell and a hidden one. */
+    @org.junit.Test
+    fun `iw scan blocks parse, hidden networks included`() {
+        val cells = com.vivekkaushik.wrtpulse.ops.Parsers.scanCells(
+            """
+            BSS b4:f9:49:97:c2:58(on phy0-ap0)
+            	last seen: 3680.454s [boottime]
+            	freq: 5260.0
+            	capability: ESS (0x0111)
+            	signal: -51.00 dBm
+            	SSID: jogi1
+            	BSS Load:
+            		 * station count: 0
+            		 * channel utilisation: 0/255
+            	HT operation:
+            		 * primary channel: 52
+            		 * secondary channel offset: above
+            		 * STA channel width: any
+            	VHT operation:
+            		 * channel width: 1 (80 MHz)
+            		 * center freq segment 1: 58
+            		 * center freq segment 2: 0
+            	WPA:	 * Version: 1
+            		 * Pairwise ciphers: TKIP CCMP
+            		 * Authentication suites: PSK
+            	RSN:	 * Version: 1
+            		 * Authentication suites: PSK
+            BSS ae:37:28:c8:c2:bd(on phy0-ap0)
+            	freq: 5805.0
+            	capability: ESS (0x1911)
+            	signal: -70.00 dBm
+            	RSN:	 * Version: 1
+            		 * Authentication suites: PSK
+            	HT operation:
+            		 * primary channel: 161
+            		 * secondary channel offset: below
+            	VHT operation:
+            		 * channel width: 1 (80 MHz)
+            		 * center freq segment 1: 155
+            """.trimIndent()
+        )
+        org.junit.Assert.assertEquals(2, cells.size)
+        val jogi = cells[0]
+        org.junit.Assert.assertEquals("B4:F9:49:97:C2:58", jogi.bssid)
+        org.junit.Assert.assertEquals("jogi1", jogi.ssid)
+        org.junit.Assert.assertEquals(52, jogi.channel)
+        org.junit.Assert.assertEquals(-51, jogi.signalDbm)
+        org.junit.Assert.assertEquals("WPA2", jogi.encryption)     // RSN outranks the WPA1 block
+        org.junit.Assert.assertEquals(80, jogi.widthMhz)
+        org.junit.Assert.assertEquals(58, jogi.centerChannel)
+        val hidden = cells[1]
+        org.junit.Assert.assertFalse(hidden.named)                  // no SSID line at all
+        org.junit.Assert.assertEquals(161, hidden.channel)
+        org.junit.Assert.assertEquals(155, hidden.centerChannel)
+        org.junit.Assert.assertEquals(80, hidden.widthMhz)
+    }
+
+    /** 2.4 GHz: HT40- centres two channels down, a plain HT20 cell stays put, no HT block → the frequency decides. */
+    @org.junit.Test
+    fun `iw scan widths on 2 point 4 GHz and the frequency fallback`() {
+        val cells = com.vivekkaushik.wrtpulse.ops.Parsers.scanCells(
+            """
+            BSS b4:f9:49:97:c2:5e(on phy1-ap0)
+            	freq: 2462.0
+            	signal: -43.00 dBm
+            	SSID: www.excitel.com
+            	HT operation:
+            		 * primary channel: 11
+            		 * secondary channel offset: below
+            		 * STA channel width: any
+            	RSN:	 * Version: 1
+            		 * Authentication suites: PSK
+            BSS ae:37:28:c8:c2:b9(on phy1-ap0)
+            	freq: 2462.0
+            	signal: -58.00 dBm
+            	HT operation:
+            		 * primary channel: 11
+            		 * secondary channel offset: no secondary
+            		 * STA channel width: 20 MHz
+            BSS 00:11:22:33:44:55(on phy1-ap0)
+            	freq: 2437
+            	capability: ESS Privacy ShortSlotTime (0x0411)
+            	signal: -80.00 dBm
+            	SSID: legacy-b
+            """.trimIndent()
+        )
+        org.junit.Assert.assertEquals(3, cells.size)
+        org.junit.Assert.assertEquals(40, cells[0].widthMhz)
+        org.junit.Assert.assertEquals(9, cells[0].centerChannel)
+        org.junit.Assert.assertEquals(20, cells[1].widthMhz)
+        org.junit.Assert.assertEquals(11, cells[1].centerChannel)
+        org.junit.Assert.assertEquals(6, cells[2].channel)           // 2437 MHz, no HT operation
+        org.junit.Assert.assertEquals("WEP", cells[2].encryption)    // Privacy, no RSN or WPA
+    }
+
+    @org.junit.Test
+    fun `iw scan security and duplicate readings`() {
+        val cells = com.vivekkaushik.wrtpulse.ops.Parsers.scanCells(
+            """
+            BSS aa:bb:cc:dd:ee:01(on phy0-ap0)
+            	freq: 5180.0
+            	capability: ESS Privacy (0x0011)
+            	signal: -60.00 dBm
+            	SSID: wpa3-home
+            	RSN:	 * Version: 1
+            		 * Authentication suites: PSK SAE
+            BSS aa:bb:cc:dd:ee:01(on phy0-ap0)
+            	freq: 5180.0
+            	capability: ESS Privacy (0x0011)
+            	signal: -50.00 dBm
+            	SSID: wpa3-home
+            	RSN:	 * Version: 1
+            		 * Authentication suites: PSK SAE
+            BSS aa:bb:cc:dd:ee:02(on phy0-ap0)
+            	freq: 5180.0
+            	capability: ESS (0x0001)
+            	signal: -65.00 dBm
+            	SSID: cafe
+            """.trimIndent()
+        )
+        org.junit.Assert.assertEquals(2, cells.size)                 // same BSSID twice → one cell
+        org.junit.Assert.assertEquals(-50, cells[0].signalDbm)       // …the stronger reading
+        org.junit.Assert.assertEquals("WPA3", cells[0].encryption)
+        org.junit.Assert.assertEquals(36, cells[0].channel)
+        org.junit.Assert.assertEquals("OPEN", cells[1].encryption)
+    }
+
+    @org.junit.Test
+    fun `frequencies map to channel numbers`() {
+        val p = com.vivekkaushik.wrtpulse.ops.Parsers
+        org.junit.Assert.assertEquals(1, p.channelForMhz(2412))
+        org.junit.Assert.assertEquals(13, p.channelForMhz(2472))
+        org.junit.Assert.assertEquals(14, p.channelForMhz(2484))
+        org.junit.Assert.assertEquals(36, p.channelForMhz(5180))
+        org.junit.Assert.assertEquals(161, p.channelForMhz(5805))
+        org.junit.Assert.assertEquals(1, p.channelForMhz(5955))     // 6 GHz
+        org.junit.Assert.assertNull(p.channelForMhz(1000))
     }
 }
 

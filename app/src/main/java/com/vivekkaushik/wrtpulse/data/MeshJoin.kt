@@ -139,6 +139,7 @@ class MeshJoin(
             overlayFreeKb = parts["df"].orEmpty().trim().split(Regex("\\s+")).getOrNull(3)?.toLongOrNull(),
             radioMacs = macs,
             hostname = board?.hostname.orEmpty(),
+            hostapdUnknown = Parsers.hostapdUnknownItems(parts["hostapd"].orEmpty()),
         )
         wan = Parsers.wanLinks(parts["dump"].orEmpty()).firstOrNull { it.name == "wan" }
     }

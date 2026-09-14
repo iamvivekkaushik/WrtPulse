@@ -190,6 +190,8 @@ data class MeshNodeState(
     /** radio section → MAC of its first netdev, for the primary's peer list. */
     val radioMacs: Map<String, String> = emptyMap(),
     val hostname: String = "",
+    /** [Commands.HOSTAPD_PROBE]'s answer on this node; null when it gave none. */
+    val hostapdUnknown: Set<String>? = null,
 ) {
     val lan: LanNet? get() = Parsers.lanNet(networkUci)
     val swconfig: Boolean get() = swDevs.isNotEmpty()
@@ -220,6 +222,15 @@ data class NodePlan(
  * the same LAN. Everything here is unit-tested against captured configs; nothing here
  * touches a router.
  */
+/** What one socket on a router's case carries right now, for the add-a-node drawings. */
+enum class SocketRole { Wan, Lan, Held, Free }
+
+/**
+ * One socket on the case: [id] as the app names ports (`sw:5`, `lan3`), [label] as the case
+ * does (`lan2`, `WAN`, `port 5`), and what it carries.
+ */
+data class CaseSocket(val id: String, val label: String, val role: SocketRole)
+
 object MeshOps {
 
     /** The section the primary's and every node's mesh point is written to. */
@@ -380,6 +391,77 @@ object MeshOps {
         return member
     }
 
+    /**
+     * The sockets on the primary's case, in case order, with what each carries — what the
+     * add-a-node drawings show instead of a stock five-socket router. The Deco M4R has two
+     * holes on a chip that reports seven ports; drawn as one WAN and four LANs it pointed the
+     * user at a socket that does not exist.
+     *
+     * swconfig: the board file's port list when there is one (the only place chip numbers
+     * meet the labels on the case), else the ports the VLAN config mentions. A port untagged
+     * in the LAN VLAN is LAN; one in the VLAN whose netdev a wan interface uses is WAN; the
+     * one [held] apart for the setup is Held. DSA: the wan interface's netdev first, then the
+     * LAN bridge's members and the held one in case order. Empty when the config says nothing
+     * usable, and the drawing falls back to the stock router.
+     */
+    fun caseSockets(
+        networkUci: Map<String, String>,
+        swDevs: List<SwitchDev>,
+        boardPorts: Map<String, List<BoardPort>>,
+        held: String? = heldSetupPort(networkUci),
+    ): List<CaseSocket> {
+        val wanDevices = wanDevices(networkUci)
+        if (swDevs.isNotEmpty()) {
+            val vlans = Parsers.switchVlans(networkUci)
+            val base = Parsers.lanSwitchMember(networkUci)?.substringBefore('.') ?: "eth0"
+            val lanVid = Parsers.lanSwitchVlan(networkUci)
+            fun untagged(v: SwitchVlan) = Parsers.swPorts(v.ports).filterNot { it.tagged }.map { it.port }
+            val wanPorts = vlans.filter { "$base.${it.vlan}" in wanDevices }.flatMap(::untagged).toSet()
+            val lanPorts = vlans.filter { it.vlan == lanVid }.flatMap(::untagged).toSet()
+            return swDevs.flatMap { dev ->
+                val board = boardPorts[dev.name].orEmpty()
+                val own = vlans.filter { it.device == dev.name }.ifEmpty { vlans }
+                Parsers.switchSockets(dev, own, board).map { n ->
+                    val id = if (dev === swDevs.first()) "sw:$n" else "sw:${dev.name}:$n"
+                    val onCase = board.firstOrNull { it.num == n }?.let { p -> p.role?.let { r -> r + (p.index?.toString() ?: "") } }
+                    val role = when {
+                        held == id -> SocketRole.Held
+                        n in wanPorts -> SocketRole.Wan
+                        n in lanPorts -> SocketRole.Lan
+                        else -> SocketRole.Free
+                    }
+                    CaseSocket(id, if (role == SocketRole.Wan) "WAN" else onCase ?: "port $n", role)
+                }
+            }
+        }
+        val lanDevice = networkUci["network.lan.device"].orEmpty()
+        val lanPorts = Parsers.netDevices(networkUci).firstOrNull { it.name == lanDevice }?.ports.orEmpty()
+            .filter { '.' !in it && !it.startsWith("br-") }
+        val heldPort = held?.takeIf { !it.startsWith("sw:") }
+        val wan = wanDevices.map { it.substringBefore('.') }
+            .filter { it.isNotEmpty() && !it.startsWith("br-") && !it.startsWith("phy") && !it.startsWith("wlan") && it !in lanPorts }
+            .distinct()
+        val rest = (lanPorts + listOfNotNull(heldPort)).distinct().sortedWith(compareBy({ it.filter { c -> !c.isDigit() } }, { it.filter { c -> c.isDigit() }.toIntOrNull() ?: 0 }))
+        val ports = (wan + rest).distinct()
+        if (ports.isEmpty()) return emptyList()
+        return ports.map { p ->
+            val role = when {
+                p == heldPort -> SocketRole.Held
+                p in wan -> SocketRole.Wan
+                p in lanPorts -> SocketRole.Lan
+                else -> SocketRole.Free
+            }
+            CaseSocket(p, if (role == SocketRole.Wan) "WAN" else p, role)
+        }
+    }
+
+    /** The netdevs the wan-side interfaces sit on — `eth0.2`, `wan`, `wan.835` — by interface name. */
+    private fun wanDevices(uci: Map<String, String>): Set<String> = uci.entries
+        .filter { (k, v) -> v == "interface" && k.count { it == '.' } == 1 && k.substringAfter('.').startsWith("wan") }
+        .flatMap { (k, _) -> listOfNotNull(uci["$k.device"], uci["$k.ifname"]) }
+        .filter { it.isNotEmpty() }
+        .toSet()
+
     /** LAN sockets with nothing plugged in — the ones the setup can hold apart before a cable arrives. */
     fun freeLanSockets(devs: List<NetDev>, sw: List<SwitchDev>, networkUci: Map<String, String>): List<String> {
         val lanDevice = networkUci["network.lan.device"].orEmpty()
@@ -443,25 +525,48 @@ object MeshOps {
     fun roamingCapable(encryption: String): Boolean = encryption in setOf("psk2", "sae", "sae-mixed")
 
     /**
-     * The options that make one AP part of the roaming set. 802.11k/v go on regardless; 802.11r
-     * only where the key exchange supports it. Open networks and WPA1-mixed get the note.
+     * What each roaming option becomes in hostapd's config — the items [Commands.HOSTAPD_PROBE]
+     * asks about. An option whose item hostapd does not know is never written: one unknown item
+     * fails the whole radio's config and takes every SSID on it off the air. wpad-basic has no
+     * `bss_transition`; the full wpad builds do.
      */
-    fun roamingOptions(ssid: String, encryption: String): List<Pair<String, String>> = buildList {
-        if (roamingCapable(encryption)) {
+    val HOSTAPD_ITEMS: Map<String, List<String>> = mapOf(
+        "bss_transition" to listOf("bss_transition"),
+        "ieee80211k" to listOf("rrm_neighbor_report", "rrm_beacon_report"),
+        "ieee80211r" to listOf("mobility_domain", "ft_over_ds", "ft_psk_generate_local"),
+    )
+
+    /**
+     * The roaming options to leave out, given the probe's answer. No answer at all leaves out
+     * only 802.11v: it is the one option a common build lacks, and writing it blind is what
+     * silenced the reference router.
+     */
+    fun unsupportedRoaming(unknownItems: Set<String>?): Set<String> {
+        if (unknownItems == null) return setOf("bss_transition")
+        return HOSTAPD_ITEMS.filterValues { items -> items.any { it in unknownItems } }.keys
+    }
+
+    /**
+     * The options that make one AP part of the roaming set. 802.11k/v go on regardless; 802.11r
+     * only where the key exchange supports it. Open networks and WPA1-mixed get the note. Any
+     * option in [skip] — see [unsupportedRoaming] — is left out, its companions with it.
+     */
+    fun roamingOptions(ssid: String, encryption: String, skip: Set<String> = emptySet()): List<Pair<String, String>> = buildList {
+        if (roamingCapable(encryption) && "ieee80211r" !in skip) {
             add("ieee80211r" to "1")
             add("mobility_domain" to mobilityDomain(ssid))
             add("ft_over_ds" to "0")
             add("ft_psk_generate_local" to "1")
         }
-        add("ieee80211k" to "1")
-        add("bss_transition" to "1")
+        if ("ieee80211k" !in skip) add("ieee80211k" to "1")
+        if ("bss_transition" !in skip) add("bss_transition" to "1")
     }
 
     /** The uci lines that turn roaming on across the primary's own LAN APs. */
-    fun roamingOps(lanAps: List<WifiNetwork>): List<String> = lanAps
+    fun roamingOps(lanAps: List<WifiNetwork>, skip: Set<String> = emptySet()): List<String> = lanAps
         .filter { it.mode == "ap" && it.section != MESH_SECTION }
         .flatMap { ap ->
-            roamingOptions(ap.ssid, ap.encryption).map { (option, value) ->
+            roamingOptions(ap.ssid, ap.encryption, skip).map { (option, value) ->
                 "set wireless.${ap.section}.$option='$value'"
             }
         }
@@ -474,8 +579,8 @@ object MeshOps {
                 .map { "delete wireless.${ap.section}.$it" }
         }
 
-    /** The SSIDs whose hand-off would be skipped, for the review card. */
-    fun roamingNotes(lanAps: List<WifiNetwork>): List<String> = lanAps
+    /** The SSIDs whose hand-off would be skipped, and the options this hostapd cannot take, for the review card. */
+    fun roamingNotes(lanAps: List<WifiNetwork>, skip: Set<String> = emptySet()): List<String> = lanAps
         .filter { it.mode == "ap" && it.section != MESH_SECTION && !roamingCapable(it.encryption) }
         .map { ap ->
             if (ap.encryption == "none" || ap.encryption.isEmpty()) {
@@ -483,6 +588,13 @@ object MeshOps {
             } else {
                 "${ap.ssid} uses ${Parsers.encryptionLabel(ap.encryption)}: hand-off is skipped, since WPA1 clients cannot do it."
             }
+        } + buildList {
+            if ("bss_transition" in skip) add(
+                "802.11v steering is left out: this hostapd build does not know bss_transition, and one option it " +
+                    "does not know takes every SSID on the radio off the air. wpad-mbedtls or wpad-openssl would add it."
+            )
+            if ("ieee80211k" in skip) add("802.11k neighbour reports are left out: this hostapd build does not support them.")
+            if ("ieee80211r" in skip) add("802.11r fast transition is left out: this hostapd build does not support it.")
         }
 
     /** An 802.11s point on [radio], bridged into the LAN like an AP would be. */
@@ -622,8 +734,9 @@ object MeshOps {
         node.networks.filter { it.section == MESH_SECTION }.forEach { ops += "delete wireless.${it.section}" }
         val meshRadio = if (backhaul == Backhaul.Wireless) meshRadioOf(profile, node) else null
         ops += nodeRadioOps(profile, node.radios, meshRadio)
-        ops += nodeApOps(profile, node.radios, existing = emptyList())
-        ops += nodeExtraOps(profile, node.radios, meshRadio, meshIfname = null, node.networkUci, node.swDevs, existingNetworks = emptyList())
+        val skip = unsupportedRoaming(node.hostapdUnknown)
+        ops += nodeApOps(profile, node.radios, existing = emptyList(), skip = skip)
+        ops += nodeExtraOps(profile, node.radios, meshRadio, meshIfname = null, node.networkUci, node.swDevs, existingNetworks = emptyList(), skip = skip)
         if (meshRadio != null && profile.meshId != null && profile.meshKey != null) {
             ops += meshIfaceOps(MESH_SECTION, meshRadio, profile.meshId, profile.meshKey)
         }
@@ -683,7 +796,7 @@ object MeshOps {
      * The same lines serve the join and a later sync, so a node cannot drift from what the
      * primary would have written today.
      */
-    fun nodeApOps(profile: MeshProfile, radios: List<WifiRadio>, existing: List<WifiNetwork>): List<String> {
+    fun nodeApOps(profile: MeshProfile, radios: List<WifiRadio>, existing: List<WifiNetwork>, skip: Set<String> = emptySet()): List<String> {
         val ops = mutableListOf<String>()
         existing.filter { it.section.startsWith(AP_PREFIX) }.forEach { ops += "delete wireless.${it.section}" }
         radios.forEach { radio ->
@@ -699,7 +812,7 @@ object MeshOps {
                     ops += "set wireless.$section.key='${Commands.escapeValue(ssid.key)}'"
                 }
                 if (ssid.hidden) ops += "set wireless.$section.hidden='1'"
-                roamingOptions(ssid.ssid, ssid.encryption).forEach { (option, value) ->
+                roamingOptions(ssid.ssid, ssid.encryption, skip).forEach { (option, value) ->
                     ops += "set wireless.$section.$option='$value'"
                 }
             }
@@ -735,6 +848,7 @@ object MeshOps {
         networkUci: Map<String, String>,
         swDevs: List<SwitchDev>,
         existingNetworks: List<WifiNetwork>,
+        skip: Set<String> = emptySet(),
     ): List<String> {
         val ops = mutableListOf<String>()
         existingNetworks.filter { it.section.startsWith(EXTRA_PREFIX) }.forEach { ops += "delete wireless.${it.section}" }
@@ -797,7 +911,7 @@ object MeshOps {
                     if (ssid.encryption != "none" && ssid.key.isNotEmpty()) ops += "set wireless.$ap.key='${Commands.escapeValue(ssid.key)}'"
                     if (ssid.hidden) ops += "set wireless.$ap.hidden='1'"
                     if (x.isolate) ops += "set wireless.$ap.isolate='1'"
-                    roamingOptions(ssid.ssid, ssid.encryption).forEach { (option, value) -> ops += "set wireless.$ap.$option='$value'" }
+                    roamingOptions(ssid.ssid, ssid.encryption, skip).forEach { (option, value) -> ops += "set wireless.$ap.$option='$value'" }
                 }
             }
         }
@@ -960,7 +1074,7 @@ object MeshOps {
             add("Wireless nodes share ${profile.primaryName}'s ${profile.meshBand ?: "5 GHz"} channel ${profile.radioFor(profile.meshBand ?: "5G")?.channel ?: ""}; the 2.4 GHz SSID stays reachable even if the link never comes up.")
             if (swap != null) add("${swap.install} replaces ${swap.remove} first, while this router still has internet through its WAN socket. Wi-Fi here drops for about a minute.")
         }
-        addAll(roamingNotes(profile.ssids.map { WifiNetwork(section = "", device = "", ssid = it.ssid, encryption = it.encryption, key = it.key, disabled = false, network = "lan") }))
+        addAll(roamingNotes(profile.ssids.map { WifiNetwork(section = "", device = "", ssid = it.ssid, encryption = it.encryption, key = it.key, disabled = false, network = "lan") }, unsupportedRoaming(node.hostapdUnknown)))
         add("A backup of this router is saved to this phone first; Leave mesh puts it back.")
     }
 

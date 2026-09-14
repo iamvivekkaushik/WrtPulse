@@ -530,8 +530,11 @@ class NodeSyncTest {
         assertFalse(ops.any { it.startsWith("set wireless.wrtpulse_ap_radio0_2") })
         // Deletions come first, so a section is never set and then dropped.
         assertTrue(ops.indexOfLast { it.startsWith("delete ") } < ops.indexOfFirst { it.startsWith("set ") })
-        // The same lines the join writes, so the two can never disagree.
-        assertTrue(MeshOps.nodeOps(profile(), node(), "n", Backhaul.Wired, "192.168.0.2").containsAll(MeshOps.nodeApOps(profile(), radios, emptyList())))
+        // The same lines the join writes, so the two can never disagree — both leave out what
+        // the node's hostapd cannot take (no probe answer here, so 802.11v).
+        val skip = MeshOps.unsupportedRoaming(node().hostapdUnknown)
+        assertTrue(MeshOps.nodeOps(profile(), node(), "n", Backhaul.Wired, "192.168.0.2").containsAll(MeshOps.nodeApOps(profile(), radios, emptyList(), skip)))
+        assertFalse(MeshOps.nodeOps(profile(), node(), "n", Backhaul.Wired, "192.168.0.2").any { it.contains("bss_transition") })
     }
 
     @Test
@@ -696,5 +699,229 @@ class ExtraNetsTest {
         }
         assertFalse(MeshOps.apsInSync(withExtras, radios, lanOnly))
         assertTrue(MeshOps.driftSummary(withExtras, radios, lanOnly).contains("Casa-Guest"))
+    }
+}
+
+/** The probe asks hostapd itself; grepping the binary was not a test (the full build carries the literal anyway). */
+class HostapdProbeTest {
+
+    @Test
+    fun `the probe ends with a marker so hostapd exits while still parsing`() {
+        val probe = Commands.HOSTAPD_PROBE
+        assertTrue(probe.contains("hostapd /tmp/wrtpulse-hostapd-probe.conf"))
+        assertTrue(probe.indexOf("bss_transition=1") < probe.indexOf("wrtpulse_probe_end=1"))
+        assertTrue(probe.trimEnd().endsWith("rm -f /tmp/wrtpulse-hostapd-probe.conf"))
+        // Both the primary's and the would-be node's state reads carry it.
+        assertTrue(Commands.meshState(emptyList()).contains("echo ___wrt___ hostapd; "))
+        assertTrue(Commands.MESH_NODE_STATE.contains("echo ___wrt___ hostapd; "))
+    }
+
+    @Test
+    fun `the answer is the set of unknown items, or no answer at all`() {
+        assertEquals(emptySet<String>(), Parsers.hostapdUnknownItems("wrtpulse_probe_end\n"))
+        assertEquals(setOf("bss_transition"), Parsers.hostapdUnknownItems("bss_transition\nwrtpulse_probe_end\n"))
+        assertNull(Parsers.hostapdUnknownItems(""))                      // no hostapd: nothing was parsed
+        assertNull(Parsers.hostapdUnknownItems("sh: hostapd: not found"))
+    }
+
+    @Test
+    fun `unknown items map back to the uci options that produce them`() {
+        assertEquals(setOf("bss_transition"), MeshOps.unsupportedRoaming(setOf("bss_transition")))
+        assertEquals(setOf("ieee80211k"), MeshOps.unsupportedRoaming(setOf("rrm_beacon_report")))
+        assertEquals(setOf("ieee80211r"), MeshOps.unsupportedRoaming(setOf("ft_over_ds")))
+        assertEquals(emptySet<String>(), MeshOps.unsupportedRoaming(emptySet()))
+        // No answer: leave out the one option a common build lacks rather than write it blind.
+        assertEquals(setOf("bss_transition"), MeshOps.unsupportedRoaming(null))
+    }
+
+    @Test
+    fun `a skipped option is left out of every ap and explained`() {
+        val aps = listOf(WifiNetwork("home", "radio1", "Casa", "psk2", "hunter22", disabled = false, network = "lan"))
+        val ops = MeshOps.roamingOps(aps, skip = setOf("bss_transition"))
+        assertTrue(ops.contains("set wireless.home.ieee80211r='1'"))
+        assertTrue(ops.contains("set wireless.home.ieee80211k='1'"))
+        assertFalse(ops.any { it.contains("bss_transition") })
+        assertTrue(MeshOps.roamingNotes(aps, setOf("bss_transition")).any { it.contains("802.11v") })
+        // Losing 802.11r takes its companions with it.
+        val noFt = MeshOps.roamingOps(aps, skip = setOf("ieee80211r"))
+        assertFalse(noFt.any { it.contains("mobility_domain") || it.contains("ft_") })
+        // A node with no probe answer gets the same caution as the primary.
+        val node = MeshNodeState(emptyMap(), emptyMap(), emptyList(), emptyList(), emptyList(), emptyMap(), false, "wpad-basic-mbedtls", "apk", null)
+        assertEquals(setOf("bss_transition"), MeshOps.unsupportedRoaming(node.hostapdUnknown))
+    }
+}
+
+/** hostapd rejecting one option silences every SSID on the radio, phone included; the router must undo that alone. */
+class WifiApplyRollbackTest {
+
+    @Test
+    fun `a wireless apply is armed to restore itself unless confirmed`() {
+        val cmd = Commands.wifiApply(listOf("set wireless.default_radio0.ieee80211k='1'"))
+        assertTrue(cmd.startsWith("mkdir -p /tmp/wrtpulse-wifi && cp /etc/config/wireless /tmp/wrtpulse-wifi/wireless && "))
+        assertTrue(
+            cmd.contains(
+                "(sleep 90; [ -f /tmp/wrtpulse-wifi/confirm ] && exit 0; cp /tmp/wrtpulse-wifi/wireless /etc/config/wireless; " +
+                    "wifi reload; echo rolled-back > /tmp/wrtpulse-wifi/last) >/dev/null 2>&1 &"
+            )
+        )
+        assertTrue(cmd.indexOf(">/dev/null 2>&1 &") < cmd.indexOf("uci batch <<'WRTPULSE_EOF'"))   // armed before applying
+        assertTrue(cmd.trimEnd().endsWith("uci commit wireless && wifi reload; echo applied"))
+        assertEquals("touch /tmp/wrtpulse-wifi/confirm && echo confirmed", Commands.WIFI_CONFIRM)
+        // Rolling back by hand disarms the timer first, so the radios are not reloaded twice.
+        assertTrue(Commands.WIFI_ROLLBACK_NOW.startsWith("touch /tmp/wrtpulse-wifi/confirm; cp /tmp/wrtpulse-wifi/wireless /etc/config/wireless && wifi reload"))
+        assertTrue(Commands.meshState(emptyList()).contains("echo ___wrt___ wifilast; cat /tmp/wrtpulse-wifi/last"))
+    }
+
+    /** As the reference router looked with hostapd refusing bss_transition: the netdev exists, no channel. */
+    @Test
+    fun `an ap hostapd refused exists but has no channel`() {
+        val health = Parsers.apHealth(
+            """
+            Interface phy1-ap0
+            	type AP
+            Interface phy0-ap0
+            	type AP
+            	channel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz
+            Interface phy0-mesh0
+            	type mesh point
+            	channel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz
+            """.trimIndent()
+        )
+        assertEquals(mapOf("phy1-ap0" to false, "phy0-ap0" to true), health)
+    }
+}
+
+/**
+ * The add-a-node drawings show the router's own sockets. The reference Deco M4R has two holes
+ * on a chip that reports seven ports; drawn as one WAN and four LANs it pointed at a socket
+ * that does not exist.
+ */
+class CaseSocketsTest {
+
+    private val decoSwitch = SwitchDev("switch0", 7, 0, "QCA8337", emptyMap(), emptyMap())
+    private val decoBoard = mapOf("switch0" to listOf(BoardPort(0, null, null, "eth0"), BoardPort(3, "lan", 1, null), BoardPort(5, "lan", 2, null)))
+
+    /** As the router's config read mid-setup: WAN carved onto port 3, port 5 held for the node. */
+    private val decoMidSetup = Parsers.uciShow(
+        """
+        network.lan=interface
+        network.lan.device='br-lan'
+        network.@device[0]=device
+        network.@device[0].name='br-lan'
+        network.@device[0].type='bridge'
+        network.@device[0].ports='eth0.1'
+        network.@switch_vlan[0]=switch_vlan
+        network.@switch_vlan[0].device='switch0'
+        network.@switch_vlan[0].vlan='1'
+        network.@switch_vlan[0].ports='0t'
+        network.swvlan2=switch_vlan
+        network.swvlan2.device='switch0'
+        network.swvlan2.vlan='2'
+        network.swvlan2.ports='0t 3'
+        network.wan=interface
+        network.wan.device='eth0.2'
+        network.wan.proto='dhcp'
+        network.wrtpulse_setup_vlan=switch_vlan
+        network.wrtpulse_setup_vlan.device='switch0'
+        network.wrtpulse_setup_vlan.vlan='3'
+        network.wrtpulse_setup_vlan.ports='0t 5'
+        network.wrtpulse_setup_dev=device
+        network.wrtpulse_setup_dev.name='br-setup'
+        network.wrtpulse_setup_dev.type='bridge'
+        network.wrtpulse_setup_dev.ports='eth0.3'
+        """.trimIndent()
+    )
+
+    @Test
+    fun `a two-socket deco is drawn with two sockets, wan and held`() {
+        val sockets = MeshOps.caseSockets(decoMidSetup, listOf(decoSwitch), decoBoard)
+        assertEquals(
+            listOf(CaseSocket("sw:3", "WAN", SocketRole.Wan), CaseSocket("sw:5", "lan2", SocketRole.Held)),
+            sockets,
+        )
+        // The setup's own reading of the held port wins over the config's.
+        assertEquals(SocketRole.Held, MeshOps.caseSockets(decoMidSetup, listOf(decoSwitch), decoBoard, held = "sw:5")[1].role)
+    }
+
+    @Test
+    fun `before anything is held both deco sockets are plain lan with their case labels`() {
+        val idle = Parsers.uciShow(
+            """
+            network.lan=interface
+            network.lan.device='br-lan'
+            network.@device[0]=device
+            network.@device[0].name='br-lan'
+            network.@device[0].type='bridge'
+            network.@device[0].ports='eth0.1'
+            network.@switch_vlan[0]=switch_vlan
+            network.@switch_vlan[0].device='switch0'
+            network.@switch_vlan[0].vlan='1'
+            network.@switch_vlan[0].ports='0t 3 5'
+            """.trimIndent()
+        )
+        assertEquals(
+            listOf(CaseSocket("sw:3", "lan1", SocketRole.Lan), CaseSocket("sw:5", "lan2", SocketRole.Lan)),
+            MeshOps.caseSockets(idle, listOf(decoSwitch), decoBoard, held = null),
+        )
+    }
+
+    /** No board file: the ports the VLAN config mentions, numbered as the chip does. */
+    @Test
+    fun `a switch without a board file shows the ports its vlans use`() {
+        val uci = Parsers.uciShow(
+            """
+            network.lan=interface
+            network.lan.device='br-lan'
+            network.@device[0]=device
+            network.@device[0].name='br-lan'
+            network.@device[0].type='bridge'
+            network.@device[0].ports='eth0.1'
+            network.@switch_vlan[0]=switch_vlan
+            network.@switch_vlan[0].device='switch0'
+            network.@switch_vlan[0].vlan='1'
+            network.@switch_vlan[0].ports='0t 1 2 3 4'
+            network.@switch_vlan[1]=switch_vlan
+            network.@switch_vlan[1].device='switch0'
+            network.@switch_vlan[1].vlan='2'
+            network.@switch_vlan[1].ports='0t 5'
+            network.wan=interface
+            network.wan.device='eth0.2'
+            """.trimIndent()
+        )
+        val sockets = MeshOps.caseSockets(uci, listOf(SwitchDev("switch0", 6, 0, "rtl8367", emptyMap(), emptyMap())), emptyMap(), held = "sw:3")
+        assertEquals(listOf("port 1", "port 2", "port 3", "port 4", "WAN"), sockets.map { it.label })
+        assertEquals(listOf(SocketRole.Lan, SocketRole.Lan, SocketRole.Held, SocketRole.Lan, SocketRole.Wan), sockets.map { it.role })
+    }
+
+    /** DSA: netdevs are the sockets; the held one left the bridge but still sits in its place on the case. */
+    @Test
+    fun `a dsa board lists wan first then the lan sockets in case order`() {
+        val uci = Parsers.uciShow(
+            """
+            network.lan=interface
+            network.lan.device='br-lan'
+            network.@device[0]=device
+            network.@device[0].name='br-lan'
+            network.@device[0].type='bridge'
+            network.@device[0].ports='lan1' 'lan2' 'lan4'
+            network.wan=interface
+            network.wan.device='wan'
+            network.wrtpulse_setup_dev=device
+            network.wrtpulse_setup_dev.name='br-setup'
+            network.wrtpulse_setup_dev.type='bridge'
+            network.wrtpulse_setup_dev.ports='lan3'
+            """.trimIndent()
+        )
+        val sockets = MeshOps.caseSockets(uci, emptyList(), emptyMap())
+        assertEquals(listOf("WAN", "lan1", "lan2", "lan3", "lan4"), sockets.map { it.label })
+        assertEquals(SocketRole.Wan, sockets[0].role)
+        assertEquals(SocketRole.Held, sockets[3].role)
+        assertEquals("lan3", sockets[3].id)
+    }
+
+    @Test
+    fun `a config that says nothing about sockets leaves the drawing to the stock router`() {
+        assertTrue(MeshOps.caseSockets(emptyMap(), emptyList(), emptyMap()).isEmpty())
+        assertTrue(Commands.meshState(emptyList()).contains("echo ___wrt___ boardsw; jsonfilter -i /etc/board.json -e '@.switch'"))
     }
 }

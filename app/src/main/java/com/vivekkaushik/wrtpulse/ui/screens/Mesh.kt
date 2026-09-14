@@ -619,6 +619,7 @@ private fun RoamingCard(store: MeshStore) {
             if (!store.roamingOn && !store.roamingImpossible) {
                 OpsFold(store.roamingOps())
                 NoteLine("Wi-Fi drops for about 15 seconds while hostapd restarts. A few very old smart-home devices refuse an SSID with 802.11r; turn it off again here if one goes missing.", Wrt.TextDim)
+                NoteLine("If the SSIDs are not back within 36 seconds, the previous wireless settings are put back automatically — by the router itself if this phone has lost it.", Wrt.TextDim)
                 PrimaryButton(if (store.applying) "Turning on…" else "Turn on hand-off", Modifier.padding(top = 12.dp)) {
                     if (!store.applying) scope.launch { store.enableRoaming() }
                 }

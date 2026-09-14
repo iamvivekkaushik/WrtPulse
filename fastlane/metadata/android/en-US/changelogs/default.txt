@@ -1,3 +1,11 @@
 • Mesh. Network · Mesh turns on seamless hand-off (802.11r/k/v) across your SSIDs and makes your other OpenWrt routers nodes of this one, over a cable or an 802.11s wireless link. A node keeps your Wi-Fi and leaves DHCP, DNS and the firewall to the primary; a backup is saved first, the node rolls itself back if the app cannot reach it again, and Leave mesh restores it.
 
 • Two routers on the same address can both be saved. Pull down to refresh. Backup-screen crash fixes.
+
+• Channel survey no longer fails on 5 GHz. The scan now waits for the driver to finish instead of giving up after 5 s, reads the kernel’s cached results if another scan is running, and lists hidden networks correctly.
+
+• Hand-off asks hostapd which roaming options it supports before writing them, so a build without 802.11v (wpad-basic) gets 802.11r/k and keeps its SSIDs instead of losing them all. Turning hand-off on is now rollback-armed: if the SSIDs are not back within 36 s the previous wireless settings are restored, by the router itself if the phone has lost it.
+
+• Foldables: the inner screen no longer shows the top bar and tab bar cut short of the edges, sheets size themselves to the window so their buttons stay on the glass, and the add-a-node drawings stay phone-sized instead of filling the wide screen.
+
+• Add a node draws this router’s own sockets, read from its board file and switch VLANs, instead of a stock one-WAN-four-LAN router — a two-socket Deco is drawn with two sockets, the held one lit.

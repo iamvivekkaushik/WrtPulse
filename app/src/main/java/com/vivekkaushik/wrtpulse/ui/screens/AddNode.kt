@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -74,7 +75,9 @@ import com.vivekkaushik.wrtpulse.data.MeshJoin
 import com.vivekkaushik.wrtpulse.data.NodeSetup
 import com.vivekkaushik.wrtpulse.db.RouterEntity
 import com.vivekkaushik.wrtpulse.ops.Backhaul
+import com.vivekkaushik.wrtpulse.ops.CaseSocket
 import com.vivekkaushik.wrtpulse.ops.MeshOps
+import com.vivekkaushik.wrtpulse.ops.SocketRole
 import com.vivekkaushik.wrtpulse.ui.FilterChip
 import com.vivekkaushik.wrtpulse.ui.GhostButton
 import com.vivekkaushik.wrtpulse.ui.MonoTag
@@ -196,6 +199,8 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit, onDone: () -> Unit) {
     val candidates = hooks.saved.filter { primary != null && it.identity != primary.identity && !it.isMeshNode }
     val model = setup?.board?.model?.ifBlank { null }
     val socket = setup?.portLabel ?: "?"
+    // The primary's real sockets, the held one marked from the setup's own reading.
+    val sockets = store?.caseSockets(setup?.port).orEmpty()
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
@@ -246,14 +251,14 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit, onDone: () -> Unit) {
                 ) {
                     when (s) {
                         AddStep.Cable1 -> {
-                            HeroWell { BigRouter(primaryName, isPrimary = true, socketLabel = socket, reduced = reduced) }
+                            HeroWell { BigRouter(primaryName, isPrimary = true, sockets = sockets, socketLabel = socket, reduced = reduced) }
                             Headline(
                                 "Plug a cable into socket $socket of $primaryName",
                                 "It is held apart for the new router. Any Ethernet cable will do.",
                             )
                         }
                         AddStep.Cable2 -> {
-                            HeroWell { BigRouter("new router", isPrimary = false, socketLabel = socket, reduced = reduced) }
+                            HeroWell { BigRouter("new router", isPrimary = false, sockets = emptyList(), socketLabel = socket, reduced = reduced) }
                             Headline(
                                 "Plug the other end into any LAN socket of the new router",
                                 "Not its WAN socket — usually the odd-coloured one.",
@@ -264,7 +269,7 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit, onDone: () -> Unit) {
                             HeroWell {
                                 RouterPair(
                                     if (found) PairPhase.Found else PairPhase.Finding,
-                                    primaryName, model ?: "new router", socket, reduced,
+                                    primaryName, model ?: "new router", sockets, socket, reduced,
                                 )
                             }
                             when {
@@ -282,7 +287,7 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit, onDone: () -> Unit) {
                             HeroWell {
                                 RouterPair(
                                     if (signing || wiping) PairPhase.Signing else if (refused) PairPhase.Failed else PairPhase.Found,
-                                    primaryName, model ?: "new router", socket, reduced,
+                                    primaryName, model ?: "new router", sockets, socket, reduced,
                                 )
                             }
                             if (setup.failsafe) {
@@ -473,8 +478,18 @@ private data class FooterAction(val label: String, val enabled: Boolean, val col
 private fun HeroWell(height: androidx.compose.ui.unit.Dp? = null, content: @Composable () -> Unit) {
     Box(
         Modifier.fillMaxWidth().then(if (height != null) Modifier.height(height) else Modifier).clip(RoundedCornerShape(14.dp)).background(Wrt.BgDeep),
-    ) { content() }
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        // The drawings fill their width at a fixed aspect ratio, drawn for a phone. On a
+        // foldable's inner screen that width is 630 dp and the router grew 430 dp tall,
+        // pushing the headline off the first screen; the well still spans the page, the
+        // drawing inside it stops at the phone's width and sits centred.
+        Box(Modifier.widthIn(max = HeroDrawingMaxWidth).fillMaxWidth()) { content() }
+    }
 }
+
+/** A phone's content width: what every hero drawing was drawn for. */
+private val HeroDrawingMaxWidth = 340.dp
 
 @Composable
 private fun Headline(title: String, sub: String) {
@@ -617,9 +632,24 @@ private fun Tick(reduced: Boolean) {
 // Illustrations
 // ---------------------------------------------------------------------------
 
-/** Which of the four LAN sockets a label like `lan2` or `port 3` names, for the drawings. */
+/** Which of the four LAN sockets a label like `lan2` or `port 3` names, on the stock drawing. */
 internal fun heldSocketIndex(label: String): Int =
     Regex("(\\d+)").find(label)?.value?.toIntOrNull()?.coerceIn(1, 4) ?: 2
+
+/** The router nobody has read yet: one WAN and four LANs, as the design drew it. */
+internal fun stockSockets(): List<CaseSocket> =
+    listOf(CaseSocket("wan", "WAN", SocketRole.Wan)) + (1..4).map { CaseSocket("lan$it", "lan$it", SocketRole.Lan) }
+
+/**
+ * The socket the plug goes into. On a real socket list it is the held one; on the stock
+ * drawing the number in the label picks it, as it always did. Never off the end.
+ */
+internal fun targetIndex(sockets: List<CaseSocket>, socketLabel: String, isPrimary: Boolean): Int {
+    val held = sockets.indexOfFirst { it.role == SocketRole.Held }
+    if (held >= 0) return held
+    if (!isPrimary) return sockets.indexOfFirst { it.role == SocketRole.Lan }.coerceAtLeast(0)
+    return heldSocketIndex(socketLabel).coerceIn(0, (sockets.size - 1).coerceAtLeast(0))
+}
 
 /**
  * One router, side-on and zoomed in on its socket row, so WAN vs LAN is unmistakable. On the
@@ -627,19 +657,24 @@ internal fun heldSocketIndex(label: String): Int =
  * WAN socket carries a red cross. A plug seats itself into the target socket on a loop.
  */
 @Composable
-private fun BigRouter(name: String, isPrimary: Boolean, socketLabel: String, reduced: Boolean) {
+private fun BigRouter(name: String, isPrimary: Boolean, sockets: List<CaseSocket>, socketLabel: String, reduced: Boolean) {
     val measurer = rememberTextMeasurer()
+    // The primary is drawn as it is; a router nobody has read yet is drawn as the stock one.
+    val socks = if (isPrimary) sockets.ifEmpty { stockSockets() } else stockSockets()
     val loop = rememberInfiniteTransition(label = "bigRouter")
     val t by loop.animateFloat(0f, 1f, infiniteRepeatable(tween(2600, easing = LinearEasing), RepeatMode.Restart), label = "plug")
     val breathe by loop.animateFloat(0f, 1f, infiniteRepeatable(tween(1600, easing = LinearEasing), RepeatMode.Restart), label = "breathe")
-    val target = if (isPrimary) heldSocketIndex(socketLabel) else 1
+    val target = targetIndex(socks, socketLabel, isPrimary)
     val labelStyle = mono(10f, 500, Wrt.TextDim)
     Canvas(Modifier.fillMaxWidth().aspectRatio(320f / 220f)) {
         val u = size.width / 320f
         val stroke = 1.5.dp.toPx()
         val bx = 20f; val by = 36f; val bw = 280f; val bh = 100f
-        val sy = 84f; val sw = 36f; val sh = 28f; val gap = 12f
-        val sx0 = bx + (bw - (5 * sw + 4 * gap)) / 2f
+        val n = socks.size
+        // Two sockets sit at the stock size; a switch with eight shrinks them to fit the case.
+        val gap = 12f; val sh = 28f; val sy = 84f
+        val sw = minOf(36f, (bw - 40f - gap * (n - 1)) / n)
+        val sx0 = bx + (bw - (n * sw + (n - 1) * gap)) / 2f
         fun sx(i: Int) = sx0 + i * (sw + gap)
         val tx = sx(target) + sw / 2f
         // body
@@ -648,29 +683,34 @@ private fun BigRouter(name: String, isPrimary: Boolean, socketLabel: String, red
         text(measurer, name, (bx + 2f) * u, (by + bh + 18f) * u, mono(11f, 500, Wrt.TextSecondary), centered = false)
         // sockets
         val breathing = 0.5f + 0.5f * (0.5f - 0.5f * cos(2.0 * PI * breathe).toFloat())
-        for (i in 0 until 5) {
+        socks.forEachIndexed { i, s ->
             val x = sx(i)
-            val wan = i == 0
+            val wan = s.role == SocketRole.Wan
             val tgt = i == target
+            val free = s.role == SocketRole.Free
             val col = if (wan) Wrt.Blue else if (tgt) Wrt.Accent else if (isPrimary) Wrt.TextSecondary else Wrt.Accent
             val op = when {
                 wan -> if (isPrimary) 0.6f else 0.9f
                 tgt -> if (reduced) 1f else breathing
+                free -> 0.25f
                 isPrimary -> 0.4f
                 else -> 0.55f
             }
             val c = col.copy(alpha = op)
+            // The notch and the contact line are drawn at the socket's own width.
+            val nx = x + sw / 3f; val nw = sw / 3f
+            val lx0 = x + sw * 0.22f; val lx1 = x + sw * 0.78f
             drawRoundRect(c, Offset(x * u, sy * u), Size(sw * u, sh * u), CornerRadius(4f * u), style = Stroke(stroke))
-            drawRect(Wrt.BgDeep, Offset((x + 12f) * u, sy * u), Size(12f * u, 5f * u))
-            drawRect(c, Offset((x + 12f) * u, sy * u), Size(12f * u, 5f * u), style = Stroke(1.3.dp.toPx()))
-            drawLine(c.copy(alpha = op * 0.6f), Offset((x + 8f) * u, (sy + 20f) * u), Offset((x + 28f) * u, (sy + 20f) * u), 1.dp.toPx())
+            drawRect(Wrt.BgDeep, Offset(nx * u, sy * u), Size(nw * u, 5f * u))
+            drawRect(c, Offset(nx * u, sy * u), Size(nw * u, 5f * u), style = Stroke(1.3.dp.toPx()))
+            drawLine(c.copy(alpha = op * 0.6f), Offset(lx0 * u, (sy + 20f) * u), Offset(lx1 * u, (sy + 20f) * u), 1.dp.toPx())
             if (!tgt) {
-                val label = if (wan) "WAN" else if (isPrimary) "lan$i" else "LAN"
+                val label = if (wan) "WAN" else if (isPrimary) s.label else "LAN"
                 text(measurer, label, (x + sw / 2f) * u, (sy + sh + 14f) * u, labelStyle.copy(color = if (wan) Wrt.Blue else Wrt.TextDim))
             }
             if (wan && !isPrimary) {
-                drawLine(Wrt.Red, Offset((x + 8f) * u, (sy + 6f) * u), Offset((x + 28f) * u, (sy + 22f) * u), stroke, StrokeCap.Round)
-                drawLine(Wrt.Red, Offset((x + 28f) * u, (sy + 6f) * u), Offset((x + 8f) * u, (sy + 22f) * u), stroke, StrokeCap.Round)
+                drawLine(Wrt.Red, Offset(lx0 * u, (sy + 6f) * u), Offset(lx1 * u, (sy + 22f) * u), stroke, StrokeCap.Round)
+                drawLine(Wrt.Red, Offset(lx1 * u, (sy + 6f) * u), Offset(lx0 * u, (sy + 22f) * u), stroke, StrokeCap.Round)
             }
         }
         // callout over the target socket
@@ -712,7 +752,7 @@ private enum class PairPhase { Finding, Found, Signing, Failed }
 
 /** Two routers joined by a cable: a pulse runs along it while the primary looks, a tick lands when it finds. */
 @Composable
-private fun RouterPair(phase: PairPhase, primaryName: String, nodeName: String, socketLabel: String, reduced: Boolean) {
+private fun RouterPair(phase: PairPhase, primaryName: String, nodeName: String, sockets: List<CaseSocket>, socketLabel: String, reduced: Boolean) {
     val measurer = rememberTextMeasurer()
     val loop = rememberInfiniteTransition(label = "pair")
     val pulse by loop.animateFloat(0f, 1f, infiniteRepeatable(tween(600, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "cablePulse")
@@ -722,7 +762,8 @@ private fun RouterPair(phase: PairPhase, primaryName: String, nodeName: String, 
         else if (reduced) found.snapTo(1f)
         else if (found.value < 1f) found.animateTo(1f, tween(700, easing = FastOutSlowInEasing))
     }
-    val held = heldSocketIndex(socketLabel)
+    val primarySocks = sockets.ifEmpty { stockSockets() }
+    val held = targetIndex(primarySocks, socketLabel, isPrimary = true)
     val labelStyle = mono(10f, 500, Wrt.TextSecondary)
     Canvas(Modifier.fillMaxWidth().aspectRatio(332f / 150f)) {
         val u = size.width / 332f
@@ -733,18 +774,39 @@ private fun RouterPair(phase: PairPhase, primaryName: String, nodeName: String, 
             drawRect(Wrt.BgDeep, Offset((x + 5f) * u, 46f * u), Size(6f * u, 3f * u))
             drawRect(c, Offset((x + 5f) * u, 46f * u), Size(6f * u, 3f * u), style = Stroke(1.2.dp.toPx()))
         }
-        fun router(x: Float, name: String, heldIndex: Int?, pip: Color) {
+        /** Draws a router's socket row and answers with the x of each socket's centre. */
+        fun router(x: Float, name: String, socks: List<CaseSocket>, heldIndex: Int?, pip: Color): List<Float> {
             drawRoundRect(Wrt.TextSecondary, Offset(x * u, 22f * u), Size(120f * u, 42f * u), CornerRadius(6f * u), style = Stroke(stroke))
             drawCircle(pip, 2.5f * u, Offset((x + 110f) * u, 31f * u))
-            socket(x + 12f, Wrt.Blue, 0.6f)
-            for (i in 1..4) socket(x + 12f + 20f * i, if (heldIndex == i) Wrt.Accent else Wrt.TextSecondary, if (heldIndex == i) 1f else 0.45f)
+            // Sockets sit 20 apart as drawn; a wider chip packs them tighter to stay on the case.
+            val pitch = minOf(20f, (96f - 16f) / (socks.size - 1).coerceAtLeast(1))
             text(measurer, name, (x + 60f) * u, 143f * u, labelStyle)
+            val centres = ArrayList<Float>(socks.size)
+            for (i in socks.indices) {
+                val role = socks[i].role
+                val sx = x + 12f + pitch * i
+                val col = when {
+                    heldIndex == i -> Wrt.Accent
+                    role == SocketRole.Wan -> Wrt.Blue
+                    else -> Wrt.TextSecondary
+                }
+                val op = when {
+                    heldIndex == i -> 1f
+                    role == SocketRole.Wan -> 0.6f
+                    role == SocketRole.Free -> 0.25f
+                    else -> 0.45f
+                }
+                socket(sx, col, op)
+                centres += sx + 8f
+            }
+            return centres
         }
         val isFound = phase != PairPhase.Finding
-        router(14f, primaryName, held, Wrt.Green)
-        router(198f, if (isFound) nodeName else "new router", 1, if (!isFound) Wrt.DotOff else if (phase == PairPhase.Failed) Wrt.Red else Wrt.Green)
+        val nodeSocks = stockSockets()
+        val primaryXs = router(14f, primaryName, primarySocks, held, Wrt.Green)
+        val nodeXs = router(198f, if (isFound) nodeName else "new router", nodeSocks, 1, if (!isFound) Wrt.DotOff else if (phase == PairPhase.Failed) Wrt.Red else Wrt.Green)
         // cable: from the primary's held socket to the new router's first LAN socket
-        val a = 14f + 12f + 20f * held + 8f; val b = 238f
+        val a = primaryXs.getOrElse(held) { primaryXs.last() }; val b = nodeXs[1]
         val cable = Path().apply { moveTo(a * u, 66f * u); cubicTo(a * u, 120f * u, b * u, 120f * u, b * u, 66f * u) }
         val cableCol = when (phase) { PairPhase.Failed -> Wrt.Red; PairPhase.Signing -> Wrt.Accent; else -> Wrt.TextSecondary }
         drawPath(cable, cableCol, style = Stroke(stroke))

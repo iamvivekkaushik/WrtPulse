@@ -151,8 +151,27 @@ object Commands {
         "for r in \$(uci -q show wireless | sed -n 's/^wireless\\.\\([^.=]*\\)=wifi-device\$/\\1/p'); do " +
         "echo \"\$r \$(iwinfo nl80211 phyname \$r 2>/dev/null)\"; done"
 
+    /**
+     * `wrt_scan <iface>` — the survey every scan path runs. Prints the neighbour list in `iw`
+     * format (BSS blocks), or iwinfo's Cell format from the last resort; [Parsers.scanCells]
+     * reads both.
+     *
+     * Why not plain `iwinfo <iface> scan`: libiwinfo gives up waiting for the scan-complete
+     * event after ~5 s, and an ath10k scan with the AP up takes 5–7 s, so on the reference
+     * router's 5 GHz radio it failed three times in four with "Netlink error while awaiting
+     * scan results: No event received" — while `iw dev <iface> scan dump` held the finished
+     * results every single time. `iw dev <iface> scan` waits for the event properly (4/4,
+     * 5–6 s) and ships with every OpenWrt wireless image. When the trigger is refused
+     * (`Resource busy (-16)`: a scan is already running) the kernel's cached list is read
+     * after a moment; only if that is empty too does iwinfo get three tries. No single quotes
+     * in here: [surveyWithRadioDown] wraps it in `sh -c '…'`.
+     */
+    const val SCAN_FN = "wrt_scan() { R=\$(iw dev \"\$1\" scan 2>&1); case \"\$R\" in *BSS*) echo \"\$R\"; return 0;; esac; " +
+        "sleep 3; R=\$(iw dev \"\$1\" scan dump 2>/dev/null); case \"\$R\" in *BSS*) echo \"\$R\"; return 0;; esac; " +
+        "for i in 1 2 3; do R=\$(iwinfo \"\$1\" scan 2>&1) && break; sleep 2; done; echo \"\$R\"; }"
+
     /** Neighbour survey for the channel chart, through an interface already on the radio. */
-    fun scan(radioIface: String) = "iwinfo $radioIface scan"
+    fun scan(radioIface: String) = "$SCAN_FN; wrt_scan $radioIface"
 
     /** Where a detached survey leaves its result — one per radio so two never collide. */
     fun surveyFile(radio: String) = "/tmp/wrtpulse-survey-$radio"
@@ -170,11 +189,11 @@ object Commands {
     fun surveyWithRadioDown(radio: String, phy: String): String {
         val temp = "wrtpulse-scan"
         val out = surveyFile(radio)
-        val job = "wifi down $radio; sleep 2; " +
+        val job = "$SCAN_FN; wifi down $radio; sleep 2; " +
             "iw dev $temp del >/dev/null 2>&1; " +
             "iw phy $phy interface add $temp type managed >/dev/null 2>&1; " +
             "ip link set $temp up >/dev/null 2>&1; " +
-            "iwinfo $temp scan > $out.part 2>&1; " +
+            "wrt_scan $temp > $out.part 2>&1; " +
             "iw dev $temp del >/dev/null 2>&1; " +
             "wifi up $radio; " +
             "echo \"$SECTION done\" >> $out.part; mv $out.part $out"
@@ -194,11 +213,14 @@ object Commands {
      */
     fun scanViaTempInterface(phy: String): String {
         val temp = "wrtpulse-scan"
-        return "iw dev $temp del >/dev/null 2>&1; " +
+        return "$SCAN_FN; iw dev $temp del >/dev/null 2>&1; " +
             "iw phy $phy interface add $temp type managed >/dev/null 2>&1 || " +
             "{ echo 'ERR add'; exit 1; }; " +
-            "ip link set $temp up >/dev/null 2>&1; " +
-            "R=\$(iwinfo $temp scan 2>&1); " +
+            // ath10k refuses to bring a station up beside a running AP (SIOCSIFFLAGS): say so
+            // rather than scan through an interface that is down, and never leave it behind.
+            "ip link set $temp up >/dev/null 2>&1 || " +
+            "{ iw dev $temp del >/dev/null 2>&1; echo 'ERR up'; exit 1; }; " +
+            "R=\$(wrt_scan $temp); " +
             "iw dev $temp del >/dev/null 2>&1; " +
             "echo \"\$R\""
     }
@@ -1252,6 +1274,74 @@ object Commands {
     const val WPAD_NAME =
         "(opkg list-installed 2>/dev/null || apk list -I 2>/dev/null) | grep -oE '^wpad(-[a-z]+)*' | head -n1"
 
+    /** The hostapd config items the roaming options turn into — what [HOSTAPD_PROBE] asks about. */
+    val HOSTAPD_PROBE_ITEMS: List<String> = listOf(
+        "bss_transition=1", "rrm_neighbor_report=1", "rrm_beacon_report=1",
+        "mobility_domain=a1b2", "ft_over_ds=0", "ft_psk_generate_local=1",
+    )
+
+    /** A config item no hostapd knows, so the probe file is always rejected while being parsed. */
+    const val HOSTAPD_PROBE_MARKER = "wrtpulse_probe_end"
+    private const val HOSTAPD_PROBE_FILE = "/tmp/wrtpulse-hostapd-probe.conf"
+
+    /**
+     * Asks hostapd itself which roaming options it accepts, and prints the ones it does not.
+     *
+     * hostapd rejects a whole radio's config over one unknown item: `bss_transition=1` on
+     * wpad-basic logged "unknown configuration item" and `add_iface failed` on both phys of
+     * the reference router, and every SSID went dark. Grepping the binary for the item name is
+     * not a test — the full build carries the literal for its ubus method whether or not the
+     * config parser knows it. So the probe hands hostapd a file of the candidate items plus
+     * [HOSTAPD_PROBE_MARKER], which nothing knows: hostapd lists every unknown item and exits
+     * while still parsing, before it touches a driver or the running daemon. An answer without
+     * the marker means hostapd never parsed the file, and [Parsers.hostapdUnknownItems] says so.
+     */
+    val HOSTAPD_PROBE: String =
+        "printf '%s\\n' interface=wrtpulse-probe0 ssid=wrtpulse-probe ${HOSTAPD_PROBE_ITEMS.joinToString(" ")} " +
+        "$HOSTAPD_PROBE_MARKER=1 > $HOSTAPD_PROBE_FILE; " +
+        "hostapd $HOSTAPD_PROBE_FILE 2>&1 | grep -oE \"unknown configuration item '[A-Za-z0-9_]+'\" | awk -F\"'\" '{print \$2}'; " +
+        "rm -f $HOSTAPD_PROBE_FILE"
+
+    const val WIFI_ROLLBACK_DIR = "/tmp/wrtpulse-wifi"
+
+    /**
+     * Arms a rollback, then applies a wireless batch. When hostapd rejects the new config the
+     * phone running the app is usually one of the clients that just lost its network, so the
+     * router keeps the pre-change file and puts it back on its own unless the app confirms
+     * within [seconds]. The app confirms ([WIFI_CONFIRM]) only after [AP_HEALTH] shows every
+     * AP beaconing again, and restores at once ([WIFI_ROLLBACK_NOW]) when it shows they are
+     * not. Detached so it outlives the link, like [wanApply].
+     */
+    fun wifiApply(operations: List<String>, seconds: Int = 90): String = buildString {
+        append("mkdir -p $WIFI_ROLLBACK_DIR && cp /etc/config/wireless $WIFI_ROLLBACK_DIR/wireless && ")
+        append("rm -f $WIFI_ROLLBACK_DIR/confirm $WIFI_ROLLBACK_DIR/last && ")
+        append("(sleep $seconds; [ -f $WIFI_ROLLBACK_DIR/confirm ] && exit 0; ")
+        append("cp $WIFI_ROLLBACK_DIR/wireless /etc/config/wireless; wifi reload; ")
+        append("echo rolled-back > $WIFI_ROLLBACK_DIR/last) >/dev/null 2>&1 &\n")
+        append("uci batch <<'WRTPULSE_EOF'\n")
+        operations.forEach { append(it).append('\n') }
+        append("WRTPULSE_EOF\n")
+        append("uci commit wireless && wifi reload; echo applied")
+    }
+
+    /** Disarms the wireless rollback — sent once every AP is seen beaconing again. */
+    const val WIFI_CONFIRM = "touch $WIFI_ROLLBACK_DIR/confirm && echo confirmed"
+
+    /** Puts the pre-change wireless config back now; disarms the timer first so it does not reload twice. */
+    const val WIFI_ROLLBACK_NOW =
+        "touch $WIFI_ROLLBACK_DIR/confirm; cp $WIFI_ROLLBACK_DIR/wireless /etc/config/wireless && wifi reload && " +
+        "echo rolled-back > $WIFI_ROLLBACK_DIR/last; echo rolled-back"
+
+    /** Whether the router rolled a wireless change back by itself while the app was away; read once. */
+    const val WIFI_LAST = "cat $WIFI_ROLLBACK_DIR/last 2>/dev/null; rm -f $WIFI_ROLLBACK_DIR/last"
+
+    /** Every wireless netdev with its type and, only when it is actually on the air, its channel. */
+    const val AP_HEALTH = "iw dev 2>/dev/null | grep -E 'Interface|type|channel'"
+
+    /** The config items hostapd refused recently — why an AP did not come back. */
+    const val HOSTAPD_REJECTIONS =
+        "logread -l 300 2>/dev/null | grep -oE \"unknown configuration item '[A-Za-z0-9_]+'\" | awk -F\"'\" '{print \$2}' | sort -u"
+
     /** Every mesh point that is up, as `# <ifname>` followed by its `iw station dump`. */
     const val MESH_PEERS =
         "for i in \$(iw dev 2>/dev/null | awk '/Interface/{print \$2}'); do " +
@@ -1287,6 +1377,8 @@ object Commands {
         "echo $SECTION iwinfo" to IWINFO,
         "echo $SECTION capable" to MESH_CAPABLE,
         "echo $SECTION wpad" to WPAD_NAME,
+        "echo $SECTION hostapd" to HOSTAPD_PROBE,
+        "echo $SECTION wifilast" to WIFI_LAST,
         "echo $SECTION pm" to DETECT_PACKAGE_MANAGER,
         "echo $SECTION peers" to MESH_PEERS,
         "echo $SECTION macs" to WIFI_MACS,
@@ -1296,6 +1388,7 @@ object Commands {
         "echo $SECTION board" to BOARD,
         "echo $SECTION presnap" to NODE_SNAPSHOT_STATE,
         "echo $SECTION swconfig" to SWCONFIG,
+        "echo $SECTION boardsw" to BOARD_SWITCH,
         "echo $SECTION ping" to pingHosts(nodeIps),
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
@@ -1311,6 +1404,7 @@ object Commands {
         "echo $SECTION dump" to "ubus call network.interface dump 2>/dev/null || echo '{}'",
         "echo $SECTION capable" to MESH_CAPABLE,
         "echo $SECTION wpad" to WPAD_NAME,
+        "echo $SECTION hostapd" to HOSTAPD_PROBE,
         "echo $SECTION pm" to DETECT_PACKAGE_MANAGER,
         "echo $SECTION df" to OVERLAY_FREE,
         "echo $SECTION macs" to WIFI_MACS,

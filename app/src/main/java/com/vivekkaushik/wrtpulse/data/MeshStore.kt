@@ -9,6 +9,8 @@ import com.vivekkaushik.wrtpulse.db.RouterEntity
 import com.vivekkaushik.wrtpulse.net.RouterSession
 import com.vivekkaushik.wrtpulse.net.SshException
 import com.vivekkaushik.wrtpulse.ops.BoardInfo
+import com.vivekkaushik.wrtpulse.ops.BoardPort
+import com.vivekkaushik.wrtpulse.ops.CaseSocket
 import com.vivekkaushik.wrtpulse.ops.Commands
 import com.vivekkaushik.wrtpulse.ops.DhcpPool
 import com.vivekkaushik.wrtpulse.ops.IpMath
@@ -116,6 +118,15 @@ class MeshStore(private val session: RouterSession) : Refreshable {
     var error by mutableStateOf<String?>(null); private set
     var notice by mutableStateOf<String?>(null); private set
 
+    /** What hostapd said it does not know ([Commands.HOSTAPD_PROBE]); null until it has answered. */
+    var hostapdUnknown by mutableStateOf<Set<String>?>(null); private set
+
+    /** The roaming options this router's hostapd cannot take — never written, always explained. */
+    val roamingSkip: Set<String> get() = MeshOps.unsupportedRoaming(hostapdUnknown)
+
+    /** Set by [ingest] when the router restored a wireless change on its own; reported once by [load]. */
+    private var unattendedRollback = false
+
     /** The wpad swap is running detached and the radios are restarting. */
     var swapping by mutableStateOf(false); private set
     var swapLog by mutableStateOf<String?>(null); private set
@@ -123,6 +134,9 @@ class MeshStore(private val session: RouterSession) : Refreshable {
     /** The `network` config as read, for the trunk and extra-network lookups. */
     private val networkUci = mutableStateMapOf<String, String>()
     private val swDevs = mutableStateListOf<SwitchDev>()
+
+    /** `/etc/board.json`'s switch block: which chip ports have a hole behind them, and their case labels. */
+    private val boardPorts = mutableStateMapOf<String, List<BoardPort>>()
 
     /** A LAN socket this router is holding apart for a node setup — left behind if a setup was abandoned. */
     var heldSetupPort by mutableStateOf<String?>(null); private set
@@ -163,6 +177,11 @@ class MeshStore(private val session: RouterSession) : Refreshable {
             ingest(Parsers.sections(out))
             loaded = true
             error = null
+            if (unattendedRollback) {
+                unattendedRollback = false
+                error = "The router put your previous Wi-Fi settings back on its own: the SSIDs did not come back " +
+                    "after the last change and the app could not confirm it in time. Nothing else was touched."
+            }
             // A node has no profile to offer: its SSIDs are copies, its LAN is someone else's.
             // The profile is in place before the sink suspends on the database, so a node check
             // that starts meanwhile finds it; a slow write must not hold the refresh loop either.
@@ -184,12 +203,15 @@ class MeshStore(private val session: RouterSession) : Refreshable {
         val network = Parsers.uciShow(parts["net"].orEmpty())
         networkUci.clear(); networkUci.putAll(network)
         swDevs.clear(); swDevs.addAll(Parsers.switchDevs(parts["swconfig"].orEmpty()))
+        boardPorts.clear(); boardPorts.putAll(Parsers.boardSwitchPorts(parts["boardsw"].orEmpty()))
         heldSetupPort = MeshOps.heldSetupPort(network)
         lan = Parsers.lanNet(network)
         pool = Parsers.dhcpPools(Parsers.uciShow(parts["dhcp"].orEmpty())).firstOrNull { it.interfaceName == "lan" }
         board = parts["board"]?.takeIf { it.isNotBlank() }?.let { runCatching { Parsers.board(it) }.getOrNull() }
         meshCapable = parts["capable"].orEmpty().trim() == "yes"
         wpad = parts["wpad"].orEmpty().trim().lines().firstOrNull().orEmpty()
+        hostapdUnknown = Parsers.hostapdUnknownItems(parts["hostapd"].orEmpty())
+        if (parts["wifilast"]?.contains("rolled-back") == true) unattendedRollback = true
         manager = parts["pm"].orEmpty().trim().ifEmpty { "opkg" }
         overlayFreeKb = parts["df"].orEmpty().trim().split(Regex("\\s+")).getOrNull(3)?.toLongOrNull()
         peers.clear(); peers.addAll(Parsers.meshPeers(parts["peers"].orEmpty()))
@@ -284,7 +306,14 @@ class MeshStore(private val session: RouterSession) : Refreshable {
         if (swap != null) overlayFreeKb?.let { if (it < MeshOps.MIN_SWAP_KB) add("Only $it kB free on the overlay; ${swap.install} needs about ${MeshOps.MIN_SWAP_KB} kB.") }
     }
 
-    fun roamingNotes(): List<String> = MeshOps.roamingNotes(lanAps)
+    fun roamingNotes(): List<String> = MeshOps.roamingNotes(lanAps, roamingSkip)
+
+    /**
+     * This router's sockets for the add-a-node drawings. [held] is the socket the running
+     * setup holds — its own reading, which is fresher than the config read before it started.
+     */
+    fun caseSockets(held: String? = null): List<CaseSocket> =
+        MeshOps.caseSockets(networkUci, swDevs, boardPorts, held ?: heldSetupPort)
 
     /**
      * APs with hand-off on whose mobility domain no longer matches their SSID — an SSID renamed
@@ -296,7 +325,7 @@ class MeshStore(private val session: RouterSession) : Refreshable {
 
     /** Rewrites hand-off on every LAN SSID from its current name — the fix for [staleDomains]. */
     suspend fun repairRoaming(): Boolean =
-        run(MeshOps.roamingOps(lanAps), "Hand-off domains now follow the SSIDs. Push the nodes if they are out of date.")
+        runGuardedWifi(MeshOps.roamingOps(lanAps, roamingSkip), "Hand-off domains now follow the SSIDs. Push the nodes if they are out of date.")
 
     /** The nodes, with whether each answered the last ping and how the mesh sees it. */
     private fun macOf(e: RouterEntity): String? = liveMeshMacs[e.identity] ?: e.meshMac
@@ -457,11 +486,11 @@ class MeshStore(private val session: RouterSession) : Refreshable {
     // Writing
     // -----------------------------------------------------------------------
 
-    /** The lines the roaming review shows. */
-    fun roamingOps(): List<String> = MeshOps.roamingOps(lanAps)
+    /** The lines the roaming review shows — without whatever this hostapd cannot take. */
+    fun roamingOps(): List<String> = MeshOps.roamingOps(lanAps, roamingSkip)
 
     suspend fun enableRoaming(): Boolean =
-        run(MeshOps.roamingOps(lanAps), "Hand-off is on across ${lanAps.size} SSID${if (lanAps.size == 1) "" else "s"}.")
+        runGuardedWifi(MeshOps.roamingOps(lanAps, roamingSkip), "Hand-off is on across ${lanAps.size} SSID${if (lanAps.size == 1) "" else "s"}.")
 
     suspend fun disableRoaming(): Boolean =
         run(MeshOps.roamingOffOps(lanAps), "Hand-off is off. The SSIDs and passwords are as they were.")
@@ -615,17 +644,20 @@ class MeshStore(private val session: RouterSession) : Refreshable {
                 try {
                     val out = session.exec(
                         Commands.WIRELESS_CONFIG + "; echo ${Commands.SECTION} net; " + Commands.NETWORK_CONFIG +
-                            "; echo ${Commands.SECTION} swconfig; " + Commands.SWCONFIG + "; echo ${Commands.SECTION} macs; " + Commands.WIFI_MACS,
+                            "; echo ${Commands.SECTION} swconfig; " + Commands.SWCONFIG + "; echo ${Commands.SECTION} macs; " + Commands.WIFI_MACS +
+                            "; echo ${Commands.SECTION} hostapd; " + Commands.HOSTAPD_PROBE,
                         timeoutMs = 20_000,
                     ).requireOk("read node").stdout
                     val parts = Parsers.sections("${Commands.SECTION} uci\n" + out)
                     val (radios, networks) = Parsers.wireless(Parsers.uciShow(parts["uci"].orEmpty()))
                     val nodeNet = Parsers.uciShow(parts["net"].orEmpty())
                     val nodeSw = Parsers.switchDevs(parts["swconfig"].orEmpty())
+                    // What this node's own hostapd cannot take; written blind it would silence the node.
+                    val nodeSkip = MeshOps.unsupportedRoaming(Parsers.hostapdUnknownItems(parts["hostapd"].orEmpty()))
                     val meshDev = Parsers.iwDevs(parts["macs"].orEmpty()).firstOrNull { it.type.contains("mesh", ignoreCase = true) }
                     val meshRadio = networks.firstOrNull { it.section == MeshOps.MESH_SECTION }?.device
-                    val ops = MeshOps.nodeRadioOps(p, radios, meshRadio) + MeshOps.nodeApOps(p, radios, networks) +
-                        MeshOps.nodeExtraOps(p, radios, meshRadio, meshDev?.ifname, nodeNet, nodeSw, networks)
+                    val ops = MeshOps.nodeRadioOps(p, radios, meshRadio) + MeshOps.nodeApOps(p, radios, networks, nodeSkip) +
+                        MeshOps.nodeExtraOps(p, radios, meshRadio, meshDev?.ifname, nodeNet, nodeSw, networks, nodeSkip)
                     // The watchdog first, so a node whose reload moves it off this channel can
                     // still find its way back; then the batch. A reload that takes the link is
                     // expected and treated below as delivered.
@@ -655,6 +687,77 @@ class MeshStore(private val session: RouterSession) : Refreshable {
             failed == 0 -> "Wi-Fi pushed to $pushed node${if (pushed == 1) "" else "s"}."
             else -> "Pushed to $pushed, could not reach $failed."
         }
+    }
+
+    /**
+     * Applies a wireless batch under [Commands.wifiApply]'s rollback, then waits for every AP
+     * to beacon again before confirming. hostapd rejects a whole radio over one option it does
+     * not know, and when that happens this phone is usually among the clients that just lost
+     * the network — so the confirm is earned by [Commands.AP_HEALTH], the restore is sent the
+     * moment the APs are seen down, and the router restores by itself if the app never gets
+     * back to say either.
+     */
+    private suspend fun runGuardedWifi(ops: List<String>, done: String): Boolean {
+        if (ops.isEmpty() || applying) return true
+        applying = true
+        error = null
+        notice = null
+        val expected = expectedApCount()
+        try {
+            try {
+                session.exec(Commands.wifiApply(ops), timeoutMs = 60_000).requireOk("apply wireless")
+            } catch (e: SshException) {
+                // The reload takes the app's own Wi-Fi with it; anything else is a real failure.
+                if (e !is SshException.Disconnected && e !is SshException.Timeout) {
+                    error = "Failed: ${e.message}"
+                    return false
+                }
+            }
+            notice = "Applied. Waiting for the SSIDs to come back…"
+            if (waitForAps(expected)) {
+                runCatching { session.exec(Commands.WIFI_CONFIRM, timeoutMs = 10_000) }
+                load()
+                notice = done
+                return true
+            }
+            val rejected = runCatching {
+                session.exec(Commands.HOSTAPD_REJECTIONS, timeoutMs = 10_000).stdout.trim().lines().filter { it.isNotBlank() }
+            }.getOrDefault(emptyList())
+            runCatching { session.exec(Commands.WIFI_ROLLBACK_NOW, timeoutMs = 30_000) }
+            delay(3_000)
+            load()
+            error = "Rolled back: the SSIDs did not come back within ${AP_WAIT_ROUNDS * AP_WAIT_MS / 1000} s" +
+                (if (rejected.isNotEmpty()) " — hostapd rejected ${rejected.joinToString(", ")}" else "") +
+                ". The previous wireless settings are restored."
+            return false
+        } finally {
+            applying = false
+        }
+    }
+
+    /** APs that should be on the air after a reload: enabled, on a radio that is enabled. */
+    private fun expectedApCount(): Int {
+        val radioOff = radios.filter { it.disabled }.map { it.section }.toSet()
+        return networks.count { it.mode == "ap" && !it.disabled && it.device !in radioOff }
+    }
+
+    /**
+     * Polls [Commands.AP_HEALTH] until every AP netdev has a channel and at least [expected]
+     * exist — a 2.4 GHz radio's 40 MHz coexistence scan alone can hold hostapd for ten seconds,
+     * hence the patience. A dropped link mid-way is the reload biting, so it is retried, not
+     * treated as an answer.
+     */
+    private suspend fun waitForAps(expected: Int): Boolean {
+        repeat(AP_WAIT_ROUNDS) {
+            delay(AP_WAIT_MS)
+            val health = try {
+                Parsers.apHealth(session.exec(Commands.AP_HEALTH, timeoutMs = 8_000).stdout)
+            } catch (e: SshException) {
+                return@repeat
+            }
+            if (health.size >= maxOf(expected, 1) && health.values.all { it }) return true
+        }
+        return false
     }
 
     private suspend fun run(
@@ -696,6 +799,10 @@ class MeshStore(private val session: RouterSession) : Refreshable {
     }
 
     companion object {
+        /** How long the guarded wireless apply waits for the APs: 12 × 3 s. */
+        const val AP_WAIT_ROUNDS = 12
+        const val AP_WAIT_MS = 3_000L
+
         private const val SWAP_WAIT_NANOS = 240_000_000_000L
     }
 }

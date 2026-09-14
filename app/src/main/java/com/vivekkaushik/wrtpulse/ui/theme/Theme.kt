@@ -1,5 +1,6 @@
 package com.vivekkaushik.wrtpulse.ui.theme
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.widthIn
@@ -59,6 +60,15 @@ private const val MaxWidthScale = 1.35f
 private val MaxContentWidth = 520.dp
 
 /**
+ * How much wider than [MaxContentWidth] a tablet window has to be before it is worth centring.
+ * The column's margins are where the top bar and the tab bar stop, so a thin margin reads as
+ * the bars being chopped, not as a layout choice: a Pixel Fold's inner screen is 631 scaled dp
+ * across, and its 55 dp strips looked exactly like that. Below this the window is filled and
+ * the bars reach the edges; a 12" tablet, twice the column wide, still gets it centred.
+ */
+private const val CentreWhenWiderBy = 1.4f
+
+/**
  * The shorter side a window has to have before it counts as a tablet and gets the centred
  * column. A phone turned sideways is wide but not tall; capping and centring it left the top
  * bar and the tab bar short of the edges, and scaling it to its new width blew the whole UI
@@ -93,15 +103,22 @@ fun WrtPulseTheme(content: @Composable () -> Unit) {
         fontScale = 1f,
     )
 
+    // The window's width in the dp the layout will actually be measured in. Only when the
+    // column would leave real margins is it worth having; see CentreWhenWiderBy.
+    val widthScaledDp = if (size.width <= 0) 0f else size.width / scaled.density
+    val centred = tablet && widthScaledDp >= MaxContentWidth.value * CentreWhenWiderBy
+
     CompositionLocalProvider(LocalDensity provides scaled) {
         MaterialTheme(
             colorScheme = DarkColorScheme,
             typography = Typography,
         ) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-                // Only a tablet is narrowed to the column. A phone, either way up, gets its
-                // whole width: the bars reach the edges and the cards stretch.
-                Box((if (tablet) Modifier.widthIn(max = MaxContentWidth) else Modifier).fillMaxSize()) { content() }
+            // Painted in the screens' own background so a column's margins are the same dark as
+            // the page beside them, never the window's bare black.
+            Box(Modifier.fillMaxSize().background(Wrt.BgScreen), contentAlignment = Alignment.TopCenter) {
+                // A phone either way up, and a tablet or foldable not much wider than the column,
+                // get the whole width: the bars reach the edges and the cards stretch.
+                Box((if (centred) Modifier.widthIn(max = MaxContentWidth) else Modifier).fillMaxSize()) { content() }
             }
         }
     }

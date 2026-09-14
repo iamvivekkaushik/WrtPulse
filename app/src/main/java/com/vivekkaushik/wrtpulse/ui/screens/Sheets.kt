@@ -24,7 +24,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -92,8 +93,13 @@ fun SheetHost(visible: Boolean, onDismiss: () -> Unit, sheet: @Composable () -> 
                         .background(Wrt.DotOff, RoundedCornerShape(2.dp))
                 )
                 // A sheet taller than the screen — a review with several warnings — scrolls
-                // rather than pushing its Apply button under the navigation bar.
-                val maxHeight = LocalConfiguration.current.screenHeightDp.dp * 0.86f
+                // rather than pushing its Apply button under the navigation bar. Measured in
+                // the density the sheet is laid out in: screenHeightDp is in the platform's dp,
+                // and the theme scales the density up to 1.35x, so on a Pixel Fold that figure
+                // was 16% taller than the window and the Apply button sat below the glass.
+                val density = LocalDensity.current
+                val windowHeight = LocalWindowInfo.current.containerSize.height
+                val maxHeight = (if (windowHeight > 0) (windowHeight / density.density).dp else 640.dp) * 0.86f
                 Column(Modifier.heightIn(max = maxHeight).verticalScroll(rememberScrollState())) {
                     sheet()
                 }

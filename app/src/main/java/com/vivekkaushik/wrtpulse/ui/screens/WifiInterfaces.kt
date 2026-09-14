@@ -548,7 +548,7 @@ private fun ScanPulse(band: String) {
                 style = mono(11f, 500, Wrt.TextTertiary),
                 modifier = Modifier.padding(top = 14.dp),
             )
-            Text("iwinfo scan", style = sans(11f, 400, Wrt.TextDim), modifier = Modifier.padding(top = 4.dp))
+            Text("iw scan", style = sans(11f, 400, Wrt.TextDim), modifier = Modifier.padding(top = 4.dp))
         }
     }
 }

@@ -253,6 +253,9 @@ class WifiStore(private val session: RouterSession) : Refreshable {
                 }
                 out.stdout.contains("ERR add") ->
                     error = "This radio has no interface to scan with, and one couldn't be created."
+                out.stdout.contains("ERR up") ->
+                    error = "The scan interface couldn't be brought up — this driver may not run a " +
+                        "second interface beside a live AP. Scan through an SSID on this radio instead."
                 !out.ok || out.stdout.contains("Not supported", true) || out.stdout.contains("failed", true) ||
                     out.stdout.contains("Netlink error", true) -> {
                     error = "Scan failed: ${out.stdout.trim().lines().lastOrNull()?.take(90).orEmpty()}"

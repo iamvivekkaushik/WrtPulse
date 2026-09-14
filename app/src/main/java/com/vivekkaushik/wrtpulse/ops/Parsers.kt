@@ -909,6 +909,164 @@ object Parsers {
     }
 
     /**
+     * [Commands.HOSTAPD_PROBE]'s answer: the config items hostapd does not know. Null when the
+     * marker item is missing — hostapd never parsed the file (no binary at that path, a build
+     * that prints differently), so nothing can be concluded either way.
+     */
+    fun hostapdUnknownItems(text: String, marker: String = Commands.HOSTAPD_PROBE_MARKER): Set<String>? {
+        val items = text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        return if (marker in items) items - marker else null
+    }
+
+    /**
+     * [Commands.AP_HEALTH] → AP interface → whether it is beaconing. An AP whose hostapd setup
+     * failed still exists as a netdev but has no channel line — exactly how a rejected config
+     * looks from outside, and what the guarded wireless apply checks before confirming.
+     */
+    fun apHealth(text: String): Map<String, Boolean> {
+        val out = LinkedHashMap<String, Boolean>()
+        var ifname = ""
+        var type = ""
+        var channel = false
+        fun flush() { if (ifname.isNotEmpty() && type == "AP") out[ifname] = channel }
+        for (raw in text.lineSequence()) {
+            val line = raw.trim()
+            when {
+                line.startsWith("Interface ") -> { flush(); ifname = line.removePrefix("Interface ").trim(); type = ""; channel = false }
+                line.startsWith("type ") -> type = line.removePrefix("type ").trim()
+                line.startsWith("channel ") -> channel = true
+            }
+        }
+        flush()
+        return out
+    }
+
+    /**
+     * A neighbour survey in either shape [Commands.SCAN_FN] can print: `iw` BSS blocks
+     * ([iwScanCells]) or iwinfo Cell blocks ([iwinfoScanCells]).
+     */
+    fun scanCells(text: String): List<ScanCell> =
+        if (text.lineSequence().any { it.startsWith("BSS ") }) iwScanCells(text) else iwinfoScanCells(text)
+
+    /** The channel number for a centre frequency in MHz, or null when it is not a Wi-Fi channel. */
+    fun channelForMhz(mhz: Int): Int? = when {
+        mhz == 2484 -> 14
+        mhz in 2412..2472 -> (mhz - 2407) / 5
+        mhz in 5160..5885 -> (mhz - 5000) / 5
+        mhz in 5955..7115 -> (mhz - 5950) / 5
+        else -> null
+    }
+
+    /**
+     * `iw dev <iface> scan` (or `scan dump`) as the reference router prints it:
+     *   BSS b4:f9:49:97:c2:58(on phy0-ap0)
+     *       freq: 5260.0
+     *       signal: -51.00 dBm
+     *       SSID: jogi1
+     *       HT operation:
+     *            * primary channel: 52
+     *            * secondary channel offset: above
+     *            * STA channel width: any
+     *       VHT operation:
+     *            * channel width: 1 (80 MHz)
+     *            * center freq segment 1: 58
+     *       WPA:  * Version: 1 …
+     *       RSN:  * Version: 1 … * Authentication suites: PSK
+     *
+     * A hidden network has no SSID line at all (iwinfo printed "unknown"). The primary channel
+     * is HT operation's, or derived from the frequency when there is no HT block. A secondary
+     * channel offset makes a 40 MHz cell centred two channels to that side; VHT's width and
+     * centre win when present. RSN → WPA2, WPA alone → WPA, SAE anywhere → WPA3, Privacy with
+     * neither → WEP, else OPEN. A dump can hold the same BSSID twice (beacon and probe
+     * response); the strongest reading is kept.
+     */
+    fun iwScanCells(text: String): List<ScanCell> {
+        val out = LinkedHashMap<String, ScanCell>()
+        var bssid = ""
+        var ssid = ""
+        var mhz = 0
+        var signal: Int? = null
+        var primary: Int? = null
+        var width = 20
+        var vhtCenter = 0
+        var secondaryBelow: Boolean? = null
+        var rsn = false
+        var wpa = false
+        var sae = false
+        var privacy = false
+        var block = ""
+        fun flush() {
+            val sig = signal
+            val ch = primary ?: channelForMhz(mhz)
+            if (bssid.isNotEmpty() && sig != null && ch != null) {
+                val center = when {
+                    vhtCenter > 0 -> vhtCenter
+                    width == 40 && secondaryBelow != null -> if (secondaryBelow == true) ch - 2 else ch + 2
+                    else -> ch
+                }
+                val encryption = when {
+                    sae -> "WPA3"
+                    rsn -> "WPA2"
+                    wpa -> "WPA"
+                    privacy -> "WEP"
+                    else -> "OPEN"
+                }
+                val cell = ScanCell(ch, sig, ssid, bssid, encryption, width, center)
+                val prior = out[bssid]
+                if (prior == null || cell.signalDbm > prior.signalDbm) out[bssid] = cell
+            }
+            bssid = ""; ssid = ""; mhz = 0; signal = null; primary = null; width = 20; vhtCenter = 0
+            secondaryBelow = null; rsn = false; wpa = false; sae = false; privacy = false; block = ""
+        }
+        for (raw in text.lineSequence()) {
+            val line = raw.trim()
+            when {
+                raw.startsWith("BSS ") -> {
+                    flush()
+                    bssid = MAC_ANY.find(line)?.value?.uppercase().orEmpty()
+                }
+                line.startsWith("freq:") ->
+                    mhz = line.removePrefix("freq:").trim().substringBefore('.').toIntOrNull() ?: 0
+                line.startsWith("signal:") ->
+                    signal = Regex("(-?\\d+)(?:\\.\\d+)? dBm").find(line)?.groupValues?.get(1)?.toInt()
+                line.startsWith("SSID:") ->
+                    // iw escapes a hidden name's NUL bytes as \x00; that is no name either.
+                    ssid = line.removePrefix("SSID:").trim().replace("\\x00", "")
+                line.startsWith("capability:") -> privacy = line.contains("Privacy")
+                line.startsWith("HT operation:") -> block = "ht"
+                line.startsWith("VHT operation:") -> block = "vht"
+                line.startsWith("RSN:") -> { rsn = true; block = "rsn" }
+                line.startsWith("WPA:") -> { wpa = true; block = "wpa" }
+                line.startsWith("* ") -> {
+                    val item = line.removePrefix("* ").trim()
+                    val value = item.substringAfter(':').trim()
+                    when (block) {
+                        "ht" -> when {
+                            item.startsWith("primary channel:") -> primary = value.toIntOrNull()
+                            item.startsWith("secondary channel offset:") -> {
+                                secondaryBelow = when (value) { "below" -> true; "above" -> false; else -> null }
+                                if (secondaryBelow != null) width = maxOf(width, 40)
+                            }
+                        }
+                        "vht" -> when {
+                            item.startsWith("channel width:") ->
+                                Regex("\\((\\d+) MHz\\)").find(value)?.let { width = maxOf(width, it.groupValues[1].toInt()) }
+                            item.startsWith("center freq segment 1:") ->
+                                value.toIntOrNull()?.let { if (it > 0) vhtCenter = it }
+                        }
+                        "rsn", "wpa" ->
+                            if (item.startsWith("Authentication suites:") && value.contains("SAE")) sae = true
+                    }
+                }
+                // Any other "Something:" header ends the block, so "BSS Load:" items are not read as HT's.
+                line.endsWith(":") -> block = ""
+            }
+        }
+        flush()
+        return out.values.toList()
+    }
+
+    /**
      * `iwinfo <iface> scan` cells:
      *   Cell 01 - Address: AA:BB:...
      *             ESSID: "neighbor"
@@ -927,7 +1085,7 @@ object Parsers {
      * Width" wins, the VHT centre is taken as printed, and an HT40 cell's centre is two
      * channels from its primary on the side the offset names.
      */
-    fun scanCells(text: String): List<ScanCell> {
+    fun iwinfoScanCells(text: String): List<ScanCell> {
         val cells = mutableListOf<ScanCell>()
         var ssid = ""
         var bssid = ""

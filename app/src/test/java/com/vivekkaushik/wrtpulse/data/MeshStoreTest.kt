@@ -140,12 +140,15 @@ class MeshStoreTest {
         wpad: String = "wpad-mesh-mbedtls",
         ping: String = "192.168.0.2 1.5\n192.168.0.3 -",
         nodes: List<RouterEntity> = listOf(node("Bedroom", "192.168.0.2", "de:ad:be:ef:00:01"), node("Garage", "192.168.0.3")),
+        /** The probe's answer; by default hostapd knows every roaming option. */
+        hostapd: String = "wrtpulse_probe_end",
     ): MeshStore =
         MeshStore(RouterSession(SshTarget("192.168.0.1", identity = "primary-uuid"), unusedClient, { error("unused") })).apply {
             nodeEntities = nodes
             ingest(
                 mapOf(
                     "uci" to wireless,
+                    "hostapd" to hostapd,
                     "status" to STATUS,
                     "net" to PRIMARY_NETWORK,
                     "dhcp" to PRIMARY_DHCP,
@@ -258,6 +261,18 @@ class MeshStoreTest {
         assertEquals(1, s.roamingNotes().size)
         assertTrue(s.roamingOps().contains("set wireless.default_radio0.ieee80211r='1'"))
         assertFalse(s.roamingOps().any { it.startsWith("set wireless.default_radio1.ieee80211r") })
+    }
+
+    /** wpad-basic on the reference router: one option hostapd did not know took every SSID down. */
+    @Test
+    fun `an option this hostapd does not know is never written`() {
+        val basic = store(hostapd = "bss_transition\nwrtpulse_probe_end")
+        assertFalse(basic.roamingOps().any { it.contains("bss_transition") })
+        assertTrue(basic.roamingOps().contains("set wireless.default_radio0.ieee80211k='1'"))
+        assertTrue(basic.roamingNotes().any { it.contains("802.11v") })
+        // The full build takes it; a probe that never answered is treated like the basic one.
+        assertTrue(store().roamingOps().any { it.contains("bss_transition") })
+        assertFalse(store(hostapd = "").roamingOps().any { it.contains("bss_transition") })
     }
 
     @Test
