@@ -206,6 +206,13 @@ object WrtIcons {
         "M9 2v3", "M15 2v3", "M9 19v3", "M15 19v3",
         "M2 9h3", "M2 15h3", "M19 9h3", "M19 15h3",
     )
+    // A bulb with a base: the lens on the front of the router.
+    val Leds = stroked(
+        "leds", 1.6f,
+        "M9 18h6",
+        "M10 21h4",
+        "M12 3a6 6 0 0 0-3.6 10.8c.6.5 1 1.2 1.1 2l.1.7h4.8l.1-.7c.1-.8.5-1.5 1.1-2A6 6 0 0 0 12 3Z",
+    )
     val Services = stroked(
         "services", 1.6f,
         "M12 9 A3 3 0 1 1 11.99 9 Z",

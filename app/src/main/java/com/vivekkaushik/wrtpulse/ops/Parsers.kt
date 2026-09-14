@@ -658,6 +658,60 @@ data class IwDev(val ifname: String, val mac: String, val type: String)
 data class MeshPeer(val iface: String, val mac: String, val signalDbm: Int?, val established: Boolean)
 
 /** One associated wireless station from `iwinfo <iface> assoclist`. */
+/** One entry under /sys/class/leds, as [Commands.LEDS] prints it. */
+data class RouterLed(
+    val sysfs: String,
+    val maxBrightness: Int,
+    val brightness: Int,
+    /** Every trigger the kernel offers this LED, in sysfs order. */
+    val triggers: List<String>,
+    /** The active one — `none` when brightness alone drives the LED. */
+    val trigger: String,
+    /** `multi_index` of a multicolor LED, e.g. red green blue; empty for a plain one. */
+    val channels: List<String> = emptyList(),
+    val intensity: List<Int> = emptyList(),
+) {
+    val colour: String? get() = LedOps.colourOf(sysfs)
+    val label: String get() = LedOps.label(sysfs)
+    val multicolor: Boolean get() = channels.isNotEmpty()
+    val lit: Boolean get() = brightness > 0
+}
+
+/** What the device tree says an LED does when nothing has configured it. */
+data class LedDtDefault(val sysfs: String, val trigger: String?, val defaultOn: Boolean?)
+
+/** One `config led` section of /etc/config/system. */
+data class LedSection(
+    val section: String,
+    val name: String,
+    val sysfs: String,
+    val trigger: String,
+    val default: Boolean?,
+    val dev: String?,
+    val mode: List<String>,
+    val delayOn: Int?,
+    val delayOff: Int?,
+    val brightness: Int?,
+)
+
+/** The connectivity watch as the router has it, from [Commands.LEDWATCH_STATE]. */
+data class LedwatchState(
+    val installed: Boolean,
+    val enabled: Boolean,
+    val running: Boolean,
+    val version: Int?,
+    /** State key → LED → level, read back from the script's own header. */
+    val states: Map<String, Map<String, LedLevel>>,
+    val intervalS: Int?,
+    val downAfter: Int?,
+    /** The state the running watch last showed, e.g. `internet`. */
+    val current: String?,
+    /** The hand-installed `ledwatch` service this feature replaces is on the router. */
+    val legacy: Boolean,
+) {
+    val watched: Set<String> get() = states.values.flatMap { it.keys }.toSet()
+}
+
 data class Station(
     val iface: String,
     val mac: String,
@@ -2823,6 +2877,95 @@ object Parsers {
             // Named and anonymous host sections both, but only the section lines themselves.
             reservations = dhcp.entries.count { it.value == "host" && it.key.count { c -> c == '.' } == 1 },
             packages = userPackages(parts["packages"].orEmpty()),
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // LEDs
+    // -----------------------------------------------------------------------
+
+    private val SPACES = Regex("\\s+")
+
+    /** [Commands.LEDS] `leds` section: one tab-separated line per /sys/class/leds entry. */
+    fun leds(text: String): List<RouterLed> = text.lineSequence().mapNotNull { line ->
+        val f = line.split('\t')
+        if (f.size < 4 || f[0].isBlank()) return@mapNotNull null
+        val words = f[3].trim().split(SPACES).filter { it.isNotEmpty() }
+        RouterLed(
+            sysfs = f[0].trim(),
+            maxBrightness = f[1].trim().toIntOrNull() ?: 1,
+            brightness = f[2].trim().toIntOrNull() ?: 0,
+            triggers = words.map { it.trim('[', ']') },
+            trigger = words.firstOrNull { it.startsWith("[") }?.trim('[', ']') ?: "none",
+            channels = f.getOrNull(4)?.trim()?.split(SPACES)?.filter { it.isNotEmpty() }.orEmpty(),
+            intensity = f.getOrNull(5)?.trim()?.split(SPACES)?.mapNotNull { it.toIntOrNull() }.orEmpty(),
+        )
+    }.toList()
+
+    /** [Commands.LEDS] `dt` section: `sysfs \t default-trigger \t default-state` per device-tree LED. */
+    fun ledDtDefaults(text: String): List<LedDtDefault> = text.lineSequence().mapNotNull { line ->
+        val f = line.split('\t')
+        if (f[0].isBlank()) return@mapNotNull null
+        LedDtDefault(
+            sysfs = f[0].trim(),
+            trigger = f.getOrNull(1)?.trim()?.ifEmpty { null },
+            defaultOn = when (f.getOrNull(2)?.trim()) { "on" -> true; "off" -> false; else -> null },
+        )
+    }.toList()
+
+    /** The `config led` sections of `uci show system`, anonymous or named. */
+    fun ledSections(uci: Map<String, String>): List<LedSection> {
+        val out = mutableListOf<LedSection>()
+        uci.forEach { (key, value) ->
+            if (value != "led" || !key.startsWith("system.") || key.count { it == '.' } != 1) return@forEach
+            val s = key.substringAfter('.')
+            fun opt(o: String) = uci["system.$s.$o"]?.ifEmpty { null }
+            val sysfs = opt("sysfs") ?: return@forEach
+            out += LedSection(
+                section = s,
+                name = opt("name") ?: sysfs,
+                sysfs = sysfs,
+                trigger = opt("trigger") ?: "none",
+                default = opt("default")?.let { uciBool(it) },
+                dev = opt("dev"),
+                mode = uciList(opt("mode").orEmpty()).flatMap { it.split(' ') }.filter { it.isNotEmpty() },
+                delayOn = opt("delayon")?.toIntOrNull(),
+                delayOff = opt("delayoff")?.toIntOrNull(),
+                brightness = opt("brightness")?.toIntOrNull(),
+            )
+        }
+        return out
+    }
+
+    /** [Commands.LEDWATCH_STATE]'s answer: flag words, the current state, and the script header. */
+    fun ledwatchState(text: String): LedwatchState {
+        val lines = text.lines().map { it.trim() }
+        val states = linkedMapOf<String, Map<String, LedLevel>>()
+        var version: Int? = null
+        var interval: Int? = null
+        var down: Int? = null
+        for (l in lines) {
+            when {
+                l.startsWith("# wrtpulse-ledwatch v") -> version = l.removePrefix("# wrtpulse-ledwatch v").trim().toIntOrNull()
+                l.startsWith("# state ") -> {
+                    val rest = l.removePrefix("# state ").trim()
+                    val name = rest.substringBefore(' ')
+                    if (name.isNotEmpty()) states[name] = LedOps.decodeLevels(rest.substringAfter(' ', ""))
+                }
+                l.startsWith("# interval ") -> interval = l.removePrefix("# interval ").trim().toIntOrNull()
+                l.startsWith("# downafter ") -> down = l.removePrefix("# downafter ").trim().toIntOrNull()
+            }
+        }
+        return LedwatchState(
+            installed = "installed" in lines,
+            enabled = "enabled" in lines,
+            running = "running" in lines,
+            version = version,
+            states = states,
+            intervalS = interval,
+            downAfter = down,
+            current = lines.firstOrNull { it.startsWith("current ") }?.removePrefix("current ")?.trim()?.ifEmpty { null },
+            legacy = "legacy" in lines,
         )
     }
 

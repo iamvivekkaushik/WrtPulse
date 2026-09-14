@@ -49,6 +49,7 @@ import com.vivekkaushik.wrtpulse.data.PackageStore
 import com.vivekkaushik.wrtpulse.data.ResetStore
 import com.vivekkaushik.wrtpulse.data.RouterOps
 import com.vivekkaushik.wrtpulse.data.RouterStatus
+import com.vivekkaushik.wrtpulse.data.LedStore
 import com.vivekkaushik.wrtpulse.data.ServiceStore
 import com.vivekkaushik.wrtpulse.data.SshKeyStore
 import com.vivekkaushik.wrtpulse.data.Telemetry
@@ -77,6 +78,7 @@ import com.vivekkaushik.wrtpulse.ui.screens.OnboardingFlow
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingSshKeyScreen
 import com.vivekkaushik.wrtpulse.ui.screens.PackagesScreen
 import com.vivekkaushik.wrtpulse.ui.screens.RouterListScreen
+import com.vivekkaushik.wrtpulse.ui.screens.LedsScreen
 import com.vivekkaushik.wrtpulse.ui.screens.ServicesScreen
 import com.vivekkaushik.wrtpulse.ui.screens.SheetHost
 import com.vivekkaushik.wrtpulse.ui.screens.SshKeysScreen
@@ -171,6 +173,8 @@ private fun WrtPulseApp() {
     // Same bargain for the init scripts: listing them walks /etc/init.d, so it waits
     // until the Services screen is actually opened.
     val serviceStore = remember(session) { session?.let { ServiceStore(it) } }
+    // LEDs: a sysfs walk plus the device tree, read when the LED screen opens.
+    val ledStore = remember(session) { session?.let { LedStore(it) } }
     val firmwareStore = remember(session) { session?.let { FirmwareStore(it) } }
     // Read when the section opens — it is a full `uci show firewall` plus the lease table.
     val firewallStore = remember(session) { session?.let { FirewallStore(it) } }
@@ -266,6 +270,7 @@ private fun WrtPulseApp() {
     var logsOpen by remember { mutableStateOf(false) }
     var packagesOpen by remember { mutableStateOf(false) }
     var servicesOpen by remember { mutableStateOf(false) }
+    var ledsOpen by remember { mutableStateOf(false) }
     var firmwareOpen by remember { mutableStateOf(false) }
     var resetOpen by remember { mutableStateOf(false) }
     var countryOpen by remember { mutableStateOf(false) }
@@ -785,6 +790,12 @@ private fun WrtPulseApp() {
                                         latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
                                         onBack = { servicesOpen = false },
                                     )
+                                } else if (ledsOpen) {
+                                    LedsScreen(
+                                        store = ledStore,
+                                        latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
+                                        onBack = { ledsOpen = false },
+                                    )
                                 } else if (packagesOpen) {
                                     PackagesScreen(
                                         store = packageStore,
@@ -818,12 +829,14 @@ private fun WrtPulseApp() {
                                         },
                                         packages = packageStore,
                                         services = serviceStore,
+                                        leds = ledStore,
                                         backups = backupStore,
                                         routerName = currentRouter,
                                         onRouterTap = { showSwitcher = true },
                                         onOpenLogs = { logsOpen = true },
                                         onOpenPackages = { packagesOpen = true },
                                         onOpenServices = { servicesOpen = true },
+                                        onOpenLeds = { ledsOpen = true },
                                         onOpenFirmware = { firmwareOpen = true },
                                         onOpenReset = { resetOpen = true },
                                         onOpenCountry = { countryOpen = true },
@@ -838,7 +851,7 @@ private fun WrtPulseApp() {
                             WrtBottomNav(current = tab) { picked ->
                                 if (picked != MainTab.System) {
                                     logsOpen = false; packagesOpen = false
-                                    servicesOpen = false; firmwareOpen = false; resetOpen = false
+                                    servicesOpen = false; ledsOpen = false; firmwareOpen = false; resetOpen = false
                                     countryOpen = false; sshKeysOpen = false; backupOpen = false
                                     aboutOpen = false
                                 }
@@ -961,6 +974,7 @@ private fun WrtPulseApp() {
             dest == Dest.Main && tab == MainTab.System && resetOpen -> resetOpen = false
             dest == Dest.Main && tab == MainTab.System && firmwareOpen -> firmwareOpen = false
             dest == Dest.Main && tab == MainTab.System && servicesOpen -> servicesOpen = false
+            dest == Dest.Main && tab == MainTab.System && ledsOpen -> ledsOpen = false
             dest == Dest.Main && tab == MainTab.System && packagesOpen -> packagesOpen = false
             dest == Dest.Main && tab == MainTab.System && logsOpen -> logsOpen = false
             dest == Dest.Main && tab != MainTab.Dashboard -> tab = MainTab.Dashboard

@@ -1629,4 +1629,101 @@ object Commands {
         "{ /etc/init.d/\$s disable; /etc/init.d/\$s stop; } >/dev/null 2>&1; done; " +
         "/etc/init.d/system reload >/dev/null 2>&1; echo done"
 
+    // ── LEDs ──────────────────────────────────────────────────────────────────
+    // The router says what LEDs it has and what each can do; the app never assumes a board.
+
+    /** A sysfs LED name: `red:wlan2g`, `tp-link:green:power`, `ath10k-phy0`. No path characters. */
+    fun safeLedName(name: String): Boolean =
+        name.isNotEmpty() && name.length <= 64 && name.first().isLetterOrDigit() &&
+            name.all { it.isLetterOrDigit() || it in ":_.-" }
+
+    /** One tab-separated line per LED: name, max, brightness, trigger list, multi_index, multi_intensity. */
+    private const val SYSFS_LEDS =
+        "for l in /sys/class/leds/*; do [ -e \"\$l/brightness\" ] || continue; " +
+        "printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"\${l##*/}\" \"\$(cat \"\$l/max_brightness\" 2>/dev/null)\" " +
+        "\"\$(cat \"\$l/brightness\" 2>/dev/null)\" \"\$(cat \"\$l/trigger\" 2>/dev/null)\" " +
+        "\"\$(cat \"\$l/multi_index\" 2>/dev/null)\" \"\$(cat \"\$l/multi_intensity\" 2>/dev/null)\"; done"
+
+    /**
+     * What the device tree wired each LED to do — the only record of a board default once a
+     * uci section or the watch has overwritten the live state. A node is named by its `label`,
+     * else by colour+function the way leds.sh composes it, else by its node name.
+     */
+    private const val DT_LEDS =
+        "[ -d /proc/device-tree ] && { . /lib/functions/leds.sh 2>/dev/null; " +
+        "rd() { [ -f \"\$1\" ] && tr -d '\\0' < \"\$1\"; }; " +
+        "for d in /proc/device-tree/*leds*/*/; do [ -d \"\$d\" ] || continue; " +
+        "n=\$(rd \"\$d/label\"); [ -n \"\$n\" ] || n=\$(get_dt_led_color_func \"\$d\" 2>/dev/null); " +
+        "[ -n \"\$n\" ] || n=\$(basename \"\$d\"); " +
+        "printf '%s\\t%s\\t%s\\n' \"\$n\" \"\$(rd \"\$d/linux,default-trigger\")\" \"\$(rd \"\$d/default-state\")\"; done; }; true"
+
+    const val LEDWATCH_PATH = "/usr/bin/wrtpulse-ledwatch"
+    const val LEDWATCH_INIT = "/etc/init.d/wrtpulse-ledwatch"
+    const val LEDWATCH_STATE_FILE = "/var/run/wrtpulse-ledwatch.state"
+    const val LEDWATCH_SERVICE = "wrtpulse-ledwatch"
+
+    /**
+     * Whether the watch is installed, enabled, running, what it last showed, and its header —
+     * the header is the configuration, so the app reads its own writing back rather than
+     * remembering it. Running is asked of procd, not pgrep: this very command line carries
+     * the script's name and would match itself.
+     */
+    val LEDWATCH_STATE: String =
+        "[ -x $LEDWATCH_PATH ] && echo installed; " +
+        "[ -x $LEDWATCH_INIT ] && $LEDWATCH_INIT enabled 2>/dev/null && echo enabled; " +
+        "ubus call service list '{\"name\":\"$LEDWATCH_SERVICE\"}' 2>/dev/null | grep -q '\"running\": *true' && echo running; " +
+        "[ -f $LEDWATCH_STATE_FILE ] && echo \"current \$(cat $LEDWATCH_STATE_FILE)\"; " +
+        "[ -f /etc/init.d/ledwatch ] && echo legacy; " +
+        "sed -n '2,12p' $LEDWATCH_PATH 2>/dev/null | grep '^# '; true"
+
+    /** Everything the LED screen needs, in one round trip. */
+    val LEDS: String = listOf(
+        "echo $SECTION leds" to SYSFS_LEDS,
+        "echo $SECTION dt" to DT_LEDS,
+        "echo $SECTION uci" to "uci -q show system",
+        "echo $SECTION netdevs" to "ls /sys/class/net 2>/dev/null",
+        "echo $SECTION watch" to LEDWATCH_STATE,
+    ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    /**
+     * Applies LED sections, then any direct sysfs writes. `led reload` is a restart: it puts
+     * every LED it had configured back to the state it saved first, then applies the config
+     * again — which is exactly what makes deleting a section restore the board default.
+     */
+    fun ledApply(uci: List<String>, direct: List<String>): String {
+        val tail = (direct + "echo applied").joinToString("; ")
+        return if (uci.isEmpty()) tail
+        else uciBatch(uci, "system", "/etc/init.d/led reload >/dev/null 2>&1; $tail")
+    }
+
+    /**
+     * Installs (or rewrites) the watch and starts it. The uci sections of the LEDs it drives
+     * are dropped first, or `led reload` would keep fighting it; the hand-installed `ledwatch`
+     * this replaces is retired when present, along with its lines in sysupgrade.conf. Both new
+     * files are added there so an upgrade keeps them. The two heredocs end differently on
+     * purpose — see [setupApply].
+     */
+    fun ledwatchInstall(script: String, init: String, uciDeletes: List<String>): String = buildString {
+        append("cat > $LEDWATCH_PATH <<'WRTPULSE_EOF'\n").append(script).append("\nWRTPULSE_EOF\n")
+        append("cat > $LEDWATCH_INIT <<'WRTPULSE_INIT_EOF'\n").append(init).append("\nWRTPULSE_INIT_EOF\n")
+        append("chmod 755 $LEDWATCH_PATH $LEDWATCH_INIT; ")
+        append("if [ -f /etc/init.d/ledwatch ]; then /etc/init.d/ledwatch stop >/dev/null 2>&1; ")
+        append("/etc/init.d/ledwatch disable >/dev/null 2>&1; rm -f /etc/init.d/ledwatch /usr/bin/ledwatch.sh; ")
+        append("sed -i '/^\\/usr\\/bin\\/ledwatch\\.sh$/d;/^\\/etc\\/init\\.d\\/ledwatch$/d' $SYSUPGRADE_CONF 2>/dev/null; fi; ")
+        append("for p in $LEDWATCH_PATH $LEDWATCH_INIT; do grep -qx \"\$p\" $SYSUPGRADE_CONF 2>/dev/null || echo \"\$p\" >> $SYSUPGRADE_CONF; done; ")
+        if (uciDeletes.isNotEmpty()) {
+            append("uci batch <<'WRTPULSE_UCI_EOF'\n")
+            uciDeletes.forEach { append(it).append('\n') }
+            append("WRTPULSE_UCI_EOF\nuci commit system; ")
+        }
+        append("$LEDWATCH_INIT enable >/dev/null 2>&1; $LEDWATCH_INIT restart >/dev/null 2>&1; sleep 1; echo installed")
+    }
+
+    /** Stops and removes the watch, then hands its LEDs back with the given direct writes. */
+    fun ledwatchRemove(restore: List<String>): String =
+        "$LEDWATCH_INIT stop >/dev/null 2>&1; $LEDWATCH_INIT disable >/dev/null 2>&1; " +
+        "rm -f $LEDWATCH_PATH $LEDWATCH_INIT $LEDWATCH_STATE_FILE; " +
+        "sed -i '/wrtpulse-ledwatch/d' $SYSUPGRADE_CONF 2>/dev/null; " +
+        (restore + "/etc/init.d/led restart >/dev/null 2>&1" + "echo removed").joinToString("; ")
+
 }

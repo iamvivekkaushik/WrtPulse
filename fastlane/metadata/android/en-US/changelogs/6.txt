@@ -1,3 +1,7 @@
+• LEDs. System · LEDs lists every LED the router exposes, with the modes its own triggers allow — board default, on, off, blink, heartbeat, network activity, Wi-Fi traffic — and works out which colours the LEDs behind one lens can make together. A connectivity watch can be installed from the phone: pick a colour for internet, upstream-only and no-upstream from that palette, preview it on the router, and a small procd service keeps the lens honest and survives upgrades.
+
 • Mesh. Network · Mesh turns on seamless hand-off (802.11r/k/v) across your SSIDs and makes your other OpenWrt routers nodes of this one, over a cable or an 802.11s wireless link. A node keeps your Wi-Fi and leaves DHCP, DNS and the firewall to the primary; a backup is saved first, the node rolls itself back if the app cannot reach it again, and Leave mesh restores it.
 
 • Two routers on the same address can both be saved. Pull down to refresh. Backup-screen crash fixes.
+
+• Terminal keyboard: the symbol layer has a second page (=\<) with backslash, brackets, braces, underscore, comma, backtick, caret and percent.

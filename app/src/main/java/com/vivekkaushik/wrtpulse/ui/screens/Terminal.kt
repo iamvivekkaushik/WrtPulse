@@ -326,9 +326,10 @@ fun TerminalScreen(
     fun sendKey(text: String) {
         if (engine == null) return
         val payload = keyPayload(text, ctrl, shift, alt)
-        // Every modifier is one-shot: it applies to this key and lets go.
+        // Every modifier is one-shot: it applies to this key and lets go. In the symbol layer
+        // shift is a page, not a modifier, and stays until the layer is left.
         ctrl = false
-        shift = false
+        if (!symbols) shift = false
         alt = false
         scope.launch { engine.send(payload) }
     }
@@ -510,7 +511,7 @@ fun TerminalScreen(
                 shift = shift,
                 symbols = symbols,
                 onShift = { shift = !shift },
-                onSymbols = { symbols = !symbols },
+                onSymbols = { symbols = !symbols; shift = false },
                 onKey = ::sendKey,
                 onBackspace = {
                     val echoed = engine?.current?.length ?: -1
@@ -702,7 +703,14 @@ private fun TerminalKeyboard(
         verticalArrangement = Arrangement.spacedBy(metrics.keyGap),
     ) {
         val h = metrics.key
-        val row1 = if (symbols) "1234567890" else "qwertyuiop"
+        // In the symbol layer ⇧ turns a second page, the way phone keyboards do: the shell
+        // characters the first page has no room for — backslash, brackets, underscore, comma,
+        // backtick, caret, percent — live on its top row.
+        val row1 = when {
+            symbols && shift -> "[]{}%^`_,\\"
+            symbols -> "1234567890"
+            else -> "qwertyuiop"
+        }
         val row2 = if (symbols) "-/:;()$&@\"" else "asdfghjkl"
         val row3 = if (symbols) "#+='*<>!?~" else "zxcvbnm"
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -712,7 +720,7 @@ private fun TerminalKeyboard(
             row2.forEach { c -> TermKey(shown(c, shift), 1f, h) { onKey(c.toString()) } }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            TermKey("⇧", 1.4f, h, alt = true, activeAlt = shift, onTap = onShift)
+            TermKey(if (symbols) "=\\<" else "⇧", 1.4f, h, alt = true, small = symbols, activeAlt = shift, onTap = onShift)
             row3.forEach { c -> TermKey(shown(c, shift), 1f, h) { onKey(c.toString()) } }
             TermKey("⌫", 1.4f, h, alt = true, repeat = true, onTap = onBackspace)
         }

@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.vivekkaushik.wrtpulse.BuildConfig
 import com.vivekkaushik.wrtpulse.data.BackupStore
+import com.vivekkaushik.wrtpulse.data.LedStore
 import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.PackageStore
 import com.vivekkaushik.wrtpulse.data.ServiceStore
@@ -56,12 +57,14 @@ fun SystemScreen(
     onBiometricToggle: (Boolean) -> Unit = {},
     packages: PackageStore? = null,
     services: ServiceStore? = null,
+    leds: LedStore? = null,
     backups: BackupStore? = null,
     routerName: String,
     onRouterTap: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenPackages: () -> Unit = {},
     onOpenServices: () -> Unit = {},
+    onOpenLeds: () -> Unit = {},
     onOpenFirmware: () -> Unit = {},
     onOpenReset: () -> Unit = {},
     onOpenCountry: () -> Unit = {},
@@ -129,6 +132,24 @@ fun SystemScreen(
                     extra = if (stalled > 0) {
                         { Box(Modifier.size(6.dp).background(Wrt.Amber, CircleShape)) }
                     } else null,
+                )
+                // Read when opened, like Services: the LED list is a sysfs walk plus the
+                // device tree, and the watch's colours only change when somebody changes them.
+                val watch = leds?.watch
+                SystemRow(
+                    WrtIcons.Leds, "LEDs",
+                    when {
+                        !isLive -> "3 LEDs · connectivity watch on"
+                        leds?.loaded == true ->
+                            "${leds.leds.size} LED${if (leds.leds.size == 1) "" else "s"} · " + when {
+                                watch?.installed != true -> "no connectivity watch"
+                                watch.running -> "connectivity watch on"
+                                else -> "connectivity watch stopped"
+                            }
+                        else -> "/sys/class/leds · connectivity watch"
+                    },
+                    subColor = if (isLive && watch?.installed == true && !watch.running) Wrt.Amber else Wrt.TextDim,
+                    onClick = if (isLive) onOpenLeds else null,
                 )
                 val updates = packages?.upgrades?.size ?: 0
                 SystemRow(

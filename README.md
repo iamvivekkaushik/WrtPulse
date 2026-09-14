@@ -19,7 +19,7 @@ cannot, the app does not pretend otherwise.
 | **Clients** | Every device on the router, wireless and wired, with signal, lease, and per-client usage when `nlbwmon` is installed. Rename, block, wake-on-LAN, and DHCP reservations. |
 | **Network** | **LAN & local network** — the subnet, the DHCP server on it, static leases, and the switch VLANs behind it. **Internet & WAN gateways** — the uplinks, their port and VLAN tag, the IPv4 protocol, IPv6 and prefix delegation, and a connection test. Radios and wireless interfaces. Add or edit APs and station (client) links, change channel, width, encryption and SSID. Every change is staged, shown as a diff, and applied in one `uci batch`. Neighbour scans suggest the least busy channel. **Mesh** — seamless hand-off across your SSIDs and your other OpenWrt routers as nodes, wired or over 802.11s. |
 | **Terminal** | A real SSH shell with a VT screen model — cursor addressing, scrollback, selection and paste — and multiple tabs on one connection. |
-| **System** | Live logs (`logread -f`), packages, services, firmware, backup & restore, regulatory domain, and SSH keys. |
+| **System** | Live logs (`logread -f`), packages, services, **LEDs** — every LED the router exposes with the modes its triggers allow, the colours the LEDs behind one lens can make together, and a connectivity watch (white / yellow / red, or whatever the lens can show) installed as a procd service — firmware, backup & restore, regulatory domain, and SSH keys. |
 
 ### LAN & local network, in more detail
 
