@@ -13,3 +13,5 @@
 • Add a node draws this router’s own sockets, read from its board file and switch VLANs, instead of a stock one-WAN-four-LAN router — a two-socket Deco is drawn with two sockets, the held one lit.
 
 • Terminal keyboard: the symbol layer has a second page (=\<) with backslash, brackets, braces, underscore, comma, backtick, caret and percent.
+
+• Far less load on the router. Reading the radios, the client list and the dashboard tick now use iw, netifd and rpcd instead of the iwinfo binary, which cost up to a second of CPU per call on MIPS routers: connecting went from ~10 s at 100% CPU to under a second, and the 1 Hz dashboard tick from 0.5 s to 0.1 s of CPU.

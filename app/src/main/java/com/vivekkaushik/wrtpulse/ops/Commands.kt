@@ -30,10 +30,12 @@ object Commands {
         // Every interface, so the upstream can be found by which one holds the default
         // route rather than by assuming it is called "wan".
         "echo $SECTION ifaces" to "ubus call network.interface dump 2>/dev/null || echo '{}'",
-        // iw is the cheap one: on a MIPS 74Kc bare `iwinfo` was 0.30 s of a 0.35 s tick and
-        // `iw dev` 0.20 s. iwinfo stays as the fallback for a build without iw.
+        // netifd already knows every wireless interface's SSID and answers over ubus in
+        // ~30 ms of CPU; `iw dev` cost 230 ms and bare `iwinfo` 800 ms per tick on a QCA956x,
+        // which at 1 Hz was a quarter to most of the router. Both stay as fallbacks.
         "echo $SECTION essid" to
-            "iw dev 2>/dev/null | grep -E 'Interface|ssid' || iwinfo 2>/dev/null | grep ESSID || true",
+            "ubus call network.wireless status 2>/dev/null || iw dev 2>/dev/null | grep -E 'Interface|ssid' || " +
+            "iwinfo 2>/dev/null | grep ESSID || true",
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
     /** Wireless config as UCI key=value lines. */
@@ -45,8 +47,21 @@ object Commands {
     /** Firewall config — which zone each network sits in, for the interface list. */
     const val FIREWALL_CONFIG = "uci show firewall"
 
-    /** Every wireless interface that is actually up: mode, channel, and a station's signal. */
-    const val IWINFO = "iwinfo 2>/dev/null"
+    /** Every wireless netdev, from sysfs — no driver round trip, a few ms. */
+    const val WIFI_IFACES = "for d in /sys/class/net/*; do [ -d \"\$d/phy80211\" ] && echo \"\${d##*/}\"; done"
+
+    /**
+     * Every wireless interface that is actually up: mode, channel, and a station's signal.
+     *
+     * `iw dev` plus one `iw dev <x> link` per interface, which is what tells a station's
+     * signal and the BSSID it joined; bare `iwinfo` only where iw is missing. On a QCA956x
+     * the iwinfo binary costs 0.8 s of CPU per run — it re-probes every phy through hostapd
+     * at start-up — against 0.3 s for the iw pair; [Parsers.iwinfo] reads both shapes.
+     */
+    const val IWINFO =
+        "if command -v iw >/dev/null 2>&1; then iw dev 2>/dev/null; " +
+        "for i in \$($WIFI_IFACES); do echo \"# link \$i\"; iw dev \"\$i\" link 2>/dev/null; done; " +
+        "else iwinfo 2>/dev/null; fi"
 
     /**
      * The channel widths each phy can actually run, from the capability lines of `iw phy`.
@@ -58,15 +73,25 @@ object Commands {
         "for p in /sys/class/ieee80211/*; do n=\${p##*/}; echo \"# \$n\"; " +
         "iw phy \$n info 2>/dev/null | grep -E 'HT20/HT40|Supported Channel Width|VHT Capabilities|HE PHY Capabilities|HE[0-9]+/|EHT PHY|Beamformer'; done"
 
-    /** Every dBm value each running interface's driver will accept — the TX power picker. */
+    /**
+     * Every dBm value each running interface's driver will accept — the TX power picker.
+     * rpcd's iwinfo module answers the same question over ubus for 66 ms of CPU where the
+     * iwinfo binary takes a second per interface; the binary stays for images without rpcd.
+     */
     const val TXPOWER_LISTS =
-        "for i in \$(iwinfo 2>/dev/null | grep ESSID | cut -d' ' -f1); do " +
-        "echo \"# \$i\"; iwinfo \$i txpowerlist 2>/dev/null; done"
+        "UB=; ubus list iwinfo >/dev/null 2>&1 && UB=1; for i in \$($WIFI_IFACES); do echo \"# \$i\"; " +
+        "if [ -n \"\$UB\" ]; then ubus call iwinfo txpowerlist \"{\\\"device\\\":\\\"\$i\\\"}\" 2>/dev/null; " +
+        "else iwinfo \$i txpowerlist 2>/dev/null; fi; done"
 
-    /** Associated stations per interface, so each SSID can report how many clients it has. */
+    /**
+     * Associated stations per interface, so each SSID can report how many clients it has.
+     * `iw station dump` is 16 ms of CPU per interface; `iwinfo assoclist` was 530 ms, and
+     * the clients screen asks every five seconds. [Parsers.stations] reads both shapes.
+     */
     const val ASSOC_COUNTS =
-        "for i in \$(iwinfo 2>/dev/null | grep ESSID | cut -d' ' -f1); do " +
-        "echo \"# \$i\"; iwinfo \$i assoclist 2>/dev/null; done"
+        "for i in \$($WIFI_IFACES); do echo \"# \$i\"; " +
+        "if command -v iw >/dev/null 2>&1; then iw dev \"\$i\" station dump 2>/dev/null; " +
+        "else iwinfo \$i assoclist 2>/dev/null; fi; done"
 
     /** The raw uci lines behind one wifi-iface — what a long-press reveals. */
     fun showSection(section: String) = "uci show wireless.$section 2>/dev/null"
@@ -76,9 +101,7 @@ object Commands {
         "echo $SECTION leases" to "cat /tmp/dhcp.leases 2>/dev/null",
         "echo $SECTION neigh" to "ip neigh show",
         "echo $SECTION wifi" to "ubus call network.wireless status",
-        "echo $SECTION assoc" to
-            "for i in \$(iwinfo 2>/dev/null | grep ESSID | cut -d' ' -f1); do " +
-            "echo \"# \$i\"; iwinfo \$i assoclist; done",
+        "echo $SECTION assoc" to ASSOC_COUNTS,
         "echo $SECTION blocked" to "uci show firewall 2>/dev/null | grep wrtpulse-block- || true",
         "echo $SECTION resv" to "uci show dhcp 2>/dev/null | grep -i host || true",
         "echo $SECTION nlbwbin" to "command -v nlbw 2>/dev/null || true",
@@ -141,7 +164,13 @@ object Commands {
      */
     const val PHY_NAMES =
         "for r in \$(uci -q show wireless | sed -n 's/^wireless\\.\\([^.=]*\\)=wifi-device\$/\\1/p'); do " +
-        "echo \"\$r \$(iwinfo nl80211 phyname \$r 2>/dev/null)\"; done"
+        // The radio's uci `path` is the tail of the phy's sysfs device path (pci0000:00/…,
+        // platform/ahb/…), so the match costs nothing; `iwinfo nl80211 phyname` is half a
+        // second of CPU per radio on ath79 and is kept for a path that does not match (a
+        // `+1` multi-phy suffix, or no path at all).
+        "p=\$(uci -q get wireless.\$r.path); n=; [ -n \"\$p\" ] && for d in /sys/class/ieee80211/*; do " +
+        "case \"\$(readlink -f \"\$d/device\" 2>/dev/null)\" in *\"/\$p\") n=\${d##*/};; esac; done; " +
+        "[ -n \"\$n\" ] || n=\$(iwinfo nl80211 phyname \$r 2>/dev/null); echo \"\$r \$n\"; done"
 
     /**
      * `wrt_scan <iface>` — the survey every scan path runs. Prints the neighbour list in `iw`

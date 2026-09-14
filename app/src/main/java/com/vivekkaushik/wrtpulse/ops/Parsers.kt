@@ -856,6 +856,12 @@ object Parsers {
      */
     fun essids(text: String): Map<String, String> {
         val out = LinkedHashMap<String, String>()
+        // `ubus call network.wireless status`: netifd's own view, the cheap first choice.
+        if (text.trimStart().startsWith("{")) {
+            wirelessStatus(text).filter { it.ifname.isNotEmpty() && it.ssid.isNotEmpty() }
+                .forEach { out[it.ifname] = it.ssid }
+            return out
+        }
         var iwIface: String? = null
         text.lineSequence().map { it.trim() }.forEach { line ->
             when {
@@ -1214,6 +1220,7 @@ object Parsers {
      * list how well an uplink is actually doing.
      */
     fun iwinfo(text: String): List<IwinfoIface> {
+        if (text.lineSequence().any { it.trimStart().startsWith("Interface ") }) return iwLive(text)
         val result = mutableListOf<IwinfoIface>()
         var ifname = ""
         var essid = ""
@@ -1258,8 +1265,57 @@ object Parsers {
     }
 
     /**
+     * The iw shape of [Commands.IWINFO]: `iw dev` blocks (`Interface x`, `addr`, `ssid`,
+     * `type`, `channel`, `txpower`) followed by one `# link x` block per interface, which for
+     * a station carries `Connected to <bssid>` and `signal: -N dBm`. Encryption is not
+     * something iw reports; the callers read it from uci.
+     */
+    private fun iwLive(text: String): List<IwinfoIface> {
+        val ifaces = LinkedHashMap<String, IwinfoIface>()
+        var name: String? = null
+        var ssid = ""; var addr = ""; var mode = ""; var channel: Int? = null; var txPower: Int? = null
+        fun flush() {
+            name?.let { ifaces[it] = IwinfoIface(it, ssid, if (mode == "Master") addr else "", mode, channel, null, "", txPower) }
+            name = null; ssid = ""; addr = ""; mode = ""; channel = null; txPower = null
+        }
+        var link: String? = null
+        for (raw in text.lineSequence()) {
+            val line = raw.trim()
+            when {
+                line.startsWith("# link ") -> { flush(); link = line.removePrefix("# link ").trim() }
+                link != null -> {
+                    val l = link ?: continue
+                    val cur = ifaces[l] ?: continue
+                    if (line.startsWith("Connected to ")) {
+                        MAC_ANY.find(line)?.let { ifaces[l] = cur.copy(bssid = it.value.uppercase()) }
+                    } else if (line.startsWith("signal:")) {
+                        Regex("(-?\\d+) dBm").find(line)?.let { ifaces[l] = cur.copy(signalDbm = it.groupValues[1].toInt()) }
+                    }
+                }
+                line.startsWith("Interface ") -> { flush(); name = line.removePrefix("Interface ").trim() }
+                name == null -> Unit
+                line.startsWith("addr ") -> addr = line.removePrefix("addr ").trim().uppercase()
+                line.startsWith("ssid ") -> ssid = line.removePrefix("ssid ").trim()
+                line.startsWith("type ") -> mode = when (line.removePrefix("type ").trim()) {
+                    "AP", "AP/VLAN" -> "Master"
+                    "managed" -> "Client"
+                    "mesh point" -> "Mesh Point"
+                    "IBSS" -> "Ad-Hoc"
+                    "monitor" -> "Monitor"
+                    else -> line.removePrefix("type ").trim()
+                }
+                line.startsWith("channel ") -> channel = line.removePrefix("channel ").trim().substringBefore(' ').toIntOrNull()
+                line.startsWith("txpower ") -> txPower = line.removePrefix("txpower ").trim().substringBefore(' ').toDoubleOrNull()?.toInt()
+            }
+        }
+        flush()
+        return ifaces.values.toList()
+    }
+
+    /**
      * [Commands.TXPOWER_LISTS] → ifname → the dBm values its driver accepts, ascending.
-     * Lines are `  26 dbm ( 398 mW)`, the current one starred; "# <ifname>" starts a block.
+     * "# <ifname>" starts a block; inside it either iwinfo's `  26 dbm ( 398 mW)` lines, the
+     * current one starred, or rpcd's `"dbm": 26,` entries.
      */
     fun txpowerLists(text: String): Map<String, List<Int>> {
         val out = LinkedHashMap<String, MutableList<Int>>()
@@ -1267,7 +1323,8 @@ object Parsers {
         text.lineSequence().map { it.trim() }.forEach { line ->
             when {
                 line.startsWith("# ") -> ifname = line.removePrefix("# ").trim().also { out[it] = mutableListOf() }
-                ifname != null -> Regex("^\\*?\\s*(\\d+) dbm").find(line)?.let { out[ifname]!! += it.groupValues[1].toInt() }
+                ifname != null -> (Regex("^\\*?\\s*(\\d+) dbm").find(line) ?: Regex("^\"dbm\":\\s*(\\d+)").find(line))
+                    ?.let { out[ifname]!! += it.groupValues[1].toInt() }
             }
         }
         return out.mapValues { it.value.sorted() }
@@ -1916,8 +1973,18 @@ object Parsers {
                     mac = MAC_HEAD.find(line)!!.value.lowercase()
                     signal = Regex("(-?\\d+) dBm").find(line)?.groupValues?.get(1)?.toIntOrNull() ?: 0
                 }
-                line.startsWith("RX:") -> rx = rateOf(line)
-                line.startsWith("TX:") -> tx = rateOf(line)
+                // `iw station dump`: `Station <mac> (on <iface>)`, then `signal: -52 [-59, -53] dBm`,
+                // `tx bitrate: 7.2 MBit/s …`, `rx bitrate: …`. Same meaning as iwinfo's RX/TX:
+                // the rate the AP receives at and sends at.
+                line.startsWith("Station ") -> {
+                    flush()
+                    mac = MAC_ANY.find(line)?.value?.lowercase()
+                    Regex("\\(on ([^)]+)\\)").find(line)?.let { iface = it.groupValues[1] }
+                }
+                line.startsWith("signal:") && mac != null ->
+                    signal = Regex("(-?\\d+)").find(line.removePrefix("signal:"))?.groupValues?.get(1)?.toIntOrNull() ?: signal
+                line.startsWith("RX:") || line.startsWith("rx bitrate:") -> rx = rateOf(line)
+                line.startsWith("TX:") || line.startsWith("tx bitrate:") -> tx = rateOf(line)
             }
         }
         flush()
