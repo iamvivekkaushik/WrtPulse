@@ -1,6 +1,7 @@
 package com.vivekkaushik.wrtpulse.ops
 
 import com.vivekkaushik.wrtpulse.data.NodeSetup
+import com.vivekkaushik.wrtpulse.net.ExecResult
 import com.vivekkaushik.wrtpulse.net.JumpSession
 import com.vivekkaushik.wrtpulse.net.SshTarget
 import org.junit.Assert.assertEquals
@@ -179,6 +180,33 @@ class JumpSessionTest {
         assertTrue(line.endsWith("echo '\\''a b'\\'''"))
         // An empty password is a fresh install, and is legal.
         assertTrue(JumpSession.wrap(target, "", "true").startsWith("DROPBEAR_PASSWORD='' dbclient"))
+    }
+
+    @Test
+    fun `a normal router answers the probe with its board`() {
+        val v = NodeSetup.hopVerdict(ExecResult("tplink,deco-m4r-v1\n{ \"board_name\": \"tplink,deco-m4r-v1\", \"model\": \"TP-Link Deco M4R v1\" }\n", "", 0))
+        assertTrue(v is NodeSetup.HopVerdict.Board)
+        assertTrue((v as NodeSetup.HopVerdict.Board).json.startsWith("{"))
+    }
+
+    @Test
+    fun `a wrong password is dropbear closing the session before anything ran`() {
+        val v = NodeSetup.hopVerdict(ExecResult("", "dbclient: Connection to root@fe80::1%br-setup:22 exited: Remote closed the connection", 1))
+        assertEquals(NodeSetup.HopVerdict.Refused, v)
+    }
+
+    @Test
+    fun `failsafe mode is named, not mistaken for a refused password`() {
+        // No ubus in failsafe: the board call prints nothing and exits 255, which used to read as "refused".
+        val v = NodeSetup.hopVerdict(ExecResult("wrtpulse-failsafe\ntplink,deco-m4r-v1\n", "", 0))
+        assertEquals(NodeSetup.HopVerdict.Failsafe("tplink,deco-m4r-v1"), v)
+    }
+
+    @Test
+    fun `anything else is reported with dropbear's last line`() {
+        val v = NodeSetup.hopVerdict(ExecResult("", "dbclient: Connection to root@x:22 exited: Connect failed: Host is unreachable", 1))
+        assertEquals(NodeSetup.HopVerdict.NoAnswer("dbclient: Connection to root@x:22 exited: Connect failed: Host is unreachable"), v)
+        assertEquals(NodeSetup.HopVerdict.NoAnswer("nothing came back"), NodeSetup.hopVerdict(ExecResult("", "", 255)))
     }
 
     @Test

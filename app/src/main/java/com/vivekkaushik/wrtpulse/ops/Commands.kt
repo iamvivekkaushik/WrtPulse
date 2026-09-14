@@ -14,6 +14,21 @@ object Commands {
     /** `ubus call system board` — model, board id, OpenWrt release. */
     const val BOARD = "ubus call system board"
 
+    /**
+     * The first thing asked of a router reached over the setup cable. Failsafe mode has no
+     * ubus and no overlay, so the board call alone would look like a dead router; the marker
+     * file names the state instead, and the board name comes from sysinfo either way.
+     */
+    const val HOP_PROBE =
+        "[ -f /tmp/.failsafe ] && echo wrtpulse-failsafe; cat /tmp/sysinfo/board_name 2>/dev/null; $BOARD 2>/dev/null; true"
+
+    /**
+     * From failsafe mode: mount the overlay, wipe it, reboot into a fresh install. The reboot
+     * is detached because the reply cannot outlive it.
+     */
+    const val FAILSAFE_WIPE =
+        "mount_root >/dev/null 2>&1; firstboot -y >/dev/null 2>&1; (sleep 1; reboot -f) >/dev/null 2>&1 & echo wiped"
+
     /** One tick of dashboard state. Sections are delimited so the parser can split cheaply. */
     val DASHBOARD_TICK = listOf(
         "echo $SECTION info" to "ubus call system info",

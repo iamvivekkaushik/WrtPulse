@@ -142,6 +142,8 @@ class MeshStore(private val session: RouterSession) : Refreshable {
     /** identity → the mesh point MAC the node reported when last read; truer than the saved row. */
     val liveMeshMacs = mutableStateMapOf<String, String>()
     var syncing by mutableStateOf(false); private set
+    /** A push is writing to the nodes right now, as opposed to a read-only check. */
+    var pushing by mutableStateOf(false); private set
     var syncNotice by mutableStateOf<String?>(null); private set
 
     /** Where the profile goes after every read. */
@@ -162,7 +164,13 @@ class MeshStore(private val session: RouterSession) : Refreshable {
             loaded = true
             error = null
             // A node has no profile to offer: its SSIDs are copies, its LAN is someone else's.
-            profile = profileFrom().also { p -> if (!configuredAsNode) profileSink?.let { sink -> runCatching { sink(p) } } }
+            // The profile is in place before the sink suspends on the database, so a node check
+            // that starts meanwhile finds it; a slow write must not hold the refresh loop either.
+            val built = profileFrom()
+            profile = built
+            if (!configuredAsNode) profileSink?.let { sink ->
+                runCatching { kotlinx.coroutines.withTimeoutOrNull(10_000) { sink(built) } }
+            }
         } catch (e: SshException) {
             error = e.message
         }
@@ -596,6 +604,7 @@ class MeshStore(private val session: RouterSession) : Refreshable {
         // The primary's side first: the trunks the nodes' guest and IoT traffic will ride.
         if (p.extras.isNotEmpty()) ensureTrunks()
         syncing = true
+        pushing = true
         syncNotice = null
         var pushed = 0
         var failed = 0
@@ -640,6 +649,7 @@ class MeshStore(private val session: RouterSession) : Refreshable {
             }
         } finally {
             syncing = false
+            pushing = false
         }
         syncNotice = when {
             failed == 0 -> "Wi-Fi pushed to $pushed node${if (pushed == 1) "" else "s"}."

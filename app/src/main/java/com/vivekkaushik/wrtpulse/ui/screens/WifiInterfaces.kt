@@ -2077,11 +2077,7 @@ fun WifiSection(
         is WifiRoute.MeshAddNode -> if (meshHooks != null) AddNodeScreen(
             meshHooks,
             onBack = { pop() },
-            onJoin = { s, j ->
-                setup = s
-                join = j
-                push(WifiRoute.MeshJoin(meshHooks.current?.identity.orEmpty()))
-            },
+            onDone = { resetTo(WifiRoute.Home).also { push(WifiRoute.Mesh) } },
         ) else pop()
         is WifiRoute.MeshJoin -> {
             val j = join
