@@ -249,6 +249,22 @@ class MeshLinkTest {
     }
 
     @Test
+    fun `a wireless node with the link down and no 802_11s is offered the swap to finish`() {
+        // The stranded node: joined wireless, mesh point written, but wpad-basic cannot run it.
+        assertEquals(
+            WpadSwap("wpad-basic-mbedtls", "wpad-mesh-mbedtls"),
+            MeshOps.finishBackhaulSwap(Backhaul.Wireless, meshCapable = false, linkUp = false, installed = "wpad-basic-mbedtls"),
+        )
+        // Nothing to finish once the link is up, once the build already has 802.11s, or on a wired node.
+        assertNull(MeshOps.finishBackhaulSwap(Backhaul.Wireless, meshCapable = false, linkUp = true, installed = "wpad-basic-mbedtls"))
+        assertNull(MeshOps.finishBackhaulSwap(Backhaul.Wireless, meshCapable = true, linkUp = false, installed = "wpad-mesh-mbedtls"))
+        assertNull(MeshOps.finishBackhaulSwap(Backhaul.Wired, meshCapable = false, linkUp = false, installed = "wpad-basic-mbedtls"))
+        // A build the swap does not know how to grow, and one that has no wpad at all, offer nothing.
+        assertNull(MeshOps.finishBackhaulSwap(Backhaul.Wireless, meshCapable = false, linkUp = false, installed = "wpad"))
+        assertNull(MeshOps.finishBackhaulSwap(Backhaul.Wireless, meshCapable = false, linkUp = false, installed = ""))
+    }
+
+    @Test
     fun `the swap script is one apk transaction and a download-first opkg dance`() {
         val apk = Commands.wpadSwap("wpad-basic-mbedtls", "wpad-mesh-mbedtls", "apk")
         assertTrue(apk.contains("apk add 'wpad-mesh-mbedtls' '!wpad-basic-mbedtls'"))

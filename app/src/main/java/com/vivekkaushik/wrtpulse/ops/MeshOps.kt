@@ -652,6 +652,18 @@ object MeshOps {
         }
     }
 
+    /**
+     * The wpad swap a wireless node still needs to bring its backhaul up, or null when there is
+     * nothing to finish. A node joined wireless carries the mesh point the join wrote, but a
+     * build without 802.11s cannot bring it up: the swap failed during the join — often because
+     * the node had no internet at that point — and it is offered again from the node's own Mesh
+     * page. A wired node, one already mesh-capable, and a link that is already up all return null.
+     */
+    fun finishBackhaulSwap(backhaul: Backhaul, meshCapable: Boolean, linkUp: Boolean, installed: String): WpadSwap? {
+        if (backhaul != Backhaul.Wireless || linkUp) return null
+        return wpadSwap(installed, meshCapable)
+    }
+
     /** A hostname the kernel and every neighbour will accept: letters, digits and dashes. */
     fun hostnameOf(name: String): String {
         val cleaned = name.trim().replace(Regex("[^A-Za-z0-9-]+"), "-").trim('-')

@@ -57,6 +57,7 @@ import com.vivekkaushik.wrtpulse.data.NodeSync
 import com.vivekkaushik.wrtpulse.db.RouterEntity
 import com.vivekkaushik.wrtpulse.ops.Backhaul
 import com.vivekkaushik.wrtpulse.ops.MeshOps
+import com.vivekkaushik.wrtpulse.ops.WpadSwap
 import com.vivekkaushik.wrtpulse.ui.FilterChip
 import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.GhostButton
@@ -847,6 +848,10 @@ private fun NodeView(hooks: MeshHooks, store: MeshStore, entity: RouterEntity, o
         style = sans(11f, 400, Wrt.TextDim, lineHeight = 16.sp),
         modifier = Modifier.padding(horizontal = 2.dp),
     )
+    // A wireless node whose wpad swap did not run during the join carries the mesh point but
+    // cannot bring it up, so it is on the cable only. The swap is offered again from here.
+    val finishSwap = if (store.loaded) MeshOps.finishBackhaulSwap(Backhaul.of(entity.meshBackhaul) ?: Backhaul.Wired, store.meshCapable, linkUp, store.wpad) else null
+    finishSwap?.let { FinishBackhaulCard(store, it, primaryName) }
     val restorable = entity.meshSnapshot != null || store.onRouterSnapshot
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
@@ -864,6 +869,48 @@ private fun NodeView(hooks: MeshHooks, store: MeshStore, entity: RouterEntity, o
             danger = true,
             onConfirm = onLeave,
         )
+    }
+}
+
+/**
+ * A wireless node stranded on its cable: the mesh point is written, but the wpad build has no
+ * 802.11s to run it. Retries the swap that could not finish during the join — the detached form,
+ * since the app reaches the node over its own LAN — and the mesh point comes up on the reload.
+ */
+@Composable
+private fun FinishBackhaulCard(store: MeshStore, swap: WpadSwap, primaryName: String) {
+    val scope = rememberCoroutineScope()
+    val problems = store.meshProblems()
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(1.dp, Wrt.Amber, RoundedCornerShape(14.dp))
+            .background(Wrt.BgCard, RoundedCornerShape(14.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text("Finish the wireless backhaul", style = sans(13.5f, 650))
+        Text(
+            "This node joined over the mesh, but its wpad build has no 802.11s, so the mesh point cannot come " +
+                "up and it reaches $primaryName over the cable only. Installing ${swap.install} completes the swap " +
+                "that could not run during the join; it downloads through $primaryName, so keep the cable in.",
+            style = sans(11.5f, 400, Wrt.TextSecondary, lineHeight = 17.sp),
+        )
+        if (store.swapping) {
+            StateLine("installing — the radios restart, the app reconnects", Wrt.Amber)
+            store.swapLog?.let { Text(it, style = mono(9.5f, 500, Wrt.TextDim), modifier = Modifier.padding(top = 6.dp)) }
+        } else {
+            NoteLine("${swap.install} replaces ${swap.remove} (about 450 kB more). Wi-Fi on this node drops for about a minute while it swaps; the app reconnects on its own.", Wrt.TextSecondary)
+            store.overlayFreeKb?.let { NoteLine("$it kB free on the overlay", Wrt.TextDim) }
+            problems.forEach { NoteLine(it, Wrt.Red) }
+            if (problems.none { it.startsWith("Only") }) {
+                TwoTapButton("Install ${swap.install}", "Tap again — Wi-Fi drops for a minute") {
+                    scope.launch { store.swapWpad() }
+                }
+            }
+        }
+        store.notice?.let { NoteLine(it, Wrt.Accent) }
+        store.error?.let { NoteLine(it, Wrt.Red) }
     }
 }
 
