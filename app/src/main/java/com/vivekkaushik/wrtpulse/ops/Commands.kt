@@ -113,8 +113,8 @@ object Commands {
 
     /** Installs, enables, and starts nlbwmon; succeeds only if the nlbw binary lands. */
     val NLBW_INSTALL: String =
-        "if command -v apk >/dev/null; then apk add nlbwmon >/dev/null 2>&1; " +
-        "else opkg install nlbwmon >/dev/null 2>&1; fi; " +
+        "if command -v apk >/dev/null; then apk update >/dev/null 2>&1; apk add nlbwmon >/dev/null 2>&1; " +
+        "else opkg update >/dev/null 2>&1; opkg install nlbwmon >/dev/null 2>&1; fi; " +
         "/etc/init.d/nlbwmon enable 2>/dev/null; /etc/init.d/nlbwmon start 2>/dev/null; " +
         "command -v nlbw"
 
@@ -506,7 +506,10 @@ object Commands {
     fun installPlan(pkg: String): String = listOf(
         "echo $SECTION pm",
         DETECT_PACKAGE_MANAGER,
-        "if command -v apk >/dev/null 2>&1; then PLAN=\$(apk add --simulate '$pkg' 2>&1); " +
+        // Refresh the index first on both managers. apk resolves against a local index that a
+        // fresh router has never fetched; without the update the simulate reports the package as
+        // "no such package", which reads as the feed not offering it at all.
+        "if command -v apk >/dev/null 2>&1; then apk update >/dev/null 2>&1; PLAN=\$(apk add --simulate '$pkg' 2>&1); " +
             "else opkg update >/dev/null 2>&1; PLAN=\$(opkg install --noaction '$pkg' 2>&1); fi",
         "echo $SECTION plan",
         "echo \"\$PLAN\"",
@@ -544,8 +547,8 @@ object Commands {
      * the more surprising outcome. Failure keeps its exit code so the app can report it.
      */
     fun installPackage(pkg: String): String =
-        "if command -v apk >/dev/null 2>&1; then apk add '$pkg' || exit 1; " +
-        "else opkg install '$pkg' || exit 1; fi; " +
+        "if command -v apk >/dev/null 2>&1; then apk update >/dev/null 2>&1; apk add '$pkg' || exit 1; " +
+        "else opkg update >/dev/null 2>&1; opkg install '$pkg' || exit 1; fi; " +
         "if [ -x /etc/init.d/$pkg ]; then /etc/init.d/$pkg enable >/dev/null 2>&1; " +
         "/etc/init.d/$pkg start >/dev/null 2>&1; fi; echo installed"
 
@@ -1442,13 +1445,20 @@ object Commands {
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
     /**
-     * Replaces the wpad build with the one that has 802.11s, detached, because the swap
-     * restarts every radio and takes the link with it. apk does it as one transaction that
-     * also pulls the matching hostapd-common; opkg downloads first so the box is never left
-     * with no wpad at all, and puts the old one back if the new one will not install.
-     * Writes `ok` or `failed` to `$MESH_DIR/swap` when done, which the app polls.
+     * Replaces the wpad build with the one that has 802.11s. apk does it as one transaction
+     * that also pulls the matching hostapd-common; opkg downloads first so the box is never
+     * left with no wpad at all, and puts the old one back if the new one will not install.
+     * Either way the marker `$MESH_DIR/swap` ends up holding `ok` or `failed`.
+     *
+     * [detached] is the difference between the two control paths. When the phone is on this
+     * router's own Wi-Fi, the swap restarts every radio and takes that link with it, so it has
+     * to run detached and the app polls the marker while the Wi-Fi is gone. When the app
+     * reaches the router over Ethernet instead — a node found on the primary's LAN through the
+     * cable — the radio bounce never touches the control path, so the swap runs in the
+     * foreground and prints its verdict as the last line: a detached job that outlives its
+     * channel is not needed, and would be culled by SIGHUP before a slow download finished.
      */
-    fun wpadSwap(remove: String, install: String, manager: String): String {
+    fun wpadSwap(remove: String, install: String, manager: String, detached: Boolean = true): String {
         require(safePackageName(remove) && safePackageName(install)) { "package name" }
         val safeRemove = remove
         val safeInstall = install
@@ -1460,10 +1470,11 @@ object Commands {
                 "(opkg install /tmp/${safeInstall}_*.ipk >>$MESH_DIR/swap.log 2>&1 || " +
                 "opkg install '$safeRemove' >>$MESH_DIR/swap.log 2>&1); rm -f /tmp/${safeInstall}_*.ipk"
         }
-        return "mkdir -p $MESH_DIR && rm -f $MESH_DIR/swap && (" +
-            "$swap; [ -x /etc/init.d/wpad ] && /etc/init.d/wpad restart; wifi down; sleep 2; wifi up; sleep 3; " +
-            "if wpa_supplicant -vmesh >/dev/null 2>&1; then echo ok > $MESH_DIR/swap; else echo failed > $MESH_DIR/swap; fi" +
-            ") >/dev/null 2>&1 & echo scheduled"
+        val run = "$swap; [ -x /etc/init.d/wpad ] && /etc/init.d/wpad restart; wifi down; sleep 2; wifi up; sleep 3; " +
+            "if wpa_supplicant -vmesh >/dev/null 2>&1; then echo ok > $MESH_DIR/swap; else echo failed > $MESH_DIR/swap; fi"
+        val prefix = "mkdir -p $MESH_DIR && rm -f $MESH_DIR/swap && "
+        return if (detached) "$prefix($run) >/dev/null 2>&1 & echo scheduled"
+        else "$prefix($run) >/dev/null 2>&1; cat $MESH_DIR/swap"
     }
 
     /** What the swap wrote, or `pending` while it is still running. */

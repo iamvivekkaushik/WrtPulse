@@ -20,8 +20,16 @@ class JumpSession(
 
     override val isConnected: Boolean get() = via.isConnected
 
-    override suspend fun exec(command: String, timeoutMs: Long): ExecResult =
-        via.exec(wrap(target, password, command) + " </dev/null", timeoutMs + HOP_MS)
+    /**
+     * Two dropbears see this command: the primary's, as the `dbclient` line, and the new
+     * router's, as what that line asks it to run. Past the exec limit on either, the command
+     * goes over as a script on stdin, through both — the line the primary runs stays short.
+     */
+    override suspend fun exec(command: String, timeoutMs: Long): ExecResult {
+        val line = wrap(target, password, command)
+        return if (fitsExec(line)) via.exec("$line </dev/null", timeoutMs + HOP_MS)
+        else via.execWithInput(wrap(target, password, STDIN_SCRIPT), command.toByteArray(), timeoutMs + HOP_MS)
+    }
 
     override suspend fun execWithInput(command: String, input: ByteArray, timeoutMs: Long): ExecResult =
         via.execWithInput(wrap(target, password, command), input, timeoutMs + HOP_MS)

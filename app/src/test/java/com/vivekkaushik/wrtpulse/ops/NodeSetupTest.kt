@@ -5,6 +5,7 @@ import com.vivekkaushik.wrtpulse.net.ExecResult
 import com.vivekkaushik.wrtpulse.ops.Parsers
 import com.vivekkaushik.wrtpulse.ops.Commands
 import com.vivekkaushik.wrtpulse.net.JumpSession
+import com.vivekkaushik.wrtpulse.net.RouterSession
 import com.vivekkaushik.wrtpulse.net.SshTarget
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -182,6 +183,55 @@ class JumpSessionTest {
         assertTrue(line.endsWith("echo '\\''a b'\\'''"))
         // An empty password is a fresh install, and is legal.
         assertTrue(JumpSession.wrap(target, "", "true").startsWith("DROPBEAR_PASSWORD='' dbclient"))
+    }
+
+    /** The primary only remembers what it was asked to run for the hop. */
+    private class RecordingPrimary : RouterSession(SshTarget("192.168.0.1", identity = "primary"), NoClient, { error("unused") }) {
+        val execs = mutableListOf<String>()
+        val inputs = mutableListOf<Pair<String, String>>()
+        override val isConnected = true
+        override suspend fun exec(command: String, timeoutMs: Long): ExecResult {
+            execs += command
+            return ExecResult("", "", 0)
+        }
+        override suspend fun execWithInput(command: String, input: ByteArray, timeoutMs: Long): ExecResult {
+            inputs += command to input.toString(Charsets.UTF_8)
+            return ExecResult("", "", 0)
+        }
+    }
+
+    private object NoClient : com.vivekkaushik.wrtpulse.net.SshClient {
+        override suspend fun probeHostKey(target: SshTarget) = error("unused")
+        override suspend fun connect(target: SshTarget, auth: com.vivekkaushik.wrtpulse.net.SshAuth, connectTimeoutMs: Long) = error("unused")
+    }
+
+    @Test
+    fun `a short command rides the dbclient line with nothing on stdin`() = kotlinx.coroutines.runBlocking {
+        val primary = RecordingPrimary()
+        val target = SshTarget("fe80::1%br-setup", 22, "root", "id")
+        JumpSession(primary, target, "").exec("echo hi", 5_000)
+        assertEquals(listOf(JumpSession.wrap(target, "", "echo hi") + " </dev/null"), primary.execs)
+        assertTrue(primary.inputs.isEmpty())
+    }
+
+    /**
+     * The node batch for a primary carrying several SSIDs is longer than one exec request may
+     * be — on the new router's dropbear and, wrapped, on the primary's. It goes over as a script
+     * on stdin through both, and the line the primary runs stays short.
+     */
+    @Test
+    fun `a long command goes through the hop as a script on stdin`() = kotlinx.coroutines.runBlocking {
+        val primary = RecordingPrimary()
+        val target = SshTarget("fe80::1%br-setup", 22, "root", "id")
+        val script = Commands.nodeApply(List(300) { "set wireless.wrtpulse_ap_$it.ssid='Home Wi-Fi'" }, listOf("network", "wireless"), 180)
+        assertFalse(RouterSession.fitsExec(script))
+        JumpSession(primary, target, "pw").exec(script, 30_000)
+        assertTrue(primary.execs.isEmpty())
+        val (line, input) = primary.inputs.single()
+        assertEquals(JumpSession.wrap(target, "pw", RouterSession.STDIN_SCRIPT), line)
+        assertTrue(line.endsWith("'sh -c \"\$(cat)\"'"))
+        assertTrue(RouterSession.fitsExec(line))
+        assertEquals(script, input)
     }
 
     private val M = Commands.SECTION

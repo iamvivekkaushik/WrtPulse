@@ -83,8 +83,14 @@ open class RouterSession(
         }
     }
 
-    /** Runs a command on the shared connection, reconnecting once if the link dropped. */
+    /**
+     * Runs a command on the shared connection, reconnecting once if the link dropped. A
+     * command too long for one exec request travels as a script on stdin instead — dropbear
+     * drops the whole connection on a request past its limit, which the client only sees as
+     * a channel that closed with no exit status.
+     */
     open suspend fun exec(command: String, timeoutMs: Long = 15_000): ExecResult {
+        if (!fitsExec(command)) return execWithInput(STDIN_SCRIPT, command.toByteArray(), timeoutMs)
         val existing = connection?.takeIf { it.isConnected } ?: ensureConnected()
         return try {
             existing.exec(command, timeoutMs)
@@ -145,4 +151,17 @@ open class RouterSession(
 
     /** 0.5 s, 1 s, 2 s, 4 s, capped at 8 s — fast enough to feel live, slow enough to not hammer. */
     private fun backoffMs(attempt: Int): Long = (500L shl (attempt - 1)).coerceAtMost(8_000L)
+
+    companion object {
+        /** dropbear refuses an exec request longer than its MAX_CMD_LEN of 9000 bytes; keep clear of it. */
+        const val MAX_EXEC_BYTES = 8_000
+
+        /**
+         * How a long command runs: the far shell reads the whole script off stdin first, then
+         * runs it with stdin already drained, so nothing inside it can eat its own tail.
+         */
+        const val STDIN_SCRIPT = "sh -c \"\$(cat)\""
+
+        fun fitsExec(command: String): Boolean = command.toByteArray().size <= MAX_EXEC_BYTES
+    }
 }

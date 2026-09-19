@@ -248,7 +248,7 @@ class MeshJoin(
             // primary the node has no internet yet, so this waits until it is on the LAN.
             if (plan.swap != null && !viaPrimary) {
                 step(i, JoinStep.State.Running, "downloading; Wi-Fi here drops for about a minute")
-                val ok = swapWpad(session, plan.swap.remove, plan.swap.install) { step(i, JoinStep.State.Running, it) }
+                val ok = swapWpad(session, plan.swap.remove, plan.swap.install, wired = false) { step(i, JoinStep.State.Running, it) }
                 if (!ok) {
                     step(i, JoinStep.State.Failed, "the router kept ${plan.swap.remove}")
                     error = "${plan.swap.install} did not install. Nothing else was changed."
@@ -329,7 +329,7 @@ class MeshJoin(
             // the primary at last. The mesh point the batch wrote comes up on the reload.
             if (plan.swap != null && viaPrimary) {
                 step(i, JoinStep.State.Running, "downloading through ${profile.primaryName}")
-                val ok = swapWpad(found, plan.swap.remove, plan.swap.install) { step(i, JoinStep.State.Running, it) }
+                val ok = swapWpad(found, plan.swap.remove, plan.swap.install, wired = true) { step(i, JoinStep.State.Running, it) }
                 if (!ok) {
                     step(i, JoinStep.State.Failed, "the node kept ${plan.swap.remove}")
                     error = "${plan.swap.install} did not install, so the node has no mesh point yet. It works wired; retry the swap from its Mesh page."
@@ -354,8 +354,25 @@ class MeshJoin(
         }
     }
 
-    private suspend fun swapWpad(on: RouterSession, remove: String, install: String, onProgress: (String) -> Unit): Boolean {
+    /**
+     * Runs the wpad swap on [on] and says whether the router ended up mesh-capable. [wired] is
+     * the control path: over Ethernet (a node found on the primary's LAN through the cable) the
+     * swap runs to completion in one call, since the radio bounce never drops the link, and its
+     * verdict comes straight back on the last line — no detached job to be culled before a slow
+     * download finishes, which is what left a node on the old build with the mesh point down.
+     * Over Wi-Fi it detaches and the marker is polled while the radios are gone.
+     */
+    private suspend fun swapWpad(on: RouterSession, remove: String, install: String, wired: Boolean, onProgress: (String) -> Unit): Boolean {
         val manager = state?.manager ?: "opkg"
+        if (wired) {
+            onProgress("installing…")
+            return try {
+                on.exec(Commands.wpadSwap(remove, install, manager, detached = false), timeoutMs = SWAP_SYNC_MS)
+                    .stdout.trim().lines().lastOrNull()?.trim() == "ok"
+            } catch (e: SshException) {
+                false
+            }
+        }
         try {
             on.exec(Commands.wpadSwap(remove, install, manager), timeoutMs = 20_000).requireOk("swap wpad")
         } catch (e: SshException) {
@@ -438,5 +455,8 @@ class MeshJoin(
 
     companion object {
         private const val SWAP_WAIT_NANOS = 240_000_000_000L
+
+        /** A foreground swap over Ethernet: one apk transaction plus a radio bounce, with room to spare. */
+        private const val SWAP_SYNC_MS = 200_000L
     }
 }

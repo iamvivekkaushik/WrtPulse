@@ -274,6 +274,22 @@ class MeshLinkTest {
         assertTrue(opkg.indexOf("opkg download") < opkg.indexOf("opkg remove"))
         assertTrue(opkg.contains("|| opkg install 'wpad-basic-mbedtls'"))
     }
+
+    /**
+     * The foreground form for the wired control path: the same swap body, but it waits for the
+     * whole thing and prints the verdict instead of backgrounding it. A detached job here was
+     * culled with its channel before the download finished, leaving the node on the old build.
+     */
+    @Test
+    fun `the wired swap runs in the foreground and prints its verdict`() {
+        val sync = Commands.wpadSwap("wpad-basic-mbedtls", "wpad-mesh-mbedtls", "apk", detached = false)
+        assertFalse(sync.contains("& echo scheduled"))
+        assertTrue(sync.contains("apk add 'wpad-mesh-mbedtls' '!wpad-basic-mbedtls'"))
+        assertTrue(sync.trimEnd().endsWith("cat ${Commands.MESH_DIR}/swap"))
+        // Both forms write the same marker, so the verdict the caller reads means the same thing.
+        assertTrue(sync.contains("echo ok > ${Commands.MESH_DIR}/swap"))
+        assertTrue(sync.contains("echo failed > ${Commands.MESH_DIR}/swap"))
+    }
 }
 
 class MeshAddressTest {

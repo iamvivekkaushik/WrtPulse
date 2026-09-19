@@ -1,1 +1,2 @@
 • Mesh: a node that joined over the 802.11s link but could not finish its wpad swap during setup — often because it had no internet at the time — is no longer stranded on its cable. Its Mesh page now offers Finish the wireless backhaul, which completes the swap and brings the mesh point up, all without leaving and rejoining.
+• Fixes: adding a node no longer fails partway when your Wi-Fi carries several networks, and per-client usage setup no longer wrongly says the feed lacks nlbwmon.

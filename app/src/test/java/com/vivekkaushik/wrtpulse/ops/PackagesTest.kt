@@ -343,4 +343,24 @@ class PackageCommandTest {
     fun `the nlbwmon consent plan is the same plan every package gets`() {
         assertEquals(Commands.installPlan("nlbwmon"), Commands.NLBW_PLAN)
     }
+
+    /**
+     * apk resolves against a local index a fresh router has never fetched, so the plan and the
+     * install must refresh it first — otherwise the simulate reports the package as "no such
+     * package" and the app tells the user the feed doesn't offer it, which is wrong.
+     */
+    @Test
+    fun `install commands refresh the index on both managers before resolving`() {
+        listOf(
+            Commands.installPlan("nlbwmon"),
+            Commands.installPackage("nlbwmon"),
+            Commands.NLBW_INSTALL,
+        ).forEach { command ->
+            assertTrue(command, command.contains("apk update"))
+            assertTrue(command, command.contains("opkg update"))
+        }
+        // The refresh comes before the resolve, not after it.
+        val plan = Commands.installPlan("nlbwmon")
+        assertTrue(plan.indexOf("apk update") < plan.indexOf("apk add --simulate"))
+    }
 }
