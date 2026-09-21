@@ -77,6 +77,9 @@ class OnboardingFlow(
         )
 
     /** "Add router": a blank form under a new identity. */
+    /** The router was renamed from the System screen: what the board says follows. */
+    fun hostnameChanged(hostname: String) { board = board?.copy(hostname = hostname) }
+
     fun startNew() {
         identity = RouterEntity.newIdentity()
         keyPem = null
@@ -233,14 +236,7 @@ class OnboardingFlow(
                     privateKey = keyPem?.let { WrtRuntime.vault.seal(it) },
                     lastSeenEpoch = System.currentTimeMillis() / 1000,
                     identity = identity,
-                    // A reconnect is not a reason to forget what the mesh screens wrote here:
-                    // which primary this router belongs to, or the profile its nodes are built from.
-                    meshPrimary = existing?.meshPrimary,
-                    meshBackhaul = existing?.meshBackhaul,
-                    meshSnapshot = existing?.meshSnapshot,
-                    meshMac = existing?.meshMac,
-                    meshProfile = existing?.meshProfile,
-                )
+                ).keptAcrossReconnect(existing)
             )
         }
     }
@@ -309,6 +305,23 @@ class OnboardingFlow(
          */
         fun savedName(existing: String?, derived: String): String =
             existing?.trim()?.takeIf { it.isNotEmpty() } ?: derived
+
+        /**
+         * A reconnect rewrites the row from what the router just said, and is not a reason to
+         * forget what only this app knows about it: which mesh primary it belongs to, the
+         * profile its nodes are built from, and the group it is filed under on the list. Every
+         * column that is written from the app side, not the router side, has to be listed here,
+         * or the REPLACE upsert quietly nulls it on the next connect.
+         */
+        fun RouterEntity.keptAcrossReconnect(existing: RouterEntity?): RouterEntity =
+            if (existing == null) this else copy(
+                meshPrimary = existing.meshPrimary,
+                meshBackhaul = existing.meshBackhaul,
+                meshSnapshot = existing.meshSnapshot,
+                meshMac = existing.meshMac,
+                meshProfile = existing.meshProfile,
+                groupName = existing.groupName,
+            )
 
         /**
          * Why Connect cannot proceed, or null.

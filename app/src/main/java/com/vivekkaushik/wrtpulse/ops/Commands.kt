@@ -108,6 +108,15 @@ object Commands {
         "echo $SECTION nlbw" to "nlbw -c json 2>/dev/null || true",
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
+    /**
+     * Renames the router itself — the name the kernel carries and DHCP and DNS neighbours
+     * see — and applies it in place; `system reload` sets the kernel hostname without a
+     * reboot. [hostname] has been through [routerHostname]-style cleaning, so it is only
+     * letters, digits and dashes and needs no quoting beyond uci's.
+     */
+    fun setHostname(hostname: String): String =
+        uciBatch(listOf("set system.@system[0].hostname='$hostname'"), "system", "/etc/init.d/system reload >/dev/null 2>&1; echo done")
+
     /** The install-consent plan for the usage meter the Clients screen offers. */
     val NLBW_PLAN: String = installPlan("nlbwmon")
 
@@ -335,10 +344,31 @@ object Commands {
     const val SPEEDTEST_UP_BYTES = 100_000_000L
 
     /**
-     * Without curl there is no clock and no partial count, so the fallback moves a fixed,
-     * smaller amount and the app wall-times it.
+     * Without curl the router bounds each leg itself. A background reaper polls once a second
+     * and kills the transfer once [SPEEDTEST_SECONDS] pass with it still running, while the
+     * main shell waits on it for an exact finish time — so a leg that ends early on its own
+     * is timed to the tick and one the clock cuts short reports what had moved by then. The
+     * count is `wc -c` on the stream for a download and the WAN interface's tx counter for an
+     * upload; the clock is /proc/uptime. Nothing detached outlives the leg.
      */
-    const val SPEEDTEST_FALLBACK_BYTES = 20_000_000L
+    const val SPEEDTEST_COUNT_FILE = "/tmp/wrtpulse-speedtest.n"
+    const val SPEEDTEST_PID_FILE = "/tmp/wrtpulse-speedtest.pid"
+
+    /** Seconds since boot to two decimals — the fallback's clock. */
+    private const val UPTIME = "cut -d' ' -f1 /proc/uptime"
+
+    /** The seconds between the two clock reads either side of a transfer. */
+    private const val ELAPSED = "\$(awk \"BEGIN{print \$t1-\$t0}\")"
+
+    /**
+     * The fallback's time bound: once [seconds] have passed with the transfer (the job in `p`)
+     * still alive, [kill] runs. The caller cancels it with `kill $k` when the transfer ends
+     * first, so at most one `sleep 1` outlives the leg — and with no shell left to run what
+     * followed it, it does nothing when it wakes.
+     */
+    private fun reaper(seconds: Int, kill: String): String =
+        "{ i=0; while [ \$i -lt $seconds ] && kill -0 \$p 2>/dev/null; do sleep 1; i=\$((i+1)); done; " +
+        "kill -0 \$p 2>/dev/null && $kill; } & k=\$!"
 
     /** curl's exit status for hitting `--max-time`; for a speed test that is the normal end. */
     private const val CURL_TIMED_OUT = "[ \$rc -eq 28 ] && rc=0"
@@ -360,20 +390,24 @@ object Commands {
 
     /**
      * Pulls up to [bytes] from the speed-test endpoint on the router and discards it, giving
-     * up after [seconds].
+     * up after [seconds] — whichever ends first.
      *
      * With curl the last line carries its own timing (see [CURL_TIMING]) and the bytes that
-     * arrived before the clock ran out; without it a fixed [SPEEDTEST_FALLBACK_BYTES] is
-     * fetched and its count echoed, so a silent failure can't be mistaken for an instant
-     * download, and the app falls back to timing the round trip itself.
+     * arrived before the clock ran out. Without it the same cap holds: the stream goes through
+     * `wc -c` for the count, the fetcher records its own pid so the reaper stops that process
+     * and no other, and the leg prints `bytes seconds` from the router's clock — not a fixed
+     * smaller fetch that the app wall-times.
      */
     fun speedtestDownload(bytes: Long = SPEEDTEST_DOWN_BYTES, seconds: Int = SPEEDTEST_SECONDS): String =
         "$CPU_SAMPLE; if command -v curl >/dev/null 2>&1; then " +
         "curl -s -o /dev/null --max-time $seconds $CURL_TIMING 'http://$SPEEDTEST_HOST/__down?bytes=$bytes'; " +
         "rc=\$?; $CURL_TIMED_OUT; else " +
-        "URL='http://$SPEEDTEST_HOST/__down?bytes=$SPEEDTEST_FALLBACK_BYTES'; " +
-        "{ uclient-fetch -q -O /dev/null \"\$URL\" || wget -q -O /dev/null \"\$URL\"; } && echo $SPEEDTEST_FALLBACK_BYTES; " +
-        "rc=\$?; fi; $CPU_SAMPLE; exit \$rc"
+        "D='http://$SPEEDTEST_HOST/__down?bytes=$bytes'; N=$SPEEDTEST_COUNT_FILE; P=$SPEEDTEST_PID_FILE; " +
+        "T=uclient-fetch; command -v uclient-fetch >/dev/null 2>&1 || T=wget; t0=\$($UPTIME); " +
+        "{ \$T -q -O - \"\$D\" 2>/dev/null & echo \$! > \$P; wait; } | wc -c > \$N & p=\$!; " +
+        "${reaper(seconds, "kill \$(cat \$P 2>/dev/null) 2>/dev/null")}; " +
+        "wait \$p; t1=\$($UPTIME); kill \$k 2>/dev/null; " +
+        "echo \"\$(cat \$N) $ELAPSED\"; rm -f \$N \$P; rc=0; fi; $CPU_SAMPLE; exit \$rc"
 
     /** Scratch payload for the upload leg, in /tmp so it is cleaned up straight after. */
     const val SPEEDTEST_UPLOAD_FILE = "/tmp/wrtpulse-speedtest.bin"
@@ -397,15 +431,24 @@ object Commands {
      * first, and on a 128 MB router with the same 20 MB already sitting in tmpfs that got curl
      * killed by the OOM reaper — which the app then reported as "curl missing".
      */
-    fun speedtestUpload(bytes: Long = SPEEDTEST_UP_BYTES, seconds: Int = SPEEDTEST_SECONDS): String =
+    fun speedtestUpload(seconds: Int = SPEEDTEST_SECONDS): String =
         "URL='http://$SPEEDTEST_HOST/__up'; $CPU_SAMPLE; " +
         "if command -v curl >/dev/null 2>&1; then " +
         "curl -s -o /dev/null --max-time $seconds $CURL_TIMING -T $SPEEDTEST_UPLOAD_FILE -X POST \"\$URL\"; " +
         "rc=\$?; $CURL_TIMED_OUT; else " +
-        "uclient-fetch -q -O /dev/null --post-file=$SPEEDTEST_UPLOAD_FILE \"\$URL\" && echo $bytes; rc=\$?; fi; " +
+        // uclient-fetch reports nothing about a body it sent, so what left the WAN interface
+        // while the post ran is the count. Telemetry is paused and the SSH session rides the
+        // LAN, so the post is nearly all of that; the few percent of headers are the honest
+        // cost of a byte on the wire.
+        "IF=\$(ip route show default 2>/dev/null | awk '{print \$5; exit}'); S=/sys/class/net/\$IF/statistics/tx_bytes; " +
+        "x0=\$(cat \$S 2>/dev/null || echo 0); t0=\$($UPTIME); " +
+        "uclient-fetch -q -O /dev/null --post-file=$SPEEDTEST_UPLOAD_FILE \"\$URL\" >/dev/null 2>&1 & p=\$!; " +
+        "${reaper(seconds, "kill \$p 2>/dev/null")}; " +
+        "wait \$p; t1=\$($UPTIME); x1=\$(cat \$S 2>/dev/null || echo 0); kill \$k 2>/dev/null; " +
+        "echo \"\$((x1-x0)) $ELAPSED\"; rc=0; fi; " +
         "$CPU_SAMPLE; exit \$rc"
 
-    const val SPEEDTEST_CLEANUP = "rm -f $SPEEDTEST_UPLOAD_FILE"
+    const val SPEEDTEST_CLEANUP = "rm -f $SPEEDTEST_UPLOAD_FILE $SPEEDTEST_COUNT_FILE $SPEEDTEST_PID_FILE"
 
     // ── Packages ──────────────────────────────────────────────────────────────
     // 24.10 and later ship apk, everything before it ships opkg, and a single build of the
@@ -998,12 +1041,16 @@ object Commands {
         val blob = parts[1]
         if (type !in KEY_TYPES) return null
         if (blob.length < 16 || !blob.all { it.isLetterOrDigit() || it in "+/=" }) return null
-        val comment = parts.getOrElse(2) { "" }
-            .filter { it.isLetterOrDigit() || it in "._@- " }
-            .trim()
-            .take(120)
-        return Triple(type, blob, comment)
+        return Triple(type, blob, cleanComment(parts.getOrElse(2) { "" }))
     }
+
+    /**
+     * A key's label as the file will carry it: the safe alphabet a pasted comment is rebuilt
+     * from, because both end up inside a shell command. Empty is a legitimate answer — a
+     * key needs no label.
+     */
+    fun cleanComment(raw: String): String =
+        raw.filter { it.isLetterOrDigit() || it in "._@- " }.trim().take(120).trim()
 
     /** Everything the SSH keys screen needs, in one round trip. */
     val SSH_KEYS: String = listOf(
@@ -1023,6 +1070,21 @@ object Commands {
         val f = AUTHORIZED_KEYS
         return "mkdir -p /etc/dropbear && touch $f && " +
             "(grep -qF '$publicLine' $f || echo '$publicLine' >> $f) && chmod 600 $f"
+    }
+
+    /**
+     * Relabels the one line carrying this blob. The comment is the only free text on an
+     * authorized_keys line and the only thing a rename touches: the blob is matched as the
+     * second field, exactly, and the type and blob are written back as they were. Same
+     * temp-file-then-move discipline as [removeKey], for the same reason. Both values have
+     * been through their alphabets — base64, and [cleanComment] — so single quotes hold them.
+     */
+    fun renameKey(blob: String, comment: String): String {
+        val f = AUTHORIZED_KEYS
+        return "[ -f $f ] || { echo missing; exit 1; }; " +
+            "awk -v b='$blob' -v c='$comment' " +
+            "'\$2 == b { line = \$1 \" \" \$2; if (c != \"\") line = line \" \" c; print line; next } { print }' " +
+            "$f > $f.tmp && mv $f.tmp $f && chmod 600 $f && echo renamed"
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
 import androidx.compose.foundation.background
+import com.vivekkaushik.wrtpulse.ui.HoldButton
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -573,7 +574,8 @@ private fun CycleCard(store: WanStore, row: WanRow) {
     val scope = rememberCoroutineScope()
     val busy = store.cycling != null
     val mine = store.cycling == row.section
-    var armed by remember(row.section) { mutableStateOf(false) }
+    /** True while Stop is being held: the note below turns into the warning for that. */
+    var holding by remember(row.section) { mutableStateOf(false) }
     Column(
         Modifier
             .fillMaxWidth()
@@ -597,7 +599,7 @@ private fun CycleCard(store: WanStore, row: WanRow) {
             Box(
                 Modifier
                     .background(if (busy) Wrt.BgDeep else Wrt.Accent, RoundedCornerShape(9.dp))
-                    .clickable(enabled = !busy) { armed = false; scope.launch { store.restart(row.section) } }
+                    .clickable(enabled = !busy) { scope.launch { store.restart(row.section) } }
                     .padding(horizontal = 12.dp, vertical = 7.dp)
             ) {
                 Text(
@@ -610,35 +612,25 @@ private fun CycleCard(store: WanStore, row: WanRow) {
                 )
             }
             if (row.up) {
-                Box(
-                    Modifier
-                        .border(1.dp, if (armed) Wrt.Red else Wrt.Red.copy(alpha = 0.45f), RoundedCornerShape(9.dp))
-                        .background(if (armed) Wrt.Red.copy(alpha = 0.12f) else Wrt.BgCard, RoundedCornerShape(9.dp))
-                        .clickable(enabled = !busy) {
-                            if (armed) { armed = false; scope.launch { store.stop(row.section) } } else armed = true
-                        }
-                        .padding(horizontal = 12.dp, vertical = 7.dp)
-                ) {
-                    Text(
-                        if (armed) "Tap again" else "Stop",
-                        style = sans(11.5f, 650, if (busy) Wrt.TextDim else Wrt.Red),
-                    )
-                }
+                HoldButton(
+                    "Stop", "Hold to stop", danger = true, enabled = !busy, height = 32.dp,
+                    onHoldingChange = { holding = it },
+                ) { scope.launch { store.stop(row.section) } }
             }
         }
         Text(
             when {
-                armed && row.primary ->
+                holding && row.primary ->
                     "This is the uplink carrying the default route: stopping it takes the " +
                         "internet away from every device until you start it again. The app keeps " +
                         "working — it reaches the router over the LAN."
-                armed -> "Stopped means down until Start: no address, no route, and netifd does not retry."
+                holding -> "Stopped means down until Start: no address, no route, and netifd does not retry."
                 row.up -> "Restart is ifup: the address is renewed, a PPPoE session redialled, a Wi-Fi " +
                     "client re-associated. Clients see a short gap."
                 else -> "The interface is down. Start runs ifup; a wired line answers in seconds, " +
                     "PPPoE and Wi-Fi clients can take longer."
             },
-            style = sans(10.5f, 400, if (armed) Wrt.AmberText else Wrt.TextDim, lineHeight = 16.sp),
+            style = sans(10.5f, 400, if (holding) Wrt.AmberText else Wrt.TextDim, lineHeight = 16.sp),
             modifier = Modifier.padding(top = 9.dp),
         )
     }

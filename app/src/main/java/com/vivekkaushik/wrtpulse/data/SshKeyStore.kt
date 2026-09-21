@@ -110,6 +110,32 @@ class SshKeyStore(
     }
 
     /**
+     * Relabels a key on the router. The label is the comment on its line — cosmetic to
+     * dropbear, which is why this is safe on the app's own key too. Re-read and checked
+     * afterwards, as [remove] is: a write to the access list is not taken on trust.
+     */
+    suspend fun rename(key: AuthorizedKey, label: String): String {
+        val comment = Commands.cleanComment(label)
+        if (comment == key.comment) return "That is already its label."
+        busy = true
+        return try {
+            val out = session.exec(Commands.renameKey(key.blob, comment), timeoutMs = 30_000)
+            load()
+            val now = keys.firstOrNull { it.blob == key.blob }
+            when {
+                !out.ok -> "Failed: ${out.stderr.trim().ifEmpty { "exit ${out.exitCode}" }}"
+                now == null -> "Failed: the key is no longer in the file."
+                now.comment != comment -> "Failed: the label did not change on the router."
+                else -> "Renamed to ${comment.ifBlank { "(no label)" }}"
+            }
+        } catch (e: SshException) {
+            "Failed: ${e.message}"
+        } finally {
+            busy = false
+        }
+    }
+
+    /**
      * Installs the app's own key on a router that was added with a password.
      *
      * Mirrors onboarding: the key goes in, and nothing is claimed until it has been used to

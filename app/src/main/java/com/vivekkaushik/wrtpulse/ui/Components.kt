@@ -1,6 +1,25 @@
 package com.vivekkaushik.wrtpulse.ui
 
 import androidx.compose.animation.core.LinearEasing
+import com.vivekkaushik.wrtpulse.net.ConnectionState
+import com.vivekkaushik.wrtpulse.data.Telemetry
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.compositionLocalOf
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+import androidx.compose.ui.platform.LocalContext
+import android.provider.Settings
+import android.os.VibratorManager
+import android.os.Vibrator
+import android.os.VibrationEffect
+import android.os.Build
+import android.content.Context
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.animation.core.Animatable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -435,6 +454,13 @@ fun GhostButton(
 /** Above this, the poll is worth showing next to the latency it was being mistaken for. */
 const val SLOW_POLL_MS = 250
 
+/**
+ * The live poll of the router in hand, provided once over the main screens so the bar on
+ * every one of them can show a lost link without each screen being told. Null where there
+ * is no live router — the design-time list.
+ */
+val LocalLiveTelemetry = compositionLocalOf<Telemetry?> { null }
+
 @Composable
 fun ConnectionTopBar(
     routerName: String,
@@ -451,6 +477,19 @@ fun ConnectionTopBar(
     onRouterTap: (() -> Unit)? = null,
     chevronUp: Boolean = false,
 ) {
+    // A dead router used to look exactly like a live one here: a pulsing green dot and the
+    // last latency figure, both frozen. Liveness comes from the poll — replies stopped after
+    // they had been arriving — and the bar says so instead.
+    val live = LocalLiveTelemetry.current
+    val lostAt = live?.lostAtMillis
+    val state = live?.let { it.connection.collectAsState().value }
+    // Once the router has answered, the session dialling again IS the outage — and it is the
+    // part that lasts longest, so it cannot wait for a poll to give up before it shows.
+    val redialing = live?.everLoaded == true &&
+        (state is ConnectionState.Connecting || state is ConnectionState.Reconnecting || state is ConnectionState.Failed)
+    val lost = lostAt != null || redialing
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(lost) { while (lost) { now = System.currentTimeMillis(); delay(1_000) } }
     Row(
         Modifier
             .fillMaxWidth()
@@ -465,7 +504,7 @@ fun ConnectionTopBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            StatusDot(Wrt.Accent, 8.dp, pulse = pulse)
+            StatusDot(if (lost) Wrt.Amber else Wrt.Accent, 8.dp, pulse = pulse && !lost)
             Text(routerName, style = sans(14.5f, 650))
             Icon(
                 if (chevronUp) WrtIcons.ChevronUp else WrtIcons.ChevronDown,
@@ -477,10 +516,14 @@ fun ConnectionTopBar(
         Box(Modifier.weight(1f))
         Box(
             Modifier
-                .border(1.dp, Wrt.BorderCard, RoundedCornerShape(6.dp))
+                .border(1.dp, if (lost) Wrt.Amber.copy(alpha = 0.45f) else Wrt.BorderCard, RoundedCornerShape(6.dp))
                 .padding(horizontal = 8.dp, vertical = 3.dp)
         ) {
-            Text("$latencyMs ms", style = mono(10.5f, 500, Wrt.TextTertiary))
+            // A figure from before the link died would be a lie; say what is actually known.
+            Text(
+                if (lost) "no reply" else "$latencyMs ms",
+                style = mono(10.5f, 500, if (lost) Wrt.Amber else Wrt.TextTertiary),
+            )
         }
         pollMs?.takeIf { it >= SLOW_POLL_MS }?.let {
             Box(
@@ -494,6 +537,35 @@ fun ConnectionTopBar(
         trailing?.invoke()
     }
     HorizontalHairline()
+    if (lost) {
+        // The strip stays until a reply lands again. Amber, not red: the poll keeps trying
+        // on its own, and the router is very often just rebooting.
+        val silentFor = lostAt?.let { ((now - it) / 1_000).coerceAtLeast(0) }
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(Wrt.Amber.copy(alpha = 0.08f))
+                .let { if (onRouterTap != null) it.clickable(onClick = onRouterTap) else it }
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(WrtIcons.Warning, null, Modifier.size(14.dp), tint = Wrt.Amber)
+            Text(
+                when {
+                    state is ConnectionState.Reconnecting ->
+                        "Reconnecting to $routerName — attempt ${state.attempt} of ${state.maxAttempts}"
+                    state is ConnectionState.Connecting -> "Reconnecting to $routerName…"
+                    silentFor != null -> "No reply from $routerName for $silentFor s — retrying"
+                    else -> "No reply from $routerName — retrying"
+                },
+                style = sans(11.5f, 500, Wrt.AmberText),
+                modifier = Modifier.weight(1f),
+            )
+            if (onRouterTap != null) Text("Switch", style = sans(11.5f, 650, Wrt.Amber))
+        }
+        HorizontalHairline(Wrt.Amber.copy(alpha = 0.3f))
+    }
 }
 
 /** One button in a [SwipeToReveal] panel. */
@@ -704,4 +776,144 @@ fun PullToRefresh(
         },
         content = content,
     )
+}
+
+/**
+ * A button that has to be HELD for [holdMs] before it does anything — the confirm for an
+ * action with no undo. A fill sweeps across while the finger is down; letting go early
+ * drains it and nothing happens. It replaces the older tap-twice pattern, whose second tap
+ * could land by accident right after the first.
+ *
+ * [holdLabel] shows while held, so it can carry the consequence ("Hold — the router
+ * reboots"). [onHoldingChange] lets a screen show a longer note beside it while the hold
+ * runs, the way a warning used to appear once a button was armed.
+ *
+ * It is felt as well as seen, the whole way: a train of pulses runs under the finger for as
+ * long as the hold does, each one stronger and closer to the next as the fill nears the
+ * end, so the approach to the threshold is in the hand and not only the eye. Reaching it
+ * lands one firm confirm; letting go early stops the train with a soft end-pulse — the
+ * signal that nothing happened. That feel is [HoldHaptics], shared with every other hold
+ * control in the app, so a three-second hold feels the same wherever it is.
+ */
+@Composable
+fun HoldButton(
+    label: String,
+    holdLabel: String,
+    modifier: Modifier = Modifier,
+    danger: Boolean = false,
+    enabled: Boolean = true,
+    holdMs: Int = 3_000,
+    height: Dp = 44.dp,
+    onHoldingChange: (Boolean) -> Unit = {},
+    onConfirm: () -> Unit,
+) {
+    val progress = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    val haptics = rememberHoldHaptics()
+    var holding by remember { mutableStateOf(false) }
+    fun setHolding(v: Boolean) { if (holding != v) { holding = v; onHoldingChange(v) } }
+    val tone = if (danger) Wrt.Red else Wrt.Accent
+    val shape = RoundedCornerShape(11.dp)
+    // The button, and under it the one line that says how it works — the same line under
+    // every hold in the app, so the gesture never has to be guessed at.
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Box(
+        modifier
+            .height(height)
+            .clip(shape)
+            .border(1.dp, if (holding) tone else if (enabled) tone.copy(alpha = 0.5f) else Wrt.BorderCard, shape)
+            .drawBehind { drawRect(tone.copy(alpha = 0.22f), size = Size(size.width * progress.value, size.height)) }
+            .pointerInput(enabled, holdMs) {
+                if (!enabled) return@pointerInput
+                detectTapGestures(onPress = {
+                    setHolding(true)
+                    val run = scope.launch {
+                        progress.snapTo(0f)
+                        // The feel runs as a child of the hold, so ending the hold ends it.
+                        val train = launch { haptics.train { progress.value } }
+                        progress.animateTo(1f, tween(holdMs, easing = LinearEasing))
+                        train.cancel()
+                        // Held the whole way: it happens now, finger still down, on one firm confirm.
+                        setHolding(false)
+                        haptics.confirm()
+                        onConfirm()
+                        progress.snapTo(0f)
+                    }
+                    tryAwaitRelease()
+                    if (run.isActive) {
+                        // Let go early: the train stops, nothing happens, and the fill drains away.
+                        run.cancel()
+                        setHolding(false)
+                        haptics.release()
+                        scope.launch { progress.animateTo(0f, tween(180)) }
+                    }
+                })
+            }
+            .padding(horizontal = 14.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            if (holding) holdLabel else label,
+            style = sans(12.5f, 650, if (enabled) tone else Wrt.TextDim),
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+    }
+    Text(
+        "Hold for ${holdMs / 1000} s",
+        style = mono(9.5f, 500, Wrt.TextFaint),
+        modifier = Modifier.padding(top = 5.dp),
+    )
+    }
+}
+
+/**
+ * The feel of a three-second hold, shared by every hold-to-confirm control in the app so
+ * they all feel alike: a train of pulses that climbs with the fill — amplitude 60 → 255 of
+ * 255, the gap closing 140 → 45 ms — one firm confirm when the hold lands, and a soft
+ * end-pulse when it is let go early. The ramp needs amplitude control, which the fixed
+ * patterns in Compose's haptic API do not offer, so it is drawn on the platform vibrator
+ * directly; the system's touch-feedback setting still switches all of it off.
+ */
+class HoldHaptics internal constructor(private val vibrator: Vibrator?, private val on: Boolean) {
+    /** Pulses until cancelled. Run it as a child of the hold, so ending the hold ends it. */
+    suspend fun train(progress: () -> Float) {
+        if (!on || vibrator == null) return
+        while (currentCoroutineContext().isActive) {
+            val p = progress()
+            vibrator.pulse(22, (60 + 195 * p).toInt())
+            delay((140 - 95 * p).toLong())
+        }
+    }
+
+    /** The hold reached its end: one firm pulse as the action fires. */
+    fun confirm() { if (on) vibrator?.pulse(80, 255) }
+
+    /** Let go early: whatever is playing stops, and one soft pulse says nothing happened. */
+    fun release() { vibrator?.cancel(); if (on) vibrator?.pulse(18, 50) }
+}
+
+@Composable
+fun rememberHoldHaptics(): HoldHaptics {
+    val context = LocalContext.current
+    return remember(context) {
+        HoldHaptics(
+            vibratorOf(context),
+            runCatching { Settings.System.getInt(context.contentResolver, Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) == 1 }.getOrDefault(true),
+        )
+    }
+}
+
+/** The device's vibrator, or null where there is none. */
+private fun vibratorOf(context: Context): Vibrator? = runCatching {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
+    } else {
+        @Suppress("DEPRECATION")
+        context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+    }
+}.getOrNull()?.takeIf { it.hasVibrator() }
+
+/** One short pulse at [amplitude] (1–255); a motor without amplitude control just clicks. */
+private fun Vibrator.pulse(ms: Long, amplitude: Int) {
+    runCatching { vibrate(VibrationEffect.createOneShot(ms, amplitude.coerceIn(1, 255))) }
 }

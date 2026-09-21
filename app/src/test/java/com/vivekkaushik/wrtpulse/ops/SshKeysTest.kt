@@ -285,3 +285,40 @@ class KeyCommandTest {
         assertEquals(setOf("keys", "perms", "dropbear"), sections.keys)
     }
 }
+
+class RenameKeyTest {
+
+    @Test
+    fun `a typed label is cleaned to the file's safe alphabet`() {
+        assertEquals("vivek@laptop", Commands.cleanComment("  vivek@laptop  "))
+        // Shell punctuation is stripped and the letters kept — the same rule a pasted key's
+        // comment already follows, so nothing that could reach a shell survives.
+        assertEquals("Vivek phonereboot", Commands.cleanComment("Vivek phone';reboot"))
+        assertEquals("", Commands.cleanComment("***"))
+        assertEquals(120, Commands.cleanComment("a".repeat(200)).length)
+        // The pasted-key path and the rename path agree, so a label round-trips.
+        val (_, _, comment) = Commands.parsePublicKey("ssh-ed25519 $APP_BLOB Vivek phone';reboot")!!
+        assertEquals(Commands.cleanComment("Vivek phone';reboot"), comment)
+    }
+
+    @Test
+    fun `the rename touches only the line with that blob and only its comment`() {
+        val cmd = Commands.renameKey(APP_BLOB, "Vivek phone")
+        assertTrue(cmd.contains("\$2 == b"))                       // the blob, as the second field, exactly
+        assertTrue(cmd.contains("-v b='$APP_BLOB'"))
+        assertTrue(cmd.contains("-v c='Vivek phone'"))
+        assertTrue(cmd.contains("line = \$1 \" \" \$2"))          // type and blob written back as they were
+        assertTrue(cmd.contains("{ print }"))                        // every other line passes through
+        assertTrue(cmd.indexOf("> /etc/dropbear/authorized_keys.tmp") < cmd.indexOf("mv "))
+        assertTrue(cmd.contains("chmod 600"))
+        assertTrue(cmd.contains("echo missing"))
+        assertTrue(cmd.trimEnd().endsWith("echo renamed"))
+    }
+
+    @Test
+    fun `a blank label leaves the line with no trailing comment`() {
+        val cmd = Commands.renameKey(APP_BLOB, "")
+        assertTrue(cmd.contains("-v c=''"))
+        assertTrue(cmd.contains("if (c != \"\")"))
+    }
+}

@@ -1,6 +1,7 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
 import androidx.compose.animation.core.Animatable
+import com.vivekkaushik.wrtpulse.ui.rememberHoldHaptics
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -126,7 +127,10 @@ fun HostKeyScreen(
 private fun HoldToTrustButton(onTrust: () -> Unit) {
     val progress = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
+    val haptics = rememberHoldHaptics()
     var completed by remember { mutableStateOf(false) }
+    // True from press until release or completion — see HoldToConfirm for why.
+    var live by remember { mutableStateOf(false) }
     Box(
         Modifier
             .fillMaxWidth()
@@ -140,16 +144,24 @@ private fun HoldToTrustButton(onTrust: () -> Unit) {
                         awaitPointerEvent()
                         val pressed = currentEvent.changes.any { it.pressed }
                         if (pressed && !completed && !progress.isRunning) {
+                            live = true
                             scope.launch {
+                                val train = launch { haptics.train { progress.value } }
                                 progress.animateTo(1f, tween(((1f - progress.value) * 3000).toInt(), easing = LinearEasing))
+                                train.cancel()
                                 if (progress.value >= 1f) {
                                     completed = true
+                                    live = false
+                                    haptics.confirm()
                                     onTrust()
                                 }
                             }
                         } else if (!pressed && !completed) {
+                            val wasLive = live
+                            live = false
                             scope.launch {
                                 progress.stop()
+                                if (wasLive) haptics.release()
                                 progress.animateTo(0f, tween(180))
                             }
                         }

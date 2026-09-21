@@ -58,6 +58,7 @@ fun SshKeysScreen(store: SshKeyStore?, latencyMs: Int, onBack: () -> Unit) {
     var paste by remember { mutableStateOf("") }
     var adding by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf<AuthorizedKey?>(null) }
+    var renaming by remember { mutableStateOf<AuthorizedKey?>(null) }
     var toast by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(store) { if (store != null && !store.loaded) store.load() }
@@ -127,7 +128,7 @@ fun SshKeysScreen(store: SshKeyStore?, latencyMs: Int, onBack: () -> Unit) {
                     }
                 }
                 items(store.keys, key = { it.blob }) { key ->
-                    KeyRow(key, store) { confirm = key }
+                    KeyRow(key, store, onRemove = { confirm = key }, onRename = { renaming = key })
                 }
                 item {
                     if (store.keys.isEmpty() && store.loaded) {
@@ -152,6 +153,15 @@ fun SshKeysScreen(store: SshKeyStore?, latencyMs: Int, onBack: () -> Unit) {
             key = target,
             onDismiss = { confirm = null },
             onResult = { toast = it; confirm = null },
+        )
+    }
+    val relabel = renaming
+    if (relabel != null && store != null) {
+        RenameKeyDialog(
+            store = store,
+            key = relabel,
+            onDismiss = { renaming = null },
+            onResult = { toast = it; renaming = null },
         )
     }
 }
@@ -220,7 +230,7 @@ private fun PasteBox(value: String, onChange: (String) -> Unit, onAdd: () -> Uni
 }
 
 @Composable
-private fun KeyRow(key: AuthorizedKey, store: SshKeyStore, onRemove: () -> Unit) {
+private fun KeyRow(key: AuthorizedKey, store: SshKeyStore, onRemove: () -> Unit, onRename: () -> Unit) {
     val blocked = SshKeyStore.removalBlock(key, store.keys.size, store.auth) != null
     Row(
         Modifier
@@ -243,8 +253,10 @@ private fun KeyRow(key: AuthorizedKey, store: SshKeyStore, onRemove: () -> Unit)
                     style = sans(12.5f, 600),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
+                    modifier = Modifier.weight(1f, fill = false).clickable(onClick = onRename),
                 )
+                // The label is the one editable thing on the line, and this is where it is edited.
+                Icon(WrtIcons.Pencil, "rename", Modifier.size(12.dp).clickable(onClick = onRename), tint = Wrt.TextDim)
                 MonoTag(key.shortType.uppercase(), Wrt.TextTertiary)
                 if (key.isAppKey) MonoTag("THIS APP", Wrt.Accent, Wrt.Accent.copy(alpha = 0.5f))
             }
@@ -324,6 +336,69 @@ private fun PasswordCard(store: SshKeyStore) {
                     style = mono(9.5f, 500, Wrt.TextSecondary),
                 )
             }
+        }
+    }
+}
+
+/**
+ * Relabels a key: the comment on its line in authorized_keys, nothing else. What will
+ * actually be written is shown as it is typed, because the label goes through the same
+ * safe alphabet a pasted key's comment does, and a stripped character should not be a surprise.
+ */
+@Composable
+private fun RenameKeyDialog(
+    store: SshKeyStore,
+    key: AuthorizedKey,
+    onDismiss: () -> Unit,
+    onResult: (String) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var text by remember(key.blob) { mutableStateOf(key.comment) }
+    var running by remember { mutableStateOf(false) }
+    val cleaned = Commands.cleanComment(text)
+    val changed = cleaned != key.comment
+    val ready = changed && !running
+    Dialog(onDismissRequest = { if (!running) onDismiss() }) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .border(1.dp, Wrt.BorderCard, RoundedCornerShape(16.dp))
+                .background(Wrt.BgBar, RoundedCornerShape(16.dp))
+                .padding(18.dp)
+        ) {
+            Text("Rename this key", style = sans(15f, 650))
+            Text(key.fingerprint, style = mono(10f, 500, Wrt.TextDim), modifier = Modifier.padding(top = 4.dp))
+            Text(
+                "The label is the comment on its line in authorized_keys. It changes nothing about who can log in.",
+                style = sans(11.5f, 500, Wrt.TextSecondary),
+                modifier = Modifier.padding(top = 12.dp),
+            )
+            Spacer(Modifier.height(14.dp))
+            SectionLabel("LABEL")
+            DialogField(text) { text = it }
+            Text(
+                when {
+                    cleaned != text.trim() -> "Will be saved as ${cleaned.ifBlank { "(no label)" }}."
+                    !changed -> "That is its label now."
+                    cleaned.isEmpty() -> "Blank leaves it with no label."
+                    else -> "Letters, digits, spaces and . _ @ -"
+                },
+                style = mono(10f, 500, Wrt.TextDim),
+                modifier = Modifier.padding(top = 6.dp),
+            )
+            Spacer(Modifier.height(16.dp))
+            PrimaryButton(
+                if (running) "Saving…" else "Save",
+                color = if (ready) Wrt.Accent else Wrt.BorderCard,
+                textColor = if (ready) Wrt.OnAccent else Wrt.TextDim,
+            ) {
+                if (ready) {
+                    running = true
+                    scope.launch { onResult(store.rename(key, text)) }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            GhostButton("Cancel", border = Wrt.TextTertiary) { if (!running) onDismiss() }
         }
     }
 }

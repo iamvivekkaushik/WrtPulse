@@ -1,6 +1,7 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
 import androidx.activity.compose.BackHandler
+import com.vivekkaushik.wrtpulse.ui.HoldButton
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
@@ -117,7 +118,6 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit, onDone: () -> Unit) {
     var signing by remember { mutableStateOf(false) }
     var signInError by remember { mutableStateOf<String?>(null) }
     var wiping by remember { mutableStateOf(false) }
-    var wipeArmed by remember { mutableStateOf(false) }
     var showSaved by remember { mutableStateOf(false) }
     val reduced = rememberReducedMotion()
 
@@ -152,7 +152,6 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit, onDone: () -> Unit) {
         LaunchedEffect(j) { while (true) { j.checkLink(); delay(5_000) } }
     }
 
-    LaunchedEffect(wipeArmed) { if (wipeArmed) { delay(6_000); wipeArmed = false } }
 
     fun back() {
         when (step) {
@@ -389,7 +388,7 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit, onDone: () -> Unit) {
             val found = phase == NodeSetup.Phase.Found || phase == NodeSetup.Phase.Connecting || phase == NodeSetup.Phase.Ready
             val plan = if (step == AddStep.Review) join?.plan() else null
             val joinFailed = step == AddStep.Progress && join?.let { !it.applying && !it.done && it.error != null } == true
-            val (primaryLabel, primaryEnabled, primaryColor, primaryGo) = when (step) {
+            val (primaryLabel, primaryEnabled, primaryColor, primaryHold, primaryGo) = when (step) {
                 AddStep.Cable1 -> FooterAction("Next", phase != NodeSetup.Phase.Failed, Wrt.Accent) { step = AddStep.Cable2 }
                 AddStep.Cable2 -> FooterAction("I've plugged it in", true, Wrt.Accent) { step = AddStep.Finding }
                 AddStep.Finding ->
@@ -397,12 +396,10 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit, onDone: () -> Unit) {
                     else FooterAction("Continue", found, Wrt.Accent) { step = AddStep.Password }
                 AddStep.Password ->
                     if (setup.failsafe) FooterAction(
-                        if (wiping) "Resetting…" else if (wipeArmed) "Tap again — wipes its settings" else "Reset it and reboot",
-                        !wiping, if (wipeArmed) Wrt.Red else Wrt.Amber,
+                        if (wiping) "Resetting…" else "Reset it and reboot",
+                        !wiping, Wrt.Red, hold = "Keep holding — wipes its settings",
                     ) {
-                        if (!wipeArmed) wipeArmed = true
-                        else scope.launch {
-                            wipeArmed = false
+                        scope.launch {
                             wiping = true
                             if (setup.wipeAndReboot()) { step = AddStep.Finding; setup.run() }
                             wiping = false
@@ -447,7 +444,11 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit, onDone: () -> Unit) {
                         Text(text, style = mono(11f, 500, tone), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
-                PrimaryButton(primaryLabel, Modifier.alpha(if (primaryEnabled) 1f else 0.4f), color = primaryColor) { if (primaryEnabled) primaryGo() }
+                if (primaryHold != null) {
+                    HoldButton(primaryLabel, primaryHold, Modifier.fillMaxWidth(), danger = true, enabled = primaryEnabled, height = 48.dp) { primaryGo() }
+                } else {
+                    PrimaryButton(primaryLabel, Modifier.alpha(if (primaryEnabled) 1f else 0.4f), color = primaryColor) { if (primaryEnabled) primaryGo() }
+                }
                 ghost?.let { (label, go) -> GhostButton(label, onClick = go) }
             }
         }
@@ -478,7 +479,8 @@ fun AddNodeScreen(hooks: MeshHooks, onBack: () -> Unit, onDone: () -> Unit) {
     }
 }
 
-private data class FooterAction(val label: String, val enabled: Boolean, val color: Color, val go: () -> Unit)
+/** [hold] set makes the footer a hold-to-confirm rather than a tap, with that as its held label. */
+private data class FooterAction(val label: String, val enabled: Boolean, val color: Color, val hold: String? = null, val go: () -> Unit)
 
 @Composable
 private fun HeroWell(height: androidx.compose.ui.unit.Dp? = null, content: @Composable () -> Unit) {

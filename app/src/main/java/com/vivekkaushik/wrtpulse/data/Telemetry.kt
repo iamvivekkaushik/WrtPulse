@@ -1,6 +1,8 @@
 package com.vivekkaushik.wrtpulse.data
 
 import androidx.compose.runtime.getValue
+import com.vivekkaushik.wrtpulse.net.ConnectionState
+import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -80,6 +82,36 @@ class Telemetry(private val session: RouterSession) {
     var stale by mutableStateOf(true); private set
 
     /**
+     * When contact was lost: the time of the first failed tick after replies had been
+     * arriving, or null while they still are. Distinct from [stale], which is also true
+     * before any tick has landed — silence from a router that has never answered is
+     * loading, not loss, and must not be announced as one.
+     */
+    var lostAtMillis by mutableStateOf<Long?>(null); private set
+
+    /**
+     * Whether this router has answered at least once. After that, any redialing the session
+     * does is a LOST link, not a first connection — and it has to show as one at once: a
+     * dead link first surfaces as a channel that never opens, which sends the session into
+     * its redial loop, and that loop can run for over a minute before a tick ever fails.
+     */
+    var everLoaded by mutableStateOf(false); private set
+
+    /** The session's own view of the link — the attempt count while it is reconnecting. */
+    val connection: StateFlow<ConnectionState> get() = session.state
+
+    internal fun tickSucceeded() {
+        stale = false
+        everLoaded = true
+        lostAtMillis = null
+    }
+
+    internal fun tickFailed(nowMillis: Long = System.currentTimeMillis()) {
+        stale = true
+        if (everLoaded && lostAtMillis == null) lostAtMillis = nowMillis
+    }
+
+    /**
      * Set while the speed test runs. A tick is ~0.35 s of CPU on a single-core router and
      * exec is not serialised, so at 1 Hz it took 20–50% off a measurement that is itself
      * CPU-bound there. Polling picks up where it left off once the flag drops.
@@ -101,7 +133,7 @@ class Telemetry(private val session: RouterSession) {
                 val result = session.exec(Commands.DASHBOARD_TICK, timeoutMs = 8_000)
                 tickMs = ((System.nanoTime() - started) / 1_000_000L).toInt()
                 ingest(Parsers.sections(result.stdout), System.nanoTime())
-                stale = false
+                tickSucceeded()
                 // One extra round trip, and not on every tick: this codebase batches
                 // precisely to avoid paying per round trip, and a latency chip does not need
                 // to update at 1 Hz.
@@ -109,7 +141,7 @@ class Telemetry(private val session: RouterSession) {
                     session.refreshLatency()?.let { latencyMs = it.toInt() }
                 }
             } catch (e: SshException) {
-                stale = true
+                tickFailed()
                 // A key mismatch is a hard stop — session state is Blocked, nothing to poll.
                 if (e is SshException.HostKeyChanged) return
             }

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -108,6 +109,65 @@ fun routerMatches(e: RouterEntity, query: String): Boolean {
     return words.all { it in haystack }
 }
 
+/** A section of the list: the routers filed under one group name, or under none. */
+internal data class RouterSection(val group: String?, val routers: List<RouterEntity>)
+
+/**
+ * A group name as typed → as stored: trimmed, inner runs of space collapsed, at most 24
+ * characters, and null when nothing is left — blank is how a router leaves its group.
+ */
+internal fun routerGroupName(input: String): String? =
+    input.trim().replace(Regex("\\s+"), " ").take(24).trim().ifEmpty { null }
+
+/**
+ * Where a router is filed. Its own group first; a mesh node with none sits with its primary,
+ * so tagging the primary is enough to keep a mesh together. [all] is the whole saved list,
+ * so the primary is found even when a search has hidden it.
+ */
+internal fun effectiveGroup(e: RouterEntity, all: List<RouterEntity>): String? =
+    e.groupName ?: e.meshPrimary?.let { p -> all.firstOrNull { it.identity == p }?.groupName }
+
+/**
+ * Every group in use, once each, in a fixed order — the filter chips and the edit dialog's
+ * shortcuts. Pinned groups come first, then the rest, each run alphabetical. A pin on a name
+ * no router carries any more changes nothing; it simply waits for the name to come back.
+ */
+internal fun groupNames(all: List<RouterEntity>, pinned: Set<String> = emptySet()): List<String> =
+    all.mapNotNull { effectiveGroup(it, all) }.distinct()
+        .sortedWith(compareBy<String> { it !in pinned }.thenBy { it.lowercase() })
+
+/**
+ * The list in sections: pinned groups first, then the other named groups, each run in
+ * alphabetical order, then whatever is in none, last. With no groups at all there is one
+ * unnamed section and the list looks as it always did. Inside a section the incoming order
+ * holds, except that a mesh node moves to sit right after its primary when both are there,
+ * so a mesh reads as one thing.
+ */
+internal fun routerSections(
+    shown: List<RouterEntity>,
+    all: List<RouterEntity> = shown,
+    pinned: Set<String> = emptySet(),
+): List<RouterSection> {
+    val byGroup = shown.groupBy { effectiveGroup(it, all) }
+    fun ordered(list: List<RouterEntity>): List<RouterEntity> {
+        val here = list.map { it.identity }.toSet()
+        val placed = mutableSetOf<Long>()
+        val out = mutableListOf<RouterEntity>()
+        for (e in list) {
+            if (e.id in placed || (e.isMeshNode && e.meshPrimary in here)) continue
+            out += e; placed += e.id
+            list.filter { it.isMeshNode && it.meshPrimary == e.identity && it.id !in placed }
+                .forEach { out += it; placed += it.id }
+        }
+        return out
+    }
+    val named = byGroup.keys.filterNotNull()
+        .sortedWith(compareBy<String> { it !in pinned }.thenBy { it.lowercase() })
+        .map { RouterSection(it, ordered(byGroup.getValue(it))) }
+    val rest = byGroup[null].orEmpty()
+    return if (rest.isEmpty()) named else named + RouterSection(null, ordered(rest))
+}
+
 /** The same for the design-time list, which has no entity behind it. */
 fun demoRouterMatches(r: Router, query: String): Boolean {
     val words = query.trim().lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
@@ -126,10 +186,13 @@ fun RouterListScreen(
     onOpenSaved: (RouterEntity) -> Unit,
     onAdd: () -> Unit,
     onDelete: (RouterEntity) -> Unit = {},
-    /** Name and address together: both live on the same card and both are local-only edits. */
-    onEdit: (RouterEntity, String, String, Int) -> Unit = { _, _, _, _ -> },
+    /** Name, address and group together: all live on the same card and all are local-only edits. */
+    onEdit: (RouterEntity, String, String, Int, String?) -> Unit = { _, _, _, _, _ -> },
     /** The About screen: version and libraries. Reachable here so it needs no router. */
     onAbout: () -> Unit = {},
+    /** Groups kept at the top of the list; a tap on a section's pin toggles it. */
+    pinned: Set<String> = emptySet(),
+    onTogglePin: (String) -> Unit = {},
 ) {
     var confirmDelete by remember { mutableStateOf<RouterEntity?>(null) }
     var renaming by remember { mutableStateOf<RouterEntity?>(null) }
@@ -137,7 +200,14 @@ fun RouterListScreen(
     val filters = listOf("All", "Home", "Office", "Parents")
     var searching by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
-    val shownSaved = saved?.filter { routerMatches(it, query) }
+    /** The chip in force on the saved list; null is All. */
+    var selectedGroup by remember { mutableStateOf<String?>(null) }
+    val groups = saved?.let { groupNames(it, pinned) }.orEmpty()
+    // A group that was renamed or emptied away leaves its chip behind: fall back to All.
+    if (selectedGroup != null && selectedGroup !in groups) selectedGroup = null
+    val shownSaved = saved
+        ?.filter { routerMatches(it, query) }
+        ?.filter { selectedGroup == null || effectiveGroup(it, saved) == selectedGroup }
     val shownDemo = when (filter) {
         1 -> Demo.routers.filter { it.tag == "HOME" }
         2 -> Demo.routers.filter { it.tag == "OFFICE" }
@@ -186,6 +256,16 @@ fun RouterListScreen(
                         FilterChip(f, selected = i == filter, onClick = { filter = i })
                     }
                 }
+            } else if (groups.isNotEmpty()) {
+                Row(
+                    Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    FilterChip("All", selected = selectedGroup == null, onClick = { selectedGroup = null })
+                    groups.forEach { g -> FilterChip(g, selected = g == selectedGroup, onClick = { selectedGroup = g }) }
+                }
             } else {
                 Spacer(Modifier.height(6.dp))
             }
@@ -210,20 +290,34 @@ fun RouterListScreen(
                 verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
                 if (saved != null && shownSaved != null) {
-                    shownSaved.forEach { e ->
-                        SwipeToReveal(
-                            actions = listOf(
-                                RevealAction("Edit", WrtIcons.Pencil, Wrt.Accent) { renaming = e },
-                                RevealAction("Delete", WrtIcons.Trash, Wrt.Red) { confirmDelete = e },
-                            ),
-                            resetKey = e.id,
-                            corner = 14.dp,
-                        ) { swipe ->
-                            RouterCard(
-                                e.asRouter(connectedIdentity, connectingIdentity),
-                                onClick = { onOpenSaved(e) },
-                                modifier = swipe,
+                    val sections = routerSections(shownSaved, saved, pinned)
+                    sections.forEachIndexed { i, section ->
+                        // Headers only once there is more than one place to be: a list with no
+                        // groups is one unnamed section and gets none.
+                        if (sections.size > 1 || section.group != null) {
+                            val g = section.group
+                            GroupHeader(
+                                g ?: "Ungrouped", section.routers.size, first = i == 0,
+                                // Only a real group can be pinned; the remainder has no name to keep.
+                                pinned = g?.let { it in pinned },
+                                onTogglePin = g?.let { { onTogglePin(it) } },
                             )
+                        }
+                        section.routers.forEach { e ->
+                            SwipeToReveal(
+                                actions = listOf(
+                                    RevealAction("Edit", WrtIcons.Pencil, Wrt.Accent) { renaming = e },
+                                    RevealAction("Delete", WrtIcons.Trash, Wrt.Red) { confirmDelete = e },
+                                ),
+                                resetKey = e.id,
+                                corner = 14.dp,
+                            ) { swipe ->
+                                RouterCard(
+                                    e.asRouter(connectedIdentity, connectingIdentity),
+                                    onClick = { onOpenSaved(e) },
+                                    modifier = swipe,
+                                )
+                            }
                         }
                     }
                     if (saved.isEmpty()) {
@@ -256,10 +350,11 @@ fun RouterListScreen(
             EditRouterDialog(
                 entity = entity,
                 connectedIdentity = connectedIdentity,
+                groups = groups,
                 onDismiss = { renaming = null },
-                onConfirm = { name, host, port ->
+                onConfirm = { name, host, port, group ->
                     renaming = null
-                    onEdit(entity, name, host, port)
+                    onEdit(entity, name, host, port, group)
                 },
             )
         }
@@ -496,6 +591,31 @@ private fun RouterCard(r: Router, onClick: () -> Unit, modifier: Modifier = Modi
 
 private data class Quad(val c: Color, val s: String, val p: Boolean, val ms: Int)
 
+/**
+ * A section's name over its cards, with how many it holds, and its pin: lit when the group is
+ * kept at the top, faint otherwise, a tap either way. [pinned] is null for the unnamed
+ * remainder, which has nothing to pin.
+ */
+@Composable
+private fun GroupHeader(name: String, count: Int, first: Boolean, pinned: Boolean?, onTogglePin: (() -> Unit)?) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = if (first) 2.dp else 10.dp, bottom = 1.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        SectionLabel(name.uppercase(), color = if (pinned == true) Wrt.Accent else Wrt.TextDim)
+        Text("$count", style = mono(10f, 500, Wrt.TextFaint))
+        if (pinned != null && onTogglePin != null) {
+            FlexSpacer()
+            Icon(
+                WrtIcons.Pin, if (pinned) "unpin $name" else "pin $name",
+                Modifier.size(15.dp).clickable(onClick = onTogglePin),
+                tint = if (pinned) Wrt.Accent else Wrt.TextFaint,
+            )
+        }
+    }
+}
+
 /** Forgetting a router is local and reversible only by adding it again, so it is confirmed. */
 /**
  * Name and address for a saved router — design screen 04's swipe action, widened.
@@ -508,10 +628,13 @@ private data class Quad(val c: Color, val s: String, val p: Boolean, val ms: Int
 private fun EditRouterDialog(
     entity: RouterEntity,
     connectedIdentity: String?,
+    /** Groups already in use, offered as one-tap shortcuts under the field. */
+    groups: List<String>,
     onDismiss: () -> Unit,
-    onConfirm: (String, String, Int) -> Unit,
+    onConfirm: (String, String, Int, String?) -> Unit,
 ) {
     var name by remember(entity.id) { mutableStateOf(entity.name) }
+    var group by remember(entity.id) { mutableStateOf(entity.groupName.orEmpty()) }
     var address by remember(entity.id) {
         mutableStateOf(if (entity.port == 22) entity.host else "${entity.host}:${entity.port}")
     }
@@ -563,6 +686,29 @@ private fun EditRouterDialog(
                     Text(note, style = sans(11.5f, 400, Wrt.AmberText, lineHeight = 17.sp))
                 }
             }
+            Spacer(Modifier.height(12.dp))
+            SectionLabel("GROUP")
+            DialogField(group) { group = it }
+            val chosen = routerGroupName(group)
+            Text(
+                if (chosen == null) "Optional — Home, Office, a client's name. Blank leaves it in none."
+                else "Filed under $chosen on the list.",
+                style = mono(10f, 500, Wrt.TextDim),
+                modifier = Modifier.padding(top = 6.dp),
+            )
+            if (groups.isNotEmpty()) {
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()).padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    groups.forEach { g ->
+                        // Tapping the one already chosen clears it, so a group is one tap either way.
+                        FilterChip(g, selected = g == chosen, size = 11f, padH = 10.dp, padV = 4.dp) {
+                            group = if (g == chosen) "" else g
+                        }
+                    }
+                }
+            }
             if (block != null) {
                 Text(
                     block,
@@ -574,7 +720,7 @@ private fun EditRouterDialog(
             if (block == null) {
                 PrimaryButton("Save") {
                     val (host, port) = routerAddress(address)!!
-                    onConfirm(routerName(name)!!, host, port ?: entity.port)
+                    onConfirm(routerName(name)!!, host, port ?: entity.port, routerGroupName(group))
                 }
             } else {
                 Box(
@@ -596,7 +742,7 @@ private fun EditRouterDialog(
 
 /** The dialog's one-line input, in the shape [WrtInputDialog] uses. */
 @Composable
-private fun DialogField(value: String, onChange: (String) -> Unit) {
+internal fun DialogField(value: String, onChange: (String) -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()

@@ -1,6 +1,7 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
 import androidx.compose.foundation.background
+import com.vivekkaushik.wrtpulse.ui.HoldButton
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -77,8 +78,6 @@ fun FirmwareScreen(
     var url by remember { mutableStateOf("") }
     var sha by remember { mutableStateOf("") }
     var urlOpen by remember { mutableStateOf(false) }
-    // "asks once more" — the design's wording, so skipping the backup takes two taps.
-    var waiveArmed by remember { mutableStateOf(false) }
     // Design 41 is its own screen, reached from gate 5 — the red zone is a step, not a card.
     var confirming by remember { mutableStateOf(false) }
 
@@ -208,19 +207,10 @@ fun FirmwareScreen(
                                 }
                             }
                             Text("or", style = sans(10.5f, 400, Wrt.TextDim))
-                            // "asks once more" in the design — so it does.
-                            InlineAction(
-                                if (waiveArmed) "Tap again to continue with no backup"
-                                else "Continue without a backup — asks once more.",
-                                if (waiveArmed) Wrt.Amber else Wrt.TextTertiary,
-                            ) {
-                                if (waiveArmed) {
-                                    store.waiveBackup()
-                                    waiveArmed = false
-                                    result = 1 to "Continuing without a backup"
-                                } else {
-                                    waiveArmed = true
-                                }
+                            // "asks once more" in the design — here a hold, not a second tap.
+                            HoldButton("Continue without a backup", "Hold — no backup", danger = true, height = 32.dp) {
+                                store.waiveBackup()
+                                result = 1 to "Continuing without a backup"
                             }
                         }
                     }

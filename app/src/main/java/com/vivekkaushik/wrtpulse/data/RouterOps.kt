@@ -88,9 +88,7 @@ class RouterOps(private val session: RouterSession, private val telemetry: Telem
                 upBytes = up?.bytes ?: 0,
                 upSeconds = up?.seconds ?: 0.0,
                 upCpuPct = up?.cpuPct,
-                uploadError = if (up == null) {
-                    "Upload needs curl on the router — uclient-fetch stalls on large uploads"
-                } else null,
+                uploadError = if (up == null) "Upload failed — is the router online?" else null,
             )
         } finally {
             telemetry?.paused = false
@@ -103,8 +101,8 @@ class RouterOps(private val session: RouterSession, private val telemetry: Telem
      * With curl the router reports its own numbers — bytes down, bytes up, total time, and
      * the time before the first byte moved — and the transfer time is the difference of the
      * last two, so DNS and connection setup are left out; a leg the clock cut short reports
-     * what had arrived by then. Without curl the only number is the byte count of a fixed,
-     * smaller fetch, and the wall clock around the SSH exec has to do, setup and all.
+     * what had arrived by then. Without curl the router runs the same clock itself and
+     * reports bytes and seconds of its own, so the SSH round trip does not pad the time.
      */
     private suspend fun timedTransfer(command: String): Transfer? = try {
         val started = System.nanoTime()
@@ -122,9 +120,10 @@ class RouterOps(private val session: RouterSession, private val telemetry: Telem
          *
          * The transfer line is the last one that is not a /proc/stat sample: four fields are
          * curl's `size_download size_upload time_total time_pretransfer`, whichever size is
-         * non-zero being the leg that ran; one field is the byte count echoed by the fallback,
-         * timed by [wall]. The `cpu` lines either side of it give the core's share of that
-         * time. Anything else is a failed transfer.
+         * non-zero being the leg that ran; two are the no-curl fallback's own count and clock,
+         * the bytes moved and the seconds they took as read on the router; one is a bare byte
+         * count, timed by [wall]. The `cpu` lines either side of it give the core's share of
+         * that time. Anything else is a failed transfer.
          */
         fun parseTransfer(stdout: String, wall: Double): Transfer? {
             val lines = stdout.lines().map { it.trim() }.filter { it.isNotEmpty() }
@@ -133,6 +132,7 @@ class RouterOps(private val session: RouterSession, private val telemetry: Telem
             val fields = lines.lastOrNull { !it.startsWith("cpu ") }?.split(Regex("\\s+")).orEmpty()
             val (bytes, seconds) = when (fields.size) {
                 1 -> (fields[0].toLongOrNull() ?: return null) to wall
+                2 -> (fields[0].toLongOrNull() ?: return null) to (fields[1].toDoubleOrNull() ?: return null)
                 4 -> {
                     val down = fields[0].toLongOrNull() ?: return null
                     val up = fields[1].toLongOrNull() ?: return null

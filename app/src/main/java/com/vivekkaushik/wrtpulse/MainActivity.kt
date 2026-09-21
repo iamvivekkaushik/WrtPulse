@@ -1,6 +1,8 @@
 package com.vivekkaushik.wrtpulse
 
 import android.os.Bundle
+import com.vivekkaushik.wrtpulse.ui.LocalLiveTelemetry
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -154,6 +156,8 @@ private fun WrtPulseApp() {
     var pendingJoinPrimary by remember { mutableStateOf<String?>(null) }
     val prefs = remember { context.getSharedPreferences("wrtpulse", android.content.Context.MODE_PRIVATE) }
     var biometricEnabled by remember { mutableStateOf(prefs.getBoolean("biometric_gate", true)) }
+    /** Groups kept at the top of the router list. A set of names; a group is not a row of its own. */
+    var pinnedGroups by remember { mutableStateOf(prefs.getStringSet("pinned_groups", emptySet()).orEmpty().toSet()) }
 
     // Live feeds exist only while the main scaffold is on screen and a session is live.
     val session = if (dest == Dest.Main) WrtRuntime.session else null
@@ -396,6 +400,11 @@ private fun WrtPulseApp() {
                     AboutScreen(onBack = { aboutFromList = false })
                 } else RouterListScreen(
                     onAbout = { aboutFromList = true },
+                    pinned = pinnedGroups,
+                    onTogglePin = { g ->
+                        pinnedGroups = if (g in pinnedGroups) pinnedGroups - g else pinnedGroups + g
+                        prefs.edit().putStringSet("pinned_groups", pinnedGroups).apply()
+                    },
                     saved = savedRouters,
                     connectedIdentity = if (WrtRuntime.session?.isConnected == true) WrtRuntime.session?.target?.identity else null,
                     connectingIdentity = if (flow.busy) connectingIdentity else null,
@@ -419,7 +428,7 @@ private fun WrtPulseApp() {
                         }
                     },
                     onAdd = { pendingJoinPrimary = null; flow.startNew(); dest = Dest.Onboarding1 },
-                    onEdit = { e, name, host, port ->
+                    onEdit = { e, name, host, port, group ->
                         scope.launch {
                             runCatching {
                                 val dao = WrtRuntime.db.routers()
@@ -428,6 +437,7 @@ private fun WrtPulseApp() {
                                 // own address is changed from Network · LAN, which is a
                                 // different thing and says so in the dialog.
                                 if (host != e.host || port != e.port) dao.rehost(e.id, host, port)
+                                if (group != e.groupName) dao.setGroup(e.id, group)
                             }
                         }
                         // The top bar shows the name of the router in hand, and it is not
@@ -466,7 +476,7 @@ private fun WrtPulseApp() {
                         onTrust = { currentRouter = hostKeyRouter; tab = MainTab.Dashboard; dest = Dest.Main },
                     )
                 }
-                Dest.Main -> BoxWithConstraints(Modifier.fillMaxSize()) {
+                Dest.Main -> CompositionLocalProvider(LocalLiveTelemetry provides telemetry) { BoxWithConstraints(Modifier.fillMaxSize()) {
                     // In landscape the Terminal's key rows plus the nav bar leave the output
                     // pane nothing, so the nav gives up its row first. Measured before the nav
                     // is dropped, so the two cannot flip each other back and forth.
@@ -843,6 +853,28 @@ private fun WrtPulseApp() {
                                         onOpenSshKeys = { sshKeysOpen = true },
                                         onOpenBackup = { backupOpen = true },
                                         onOpenAbout = { aboutOpen = true },
+                                        onSetHostname = { hostname ->
+                                            val session = WrtRuntime.session
+                                            if (session == null) "Not connected." else {
+                                                val out = runCatching {
+                                                    session.exec(com.vivekkaushik.wrtpulse.ops.Commands.setHostname(hostname), timeoutMs = 20_000)
+                                                }.getOrNull()
+                                                if (out == null || !out.ok) {
+                                                    "The router did not take it" + (out?.stderr?.trim()?.takeIf { it.isNotEmpty() }?.let { ": $it" } ?: ".")
+                                                } else {
+                                                    val old = flow.board?.hostname
+                                                    flow.hostnameChanged(hostname)
+                                                    // The list's name for it follows only while it still is the old
+                                                    // hostname — a name the user typed there is theirs and stays.
+                                                    val e = savedEntity
+                                                    if (e != null && !old.isNullOrBlank() && e.name == old) {
+                                                        runCatching { WrtRuntime.db.routers().rename(e.id, hostname) }
+                                                        if (currentRouter == old) currentRouter = hostname
+                                                    }
+                                                    null
+                                                }
+                                            }
+                                        },
                                     )
                                 }
                             }
@@ -859,7 +891,7 @@ private fun WrtPulseApp() {
                             }
                         }
                     }
-                }
+                } }
             }
         }
         // Overlays cover the full screen, including behind the system bars.

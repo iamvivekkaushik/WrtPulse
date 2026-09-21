@@ -1,6 +1,7 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
 import android.content.Context
+import com.vivekkaushik.wrtpulse.ui.HoldButton
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -453,7 +454,7 @@ private fun BackupRow(
                 )
             }
             if (confirmDelete) {
-                ActionChip("Tap again to delete", color = Wrt.Red, onClick = onDelete)
+                HoldButton("Hold to delete", "Keep holding…", danger = true, height = 30.dp, onConfirm = onDelete)
             } else {
                 ActionChip("Restore", color = Wrt.Accent, onClick = onRestore)
             }

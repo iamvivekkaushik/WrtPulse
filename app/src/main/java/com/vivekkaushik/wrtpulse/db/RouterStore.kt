@@ -49,6 +49,11 @@ data class RouterEntity(
     val meshMac: String? = null,
     /** On a primary: the sealed [com.vivekkaushik.wrtpulse.ops.MeshProfile] nodes are built from. */
     val meshProfile: ByteArray? = null,
+    /**
+     * The section the list files this router under — "Home", "Office" — or null for none. A
+     * mesh node without one sits with its primary. Not `group`: that is a word SQL keeps.
+     */
+    val groupName: String? = null,
 ) {
     val isMeshNode: Boolean get() = meshPrimary != null
     /** The connection this row describes, carrying its identity so its own pins apply. */
@@ -79,6 +84,7 @@ data class RouterEntity(
             meshBackhaul == other.meshBackhaul &&
             meshSnapshot == other.meshSnapshot &&
             meshMac == other.meshMac &&
+            groupName == other.groupName &&
             credential.contentEquals(other.credential) &&
             privateKey.contentEquals(other.privateKey) &&
             meshProfile.contentEquals(other.meshProfile)
@@ -101,6 +107,7 @@ data class RouterEntity(
         result = 31 * result + (meshSnapshot?.hashCode() ?: 0)
         result = 31 * result + (meshMac?.hashCode() ?: 0)
         result = 31 * result + (meshProfile?.contentHashCode() ?: 0)
+        result = 31 * result + (groupName?.hashCode() ?: 0)
         return result
     }
 
@@ -185,9 +192,13 @@ interface RouterDao {
     /** A node that joined with a freshly installed key keeps it, password gone. */
     @Query("UPDATE routers SET privateKey = :privateKey, credential = NULL WHERE id = :id")
     suspend fun setPrivateKey(id: Long, privateKey: ByteArray)
+
+    /** Files the row under a list section; null takes it out of any. */
+    @Query("UPDATE routers SET groupName = :group WHERE id = :id")
+    suspend fun setGroup(id: Long, group: String?)
 }
 
-@Database(entities = [RouterEntity::class, ClientName::class], version = 6, exportSchema = false)
+@Database(entities = [RouterEntity::class, ClientName::class], version = 7, exportSchema = false)
 abstract class WrtDb : RoomDatabase() {
     abstract fun routers(): RouterDao
     abstract fun clientNames(): ClientNameDao
@@ -250,9 +261,16 @@ abstract class WrtDb : RoomDatabase() {
             }
         }
 
+        /** One nullable column: a saved router's list section. Rows without one look as before. */
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE routers ADD COLUMN groupName TEXT")
+            }
+        }
+
         fun build(context: Context): WrtDb =
             Room.databaseBuilder(context, WrtDb::class.java, "wrtpulse.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .build()
     }
 }

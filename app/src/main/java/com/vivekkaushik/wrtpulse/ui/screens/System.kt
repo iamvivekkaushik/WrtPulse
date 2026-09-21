@@ -45,6 +45,13 @@ import com.vivekkaushik.wrtpulse.ui.WrtIcons
 import com.vivekkaushik.wrtpulse.ui.mono
 import com.vivekkaushik.wrtpulse.ui.sans
 import com.vivekkaushik.wrtpulse.ui.theme.Wrt
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.runtime.rememberCoroutineScope
+import com.vivekkaushik.wrtpulse.ui.PrimaryButton
+import com.vivekkaushik.wrtpulse.ui.GhostButton
+import kotlinx.coroutines.launch
 
 @Composable
 fun SystemScreen(
@@ -71,8 +78,11 @@ fun SystemScreen(
     onOpenSshKeys: () -> Unit = {},
     onOpenBackup: () -> Unit = {},
     onOpenAbout: () -> Unit = {},
+    /** Renames the router itself; returns what went wrong, or null once it took. */
+    onSetHostname: (suspend (String) -> String?)? = null,
 ) {
     var biometricDemo by remember { mutableStateOf(true) }
+    var editingHostname by remember { mutableStateOf(false) }
     val isLive = live != null
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         ConnectionTopBar(
@@ -188,14 +198,17 @@ fun SystemScreen(
             }
             SectionLabel("ROUTER · APP", tracking = 0.14)
             SystemCard {
+                val canRename = isLive && onSetHostname != null
                 ValueRow(
-                    "Hostname · uptime", null,
+                    "Hostname · uptime",
+                    if (canRename) "The router's own name — tap to change it" else null,
                     if (isLive) {
                         listOfNotNull(
                             board?.hostname?.ifBlank { null } ?: routerName,
                             live!!.uptimeLabel.takeIf { it != "—" },
                         ).joinToString(" · ")
                     } else "home.gw · IST",
+                    onClick = if (canRename) { { editingHostname = true } } else null,
                 )
                 ValueRow(
                     "Country / regulatory domain",
@@ -244,6 +257,14 @@ fun SystemScreen(
                     onClick = onOpenAbout,
                 )
             }
+            if (editingHostname && onSetHostname != null) {
+                HostnameDialog(
+                    current = board?.hostname.orEmpty(),
+                    onDismiss = { editingHostname = false },
+                    onSave = onSetHostname,
+                    onSaved = { editingHostname = false },
+                )
+            }
             SectionLabel("DANGER ZONE", color = Wrt.Red, tracking = 0.14)
             Column(
                 Modifier
@@ -252,17 +273,13 @@ fun SystemScreen(
                     .background(Wrt.Red.copy(alpha = 0.04f), RoundedCornerShape(13.dp))
                     .padding(horizontal = 14.dp, vertical = 2.dp)
             ) {
+                // Firmware has its own row under Maintenance above; a second door to the same
+                // wizard down here was a duplicate, and a red one at that.
                 DangerRow(
                     WrtIcons.Warning, "Factory reset",
                     "Erases all settings · firstboot -y && reboot",
-                    onClick = if (isLive) onOpenReset else null,
-                )
-                Box(Modifier.fillMaxWidth().height(1.dp).background(Wrt.Red.copy(alpha = 0.15f)))
-                DangerRow(
-                    WrtIcons.Lightning, "Reflash firmware",
-                    "Multi-step wizard · sysupgrade -n",
                     last = true,
-                    onClick = if (isLive) onOpenFirmware else null,
+                    onClick = if (isLive) onOpenReset else null,
                 )
             }
         }
@@ -314,6 +331,91 @@ private fun SystemRow(
         Icon(WrtIcons.ChevronRight, null, Modifier.size(13.dp), tint = Wrt.TextDim)
     }
     if (!last) Divider()
+}
+
+/**
+ * A hostname as typed → as the kernel will take it: letters, digits and dashes, runs of
+ * anything else folded to one dash, at most 63 characters, and null when nothing is left.
+ * The same rule a mesh node's name goes through, without that one's stand-in for empty.
+ */
+internal fun routerHostname(input: String): String? =
+    input.trim().replace(Regex("[^A-Za-z0-9-]+"), "-").trim('-').take(63).trim('-').ifEmpty { null }
+
+/**
+ * Renames the router itself. This is not the name on the router list — that one is the
+ * app's and is edited there — but what the router calls itself, which its DHCP and DNS
+ * neighbours see. Shows what will actually be written when the typed name needs cleaning.
+ */
+@Composable
+private fun HostnameDialog(
+    current: String,
+    onDismiss: () -> Unit,
+    onSave: suspend (String) -> String?,
+    onSaved: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var text by remember(current) { mutableStateOf(current) }
+    var saving by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val chosen = routerHostname(text)
+    val changed = chosen != null && chosen != current
+    Dialog(onDismissRequest = { if (!saving) onDismiss() }) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .border(1.dp, Wrt.BorderCard, RoundedCornerShape(16.dp))
+                .background(Wrt.BgBar, RoundedCornerShape(16.dp))
+                .padding(18.dp)
+        ) {
+            Text("Change hostname", style = sans(15f, 650))
+            Text(
+                "What the router calls itself, and what DHCP and DNS on your network see. " +
+                    "The name on this app's router list is separate.",
+                style = sans(11.5f, 400, Wrt.TextDim, lineHeight = 17.sp),
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            Spacer(Modifier.height(14.dp))
+            SectionLabel("HOSTNAME")
+            DialogField(text) { text = it; error = null }
+            Text(
+                when {
+                    chosen == null -> "Letters, digits and dashes."
+                    chosen != text.trim() -> "Will be saved as $chosen."
+                    !changed -> "That is its name now."
+                    else -> "Applies at once; no reboot."
+                },
+                style = mono(10f, 500, if (chosen == null) Wrt.Red else Wrt.TextDim),
+                modifier = Modifier.padding(top = 6.dp),
+            )
+            error?.let {
+                Text(it, style = sans(11.5f, 500, Wrt.Red, lineHeight = 17.sp), modifier = Modifier.padding(top = 10.dp))
+            }
+            Spacer(Modifier.height(16.dp))
+            if (changed && !saving) {
+                PrimaryButton("Save") {
+                    scope.launch {
+                        saving = true
+                        val why = onSave(chosen!!)
+                        saving = false
+                        if (why == null) onSaved() else error = why
+                    }
+                }
+            } else {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .background(Wrt.BgDeep, RoundedCornerShape(12.dp))
+                        .border(1.dp, Wrt.BorderInput, RoundedCornerShape(12.dp)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(if (saving) "Saving…" else "Save", style = sans(13.5f, 600, Wrt.TextDim))
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            GhostButton("Cancel", onClick = onDismiss)
+        }
+    }
 }
 
 @Composable

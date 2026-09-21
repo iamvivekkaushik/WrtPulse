@@ -28,9 +28,18 @@ class RouterOpsTest {
         assertTrue(!cmd.contains("https://"))
         // Running out of clock is the expected end of a leg, not a failure.
         assertTrue(cmd.contains("rc=\$?; [ \$rc -eq 28 ] && rc=0"))
-        // Without curl there is no clock or partial count, so the fallback is a smaller fixed fetch.
-        assertTrue(cmd.contains("__down?bytes=20000000'; { uclient-fetch"))
-        assertTrue(cmd.contains("-O /dev/null"))
+        // Without curl the router bounds the leg itself: the same 100 MB is asked for, the
+        // stream is counted by wc, and a reaper cuts it at 10 s — whichever ends first.
+        assertTrue(cmd.contains("D='http://speed.cloudflare.com/__down?bytes=99999999'"))
+        assertTrue(cmd.contains("-O - \"\$D\" 2>/dev/null & echo \$! > \$P; wait; } | wc -c > \$N & p=\$!"))
+        assertTrue(cmd.contains("while [ \$i -lt 10 ] && kill -0 \$p"))
+        // Only the fetcher it started is killed, by the pid it recorded — never every fetch on the box.
+        assertTrue(cmd.contains("kill \$(cat \$P 2>/dev/null) 2>/dev/null"))
+        assertTrue(!cmd.contains("killall"))
+        // The main shell waits on the transfer for its finish time, then cancels the reaper.
+        assertTrue(cmd.indexOf("wait \$p") < cmd.indexOf("kill \$k"))
+        // Two fields — bytes and the router's own seconds — so the app need not wall-time it.
+        assertTrue(cmd.contains("echo \"\$(cat \$N) \$(awk \"BEGIN{print \$t1-\$t0}\")\""))
         // curl reports its own timing, with the handshake separated out, on a line of its own
         // so the CPU sample that follows does not land on the same line.
         assertTrue(cmd.contains("curl -s -o /dev/null --max-time 10 -w '%{size_download} %{size_upload} %{time_total} %{time_pretransfer}\\n'"))
@@ -39,7 +48,6 @@ class RouterOpsTest {
         assertTrue(cmd.trimEnd().endsWith("exit \$rc"))
         assertTrue(cmd.contains("uclient-fetch"))
         assertTrue(cmd.contains("wget"))            // fallback when uclient-fetch is absent
-        assertTrue(cmd.contains("echo 20000000"))   // the fallback's only number
         assertEquals(10, Commands.SPEEDTEST_SECONDS)
     }
 
@@ -51,7 +59,7 @@ class RouterOpsTest {
         assertTrue(prepare.contains("of=${Commands.SPEEDTEST_UPLOAD_FILE} bs=1 count=0 seek=5000000"))
         assertEquals(100_000_000L, Commands.SPEEDTEST_UP_BYTES)
 
-        val upload = Commands.speedtestUpload(5_000_000)
+        val upload = Commands.speedtestUpload()
         assertTrue(upload.contains("--max-time 10 "))
         assertTrue(upload.contains("rc=\$?; [ \$rc -eq 28 ] && rc=0"))
         assertTrue(upload.contains("http://speed.cloudflare.com/__up"))
@@ -65,9 +73,17 @@ class RouterOpsTest {
         assertTrue(upload.contains("-T ${Commands.SPEEDTEST_UPLOAD_FILE} -X POST"))
         assertTrue(!upload.contains("--data-binary"))
         assertTrue(upload.contains("--post-file=${Commands.SPEEDTEST_UPLOAD_FILE}"))
-        assertTrue(upload.contains("echo 5000000"))
+        // Without curl the upload is bounded the same way: a reaper kills the post at 10 s and
+        // the WAN interface's tx counter says how much left the router in that time.
+        assertTrue(upload.contains("while [ \$i -lt 10 ] && kill -0 \$p"))
+        assertTrue(upload.contains("statistics/tx_bytes"))
+        assertTrue(upload.contains("echo \"\$((x1-x0)) \$(awk \"BEGIN{print \$t1-\$t0}\")\""))
+        assertTrue(!upload.contains("killall"))
 
-        assertEquals("rm -f ${Commands.SPEEDTEST_UPLOAD_FILE}", Commands.SPEEDTEST_CLEANUP)
+        assertEquals(
+            "rm -f ${Commands.SPEEDTEST_UPLOAD_FILE} ${Commands.SPEEDTEST_COUNT_FILE} ${Commands.SPEEDTEST_PID_FILE}",
+            Commands.SPEEDTEST_CLEANUP,
+        )
         assertTrue(Commands.SPEEDTEST_UPLOAD_FILE.startsWith("/tmp/")) // RAM, not flash
     }
 
@@ -111,9 +127,12 @@ class RouterOpsTest {
         assertTrue(!SpeedResult().cpuLimited)
     }
 
-    /** The fallback echoes only the byte count; the wall clock around the exec times it. */
+    /** The fallback reports its own bytes and seconds; a bare count is timed by the wall clock. */
     @Test
-    fun `an echoed byte count is timed by the wall clock`() {
+    fun `a fallback line carries its own clock and a bare count is wall-timed`() {
+        // What the no-curl leg prints: bytes, then the router's elapsed seconds — the wall clock is not used.
+        assertEquals(Transfer(58_111_656L, 2.11), RouterOps.parseTransfer("58111656 2.11", wall = 99.0))
+        assertEquals(null, RouterOps.parseTransfer("0 3.2", wall = 5.5))   // nothing moved on the fallback either
         assertEquals(Transfer(20_000_000L, 5.5), RouterOps.parseTransfer("20000000", wall = 5.5))
         // Sampled, but nothing moved: still not a measurement.
         assertEquals(null, RouterOps.parseTransfer("cpu  1 0 1 10 0 0 0 0\ncpu  2 0 2 20 0 0 0 0", wall = 5.5))

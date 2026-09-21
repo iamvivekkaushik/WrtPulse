@@ -1,6 +1,7 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
 import androidx.activity.compose.BackHandler
+import com.vivekkaushik.wrtpulse.ui.HoldButton
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -579,24 +580,10 @@ private fun OpsFold(ops: List<String>) {
     }
 }
 
-/** A button that asks twice: the first tap arms it, the second does it. */
+/** This page's confirm: full width, spaced from what is above, and held for three seconds. */
 @Composable
-private fun TwoTapButton(label: String, armedLabel: String, danger: Boolean = false, enabled: Boolean = true, onConfirm: () -> Unit) {
-    var armed by remember { mutableStateOf(false) }
-    LaunchedEffect(armed) { if (armed) { delay(6_000); armed = false } }
-    val tone = if (danger) Wrt.Red else Wrt.Accent
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .padding(top = 12.dp)
-            .height(44.dp)
-            .border(1.dp, if (armed) tone else if (enabled) tone.copy(alpha = 0.5f) else Wrt.BorderCard, RoundedCornerShape(11.dp))
-            .background(if (armed) tone.copy(alpha = 0.16f) else Color.Transparent, RoundedCornerShape(11.dp))
-            .clickable(enabled = enabled) { if (armed) { armed = false; onConfirm() } else armed = true },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(if (armed) armedLabel else label, style = sans(12.5f, 650, if (enabled) tone else Wrt.TextDim))
-    }
+private fun HoldButtonRow(label: String, holdLabel: String, danger: Boolean = false, enabled: Boolean = true, onConfirm: () -> Unit) {
+    HoldButton(label, holdLabel, Modifier.fillMaxWidth().padding(top = 12.dp), danger = danger, enabled = enabled, onConfirm = onConfirm)
 }
 
 @Composable
@@ -637,7 +624,7 @@ private fun RoamingCard(store: MeshStore) {
                         if (!store.applying) scope.launch { store.repairRoaming() }
                     }
                 }
-                TwoTapButton("Turn off hand-off", "Tap again to turn it off") { scope.launch { store.disableRoaming() } }
+                HoldButtonRow("Turn off hand-off", "Hold to turn it off") { scope.launch { store.disableRoaming() } }
             }
         }
         store.notice?.let { NoteLine(it, Wrt.Accent) }
@@ -670,7 +657,7 @@ private fun MeshLinkCard(store: MeshStore) {
                 }
                 problems.forEach { NoteLine(it, Wrt.Red) }
                 if (swap != null && problems.none { it.startsWith("Only") }) {
-                    TwoTapButton("Install ${swap.install}", "Tap again — Wi-Fi drops for a minute") {
+                    HoldButtonRow("Install ${swap.install}", "Hold — Wi-Fi drops for a minute") {
                         scope.launch { store.swapWpad() }
                     }
                 }
@@ -701,7 +688,7 @@ private fun MeshLinkCard(store: MeshStore) {
                         peers.joinToString(" · ") { p -> (p.signalDbm?.let { "$it dBm" } ?: "—") },
                     Wrt.TextSecondary,
                 )
-                TwoTapButton("Turn off mesh link", "Tap again — wireless nodes lose their uplink", danger = true) {
+                HoldButtonRow("Turn off mesh link", "Hold — wireless nodes lose their uplink", danger = true) {
                     scope.launch { store.disableMesh() }
                 }
             }
@@ -863,9 +850,9 @@ private fun NodeView(hooks: MeshHooks, store: MeshStore, entity: RouterEntity, o
             style = sans(11f, 400, Wrt.TextDim, lineHeight = 16.sp),
             modifier = Modifier.padding(horizontal = 2.dp),
         )
-        TwoTapButton(
+        HoldButtonRow(
             if (restorable) "Restore and leave" else "Forget the mesh",
-            "Tap again to leave",
+            "Hold to leave",
             danger = true,
             onConfirm = onLeave,
         )
@@ -904,7 +891,7 @@ private fun FinishBackhaulCard(store: MeshStore, swap: WpadSwap, primaryName: St
             store.overlayFreeKb?.let { NoteLine("$it kB free on the overlay", Wrt.TextDim) }
             problems.forEach { NoteLine(it, Wrt.Red) }
             if (problems.none { it.startsWith("Only") }) {
-                TwoTapButton("Install ${swap.install}", "Tap again — Wi-Fi drops for a minute") {
+                HoldButtonRow("Install ${swap.install}", "Hold — Wi-Fi drops for a minute") {
                     scope.launch { store.swapWpad() }
                 }
             }
@@ -1235,7 +1222,7 @@ fun LeaveMeshScreen(
                     store.onRouterSnapshotLan?.let { ReviewLine("comes back at", it) }
                     store.onRouterSnapshotHostname?.let { ReviewLine("hostname", it) }
                     result?.let { NoteLine(it, if (it.startsWith("Failed")) Wrt.Red else Wrt.TextDim) }
-                    TwoTapButton(if (busy) "Restoring…" else "Restore and leave", "Tap again — the router reboots", danger = true, enabled = !busy) {
+                    HoldButtonRow(if (busy) "Restoring…" else "Restore and leave", "Hold — the router reboots", danger = true, enabled = !busy) {
                         scope.launch {
                             busy = true
                             val out = store.restoreOnRouterSnapshot()
@@ -1244,7 +1231,7 @@ fun LeaveMeshScreen(
                         }
                     }
                     if (result?.startsWith("Failed") == true) {
-                        TwoTapButton("Forget the mesh anyway", "Tap again to forget", danger = true) { onLeft(null) }
+                        HoldButtonRow("Forget the mesh anyway", "Hold to forget", danger = true) { onLeft(null) }
                     }
                 }
                 return@Column
@@ -1266,7 +1253,7 @@ fun LeaveMeshScreen(
                     result?.let { NoteLine(it, if (it.startsWith("Failed")) Wrt.Red else Wrt.TextDim) }
                     backup?.progress?.let { NoteLine(it, Wrt.Accent) }
                     val ready = candidate != null && !busy && backup != null
-                    TwoTapButton(if (busy) "Restoring…" else "Restore and leave", "Tap again — the router reboots", danger = true, enabled = ready) {
+                    HoldButtonRow(if (busy) "Restoring…" else "Restore and leave", "Hold — the router reboots", danger = true, enabled = ready) {
                         scope.launch {
                             busy = true
                             val up = backup!!.upload()
@@ -1276,10 +1263,10 @@ fun LeaveMeshScreen(
                         }
                     }
                     if (result?.startsWith("Failed") == true) {
-                        TwoTapButton("Forget the mesh anyway", "Tap again to forget", danger = true) { onLeft(null) }
+                        HoldButtonRow("Forget the mesh anyway", "Hold to forget", danger = true) { onLeft(null) }
                     }
                 } else {
-                    TwoTapButton("Forget the mesh", "Tap again to forget", danger = true) { onLeft(null) }
+                    HoldButtonRow("Forget the mesh", "Hold to forget", danger = true) { onLeft(null) }
                 }
             }
         }

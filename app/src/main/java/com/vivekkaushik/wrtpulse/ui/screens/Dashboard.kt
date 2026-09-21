@@ -1,6 +1,7 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
 import androidx.compose.animation.core.Animatable
+import com.vivekkaushik.wrtpulse.ui.rememberHoldHaptics
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -541,7 +542,11 @@ private fun SpeedtestDialog(ops: RouterOps, onDismiss: () -> Unit) {
 fun HoldToConfirm(label: String, onConfirm: () -> Unit) {
     val progress = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
+    val haptics = rememberHoldHaptics()
     var done by remember { mutableStateOf(false) }
+    // True from press until release or completion: the release pulse belongs only to a hold
+    // that was actually under way, and the pointer loop below can report a release more than once.
+    var live by remember { mutableStateOf(false) }
     Box(
         Modifier
             .fillMaxWidth()
@@ -554,19 +559,28 @@ fun HoldToConfirm(label: String, onConfirm: () -> Unit) {
                         awaitPointerEvent()
                         val pressed = currentEvent.changes.any { it.pressed }
                         if (pressed && !done && !progress.isRunning) {
+                            live = true
                             scope.launch {
+                                // The feel runs as a child of the hold, so stopping the fill stops it too.
+                                val train = launch { haptics.train { progress.value } }
                                 progress.animateTo(
                                     1f,
                                     tween(((1f - progress.value) * 3000).toInt(), easing = LinearEasing),
                                 )
+                                train.cancel()
                                 if (progress.value >= 1f) {
                                     done = true
+                                    live = false
+                                    haptics.confirm()
                                     onConfirm()
                                 }
                             }
                         } else if (!pressed && !done) {
+                            val wasLive = live
+                            live = false
                             scope.launch {
                                 progress.stop()
+                                if (wasLive) haptics.release()
                                 progress.animateTo(0f, tween(180))
                             }
                         }

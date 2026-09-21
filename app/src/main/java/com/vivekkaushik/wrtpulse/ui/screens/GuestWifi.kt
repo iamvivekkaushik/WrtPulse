@@ -1,6 +1,7 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
 import androidx.compose.foundation.background
+import com.vivekkaushik.wrtpulse.ui.HoldButton
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -249,7 +250,6 @@ private fun ManageGuest(store: GuestStore, onDismiss: () -> Unit) {
     val kind = store.kind
     val clipboard = LocalClipboardManager.current
     var reveal by remember { mutableStateOf(false) }
-    var confirmRemove by remember { mutableStateOf(false) }
     var copied by remember { mutableStateOf(false) }
 
     Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -296,18 +296,16 @@ private fun ManageGuest(store: GuestStore, onDismiss: () -> Unit) {
     store.error?.let { Text(it, style = mono(10.5f, 500, Wrt.Red, lineHeight = 16.sp), modifier = Modifier.padding(top = 10.dp)) }
 
     Spacer(Modifier.height(16.dp))
-    if (confirmRemove) {
-        PrimaryButton(if (store.applying) "Removing…" else "Tap again to remove", color = Wrt.Red, textColor = Wrt.OnRed) {
-            if (!store.applying) scope.launch { if (store.remove()) onDismiss() }
-        }
-        Text(
-            "Deletes the ${kind.ssidSuffix} SSID, its subnet, DHCP pool and firewall zone.",
-            style = sans(10f, 400, Wrt.TextDim, lineHeight = 14.sp),
-            modifier = Modifier.padding(top = 6.dp),
-        )
-    } else {
-        GhostButton("Remove ${kind.noun}", border = Wrt.Red.copy(alpha = 0.5f), textColor = Wrt.Red) { confirmRemove = true }
-    }
+    HoldButton(
+        if (store.applying) "Removing…" else "Remove ${kind.noun}",
+        "Hold — removes the whole network",
+        Modifier.fillMaxWidth(), danger = true, enabled = !store.applying, height = 46.dp,
+    ) { scope.launch { if (store.remove()) onDismiss() } }
+    Text(
+        "Deletes the ${kind.ssidSuffix} SSID, its subnet, DHCP pool and firewall zone.",
+        style = sans(10f, 400, Wrt.TextDim, lineHeight = 14.sp),
+        modifier = Modifier.padding(top = 6.dp),
+    )
     Spacer(Modifier.height(6.dp))
     GhostButton("Done", onClick = onDismiss)
 }

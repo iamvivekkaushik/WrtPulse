@@ -34,6 +34,39 @@ class ConnectGateTest {
      * on every connect, so renaming a router and then reconnecting — which is exactly what a
      * subnet move forces you to do — put the old name straight back.
      */
+    /**
+     * The group is written by the list, never by the router, so the row a reconnect rebuilds
+     * from the router's answers has to carry it over — the same way it already carried the
+     * mesh columns. Without this, connecting to a grouped router dropped it out of its group.
+     */
+    @Test
+    fun `a reconnect keeps the group and the mesh columns the app wrote`() {
+        val existing = RouterEntity(
+            id = 7, name = "Jio", host = "192.168.0.1", port = 22, username = "root", model = "old", summary = "old",
+            credential = null, lastSeenEpoch = 1, identity = "id-7",
+            meshPrimary = "id-1", meshBackhaul = "wireless", meshSnapshot = "snap.tgz", meshMac = "aa:bb", meshProfile = byteArrayOf(1),
+            groupName = "Home",
+        )
+        val fresh = RouterEntity(
+            id = 7, name = "Jio", host = "192.168.0.1", port = 22, username = "root", model = "new", summary = "new",
+            credential = null, lastSeenEpoch = 2, identity = "id-7",
+        )
+        with(OnboardingFlow) {
+            val kept = fresh.keptAcrossReconnect(existing)
+            assertEquals("Home", kept.groupName)
+            assertEquals("id-1", kept.meshPrimary)
+            assertEquals("wireless", kept.meshBackhaul)
+            assertEquals("snap.tgz", kept.meshSnapshot)
+            assertEquals("aa:bb", kept.meshMac)
+            assertTrue(kept.meshProfile.contentEquals(byteArrayOf(1)))
+            // What the router just said still wins for what the router owns.
+            assertEquals("new", kept.model)
+            assertEquals(2L, kept.lastSeenEpoch)
+            // A first save has nothing to keep.
+            assertNull(fresh.keptAcrossReconnect(null).groupName)
+        }
+    }
+
     @Test
     fun `a saved name is not overwritten by the hostname`() {
         assertEquals("Deco", OnboardingFlow.savedName("Deco", "OpenWrt"))

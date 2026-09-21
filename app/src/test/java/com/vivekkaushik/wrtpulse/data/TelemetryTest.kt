@@ -47,6 +47,30 @@ class TelemetryTest {
         ___wrt___ essid
     """.trimIndent()
 
+    /**
+     * The top bar announces a LOST link, never a slow first load: silence from a router
+     * that has never answered is loading. So the mark is set only by a failure that follows
+     * a success, and the next success clears it.
+     */
+    @Test
+    fun `contact counts as lost only after replies had been arriving`() {
+        val t = telemetry()
+        assertTrue(!t.everLoaded)
+        t.tickFailed(nowMillis = 1_000)
+        assertTrue(t.stale)
+        assertEquals(null, t.lostAtMillis)          // never loaded: loading, not loss
+        t.tickSucceeded()
+        assertTrue(t.everLoaded)                    // from here, a redial is an outage
+        assertEquals(null, t.lostAtMillis)
+        t.tickFailed(nowMillis = 5_000)
+        assertEquals(5_000L, t.lostAtMillis)        // lost, stamped at the first failure
+        t.tickFailed(nowMillis = 9_000)
+        assertEquals(5_000L, t.lostAtMillis)        // later failures keep the first stamp
+        t.tickSucceeded()
+        assertEquals(null, t.lostAtMillis)          // a reply clears it
+        assertTrue(!t.stale)
+    }
+
     @Test
     fun `two ticks produce cpu percent and wan throughput`() {
         val t = telemetry()
