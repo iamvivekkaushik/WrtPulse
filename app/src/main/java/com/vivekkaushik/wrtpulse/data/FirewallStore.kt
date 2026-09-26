@@ -497,6 +497,15 @@ class FirewallStore(private val session: RouterSession) {
 
     private fun draftSection(d: ForwardDraft) = d.replaces ?: "wrtpulse_fwd_${d.id}"
 
+    /**
+     * The section a forward draft is written to. An edit keeps a named section's name, but an
+     * anonymous one cannot be written back to its `@redirect[i]`: the batch deletes the old
+     * section first, and after that the index names the next redirect along, which the edit
+     * would then be poured over. It gets a name of its own instead.
+     */
+    private fun writtenSection(d: ForwardDraft) =
+        d.replaces?.takeUnless { Commands.isAnonymousSection(it) } ?: "wrtpulse_fwd_${d.id}"
+
     private fun forwardOptions(d: ForwardDraft): List<Pair<String, String>> = buildList {
         add("name" to d.name.trim().ifEmpty { "Forward ${d.srcPort.trim()}" })
         add("src" to d.src)
@@ -525,7 +534,7 @@ class FirewallStore(private val session: RouterSession) {
 
     /** New sections as (section, type, options), so ops and the diff agree by construction. */
     private fun additions(): List<Triple<String, String, List<Pair<String, String>>>> = buildList {
-        forwardDrafts.forEach { d -> add(Triple(draftSection(d), "redirect", forwardOptions(d))) }
+        forwardDrafts.forEach { d -> add(Triple(writtenSection(d), "redirect", forwardOptions(d))) }
         ruleDrafts.forEach { d -> add(Triple("wrtpulse_rule_${d.id}", "rule", ruleOptions(d))) }
         forwardingDrafts.forEach { (src, dest) ->
             add(Triple("wrtpulse_zone_${section(src)}_${section(dest)}", "forwarding", listOf("src" to src, "dest" to dest)))
@@ -552,38 +561,49 @@ class FirewallStore(private val session: RouterSession) {
         }
     }
 
-    /** Sections removed: explicit deletions, replaced forwards, and the old DMZ when it changes. */
-    private fun removals(): List<String> = buildList {
-        addAll(deletions)
-        forwardDrafts.mapNotNull { it.replaces }.forEach { add("firewall.$it") }
-        if (dmzDraft != null) config.forwards.filter { it.isDmz }.forEach { add("firewall.${it.section}") }
-    }.distinct().sorted()
+    /**
+     * Sections removed: explicit deletions, replaced forwards, and the old DMZ when it changes —
+     * in the order uci needs them, anonymous ones highest index first ([Commands.uciDeleteOrder]).
+     */
+    private fun removals(): List<String> = Commands.uciDeleteOrder(
+        buildList {
+            addAll(deletions)
+            forwardDrafts.mapNotNull { it.replaces }.forEach { add("firewall.$it") }
+            if (dmzDraft != null) config.forwards.filter { it.isDmz }.forEach { add("firewall.${it.section}") }
+        }
+    )
+
+    /** Staged scalar edits that still apply: an edit of a section the batch removes goes with it. */
+    private fun liveEdits(gone: List<String>): List<Map.Entry<String, Pair<String, String>>> = staged.entries
+        .filter { e -> gone.none { e.key.startsWith("$it.") } }
+        .sortedBy { it.key }
 
     fun ops(): List<String> {
         val gone = removals()
-        val scalars = staged.entries
-            .filter { e -> gone.none { e.key.startsWith("$it.") } }
-            .sortedBy { it.key }
-            .map { (path, change) ->
-                if (change.second.isEmpty()) "delete $path"
-                else "set $path='${Commands.escapeValue(change.second)}'"
-            }
+        val scalars = liveEdits(gone).map { (path, change) ->
+            if (change.second.isEmpty()) "delete $path"
+            else "set $path='${Commands.escapeValue(change.second)}'"
+        }
         val adds = additions().flatMap { (name, type, options) ->
             listOf("set firewall.$name=$type") + options.map { (k, v) ->
                 "set firewall.$name.$k='${Commands.escapeValue(v)}'"
             }
         }
-        // Deletions go first: a replaced forward's old section must not outlive the new one
-        // in the same batch, and a DMZ being re-ranged must not briefly have two.
-        return gone.map { "delete $it" } + scalars + adds
+        // Scalar edits first, while every `@type[i]` still names the section it was read as:
+        // after a delete, `@rule[7]` is whatever rule came next. Deletions before the new
+        // sections: a replaced forward's old section must not outlive the new one in the same
+        // batch, and a DMZ being re-ranged must not briefly have two.
+        return scalars + gone.map { "delete $it" } + adds
     }
 
+    /** The batch for review: the same changes as [ops], section for section, in the same order. */
     fun diffLines(): List<Pair<String, Boolean>> = buildList {
-        removals().forEach { add("- $it" to false) }
-        staged.entries.sortedBy { it.key }.forEach { (path, change) ->
+        val gone = removals()
+        liveEdits(gone).forEach { (path, change) ->
             add("- $path='${change.first}'" to false)
             if (change.second.isNotEmpty()) add("+ $path='${change.second}'" to true)
         }
+        gone.forEach { add("- $it" to false) }
         additions().forEach { (name, type, options) ->
             add("+ firewall.$name=$type" to true)
             options.forEach { (k, v) -> add("+ firewall.$name.$k='$v'" to true) }

@@ -131,8 +131,11 @@ class FirewallStoreTest {
         s.stageForward(d)
         val ops = s.ops()
         assertEquals("delete firewall.@redirect[0]", ops.first())
-        assertTrue(ops.contains("set firewall.@redirect[0].dest_ip='192.168.1.11'"))
+        // Not written back under its index: once the old section is gone, @redirect[0] is Plex.
+        assertTrue(ops.contains("set firewall.wrtpulse_fwd_${d.id}.dest_ip='192.168.1.11'"))
+        assertFalse(ops.any { it.startsWith("set firewall.@redirect[") })
         assertEquals(2, s.forwardRows().size)
+        assertEquals(d, s.forwardDraftFor("@redirect[0]"))
     }
 
     @Test
@@ -325,19 +328,25 @@ class FirewallStoreTest {
     // ---- the batch as a whole ----
 
     @Test
-    fun `deletions lead the batch and the diff lists the same lines`() {
+    fun `edits lead the batch, then deletions, then new sections, and the diff lists the same lines`() {
         val s = store()
         s.deleteSection("kids")
         s.setDefaultFlag("syn_flood", false)
         s.stageForward(s.newForwardDraft().copy(srcPort = "51820", proto = "udp", destIp = "192.168.1.20"))
         val ops = s.ops()
-        assertEquals("delete firewall.kids", ops.first())
-        assertTrue(ops.indexOf("set firewall.@defaults[0].syn_flood='0'") < ops.indexOfFirst { it.endsWith("=redirect") })
+        assertEquals(listOf("set firewall.@defaults[0].syn_flood='0'", "delete firewall.kids"), ops.take(2))
+        assertTrue(ops.indexOf("delete firewall.kids") < ops.indexOfFirst { it.endsWith("=redirect") })
         val diff = s.diffLines()
-        assertEquals("- firewall.kids" to false, diff.first())
-        assertTrue(diff.any { it.first == "- firewall.@defaults[0].syn_flood='1'" && !it.second })
-        assertTrue(diff.any { it.first == "+ firewall.@defaults[0].syn_flood='0'" && it.second })
+        assertEquals(
+            listOf(
+                "- firewall.@defaults[0].syn_flood='1'" to false,
+                "+ firewall.@defaults[0].syn_flood='0'" to true,
+                "- firewall.kids" to false,
+            ),
+            diff.take(3),
+        )
         assertTrue(diff.any { it.first.endsWith(".src_dport='51820'") && it.second })
+        assertEquals(steps(ops), reviewSteps(diff))
     }
 
     @Test
@@ -388,6 +397,140 @@ class FirewallStoreTest {
         assertTrue("expected an id past 7, got ${d.id}", d.id > 7)
     }
 
+    // ---- anonymous sections: the batch run the way uci runs it ----
+    //
+    // `@type[i]` counts the named sections of the type too, and uci resolves it command by
+    // command, so every delete renumbers what follows. These run ops() through FakeUci against
+    // a config read from its own `uci show`, and check what actually got deleted and edited.
+
+    @Test
+    fun `deleting two anonymous forwardings takes exactly those two and keeps lan to wan`() {
+        val (s, uci) = used()
+        s.toggleForwarding("guest", "wan") // @forwarding[0]
+        s.toggleForwarding("guest", "lan") // @forwarding[2], the named one being [1]
+        assertEquals(listOf("delete firewall.@forwarding[2]", "delete firewall.@forwarding[0]"), s.ops())
+        uci.run(s.ops()).assertOutcome(deleted = setOf("guestWan", "guestLan"))
+    }
+
+    /** The hazard, spelled out: lowest index first, the second delete lands on lan → wan. */
+    @Test
+    fun `the same two deleted lowest index first would take lan to wan`() {
+        val uci = FakeUci("firewall", usedFirewall)
+            .run(listOf("delete firewall.@forwarding[0]", "delete firewall.@forwarding[2]"))
+        assertEquals(setOf("guestWan", "lanWan"), uci.deleted)
+    }
+
+    @Test
+    fun `rules go highest index first by number, named ones after, and edits land before any delete`() {
+        val (s, uci) = used()
+        s.removeRule("@rule[2]") // Allow-IGMP
+        s.removeRule("@rule[10]") // Block-Telnet: as text it sorts ahead of @rule[2]
+        s.removeRule("@rule[3]") // Allow-DHCPv6
+        s.removeRule("kids") // named, but it sits ahead of @rule[10] and counts
+        s.toggleRule("@rule[13]") // Plex-Out off: four deletes below it
+        s.setWanPing(false) // Allow-Ping, @rule[1], off
+        assertEquals(
+            listOf(
+                "set firewall.@rule[13].enabled='0'",
+                "set firewall.@rule[1].enabled='0'",
+                "delete firewall.@rule[10]",
+                "delete firewall.@rule[3]",
+                "delete firewall.@rule[2]",
+                "delete firewall.kids",
+            ),
+            s.ops(),
+        )
+        uci.run(s.ops()).assertOutcome(
+            deleted = setOf("igmp", "telnet", "dhcpv6", "kids"),
+            edited = mapOf("plexOut" to mapOf("enabled" to "0"), "ping" to mapOf("enabled" to "0")),
+        )
+    }
+
+    @Test
+    fun `an edited anonymous forward is written to a new section, not poured over the next redirect`() {
+        val (s, uci) = used()
+        val plex = s.forwardRows().first { it.name == "Plex" } // @redirect[1]
+        val d = s.newForwardDraft(plex).copy(destIp = "192.168.1.11")
+        assertNull(s.stageForward(d))
+        s.removeForward("@redirect[0]") // Home Assistant, below it
+        s.toggleForward("@redirect[4]") // Game, above it, off
+        uci.run(s.ops()).assertOutcome(
+            deleted = setOf("ha", "plex"),
+            edited = mapOf("game" to mapOf("enabled" to "0")),
+            added = mapOf(
+                "wrtpulse_fwd_${d.id}" to mapOf(
+                    "name" to "Plex", "src" to "wan", "src_dport" to "32400", "dest" to "lan",
+                    "dest_ip" to "192.168.1.11", "proto" to "tcp", "target" to "DNAT",
+                ),
+            ),
+        )
+        // The row keeps the saved section as its handle, so the sheet still finds the edit.
+        assertEquals(d, s.forwardDraftFor("@redirect[1]"))
+    }
+
+    @Test
+    fun `a new DMZ replaces a hand-written one while a redirect below it goes too`() {
+        val (s, uci) = used()
+        s.setDmz(DmzDraft(enabled = true, targetIp = "192.168.1.60", src = "wan", except = listOf(22)))
+        s.removeForward("@redirect[4]") // Game, just below the old DMZ at @redirect[5]
+        s.removeForward("nas") // named, ahead of both
+        fun dmz(ports: String, dport: String) = mapOf(
+            "name" to "DMZ 192.168.1.60 · ports $ports", "src" to "wan", "src_dport" to dport, "dest" to "lan",
+            "dest_ip" to "192.168.1.60", "proto" to "tcp udp", "target" to "DNAT",
+        )
+        uci.run(s.ops()).assertOutcome(
+            deleted = setOf("game", "dmz", "nas"),
+            added = mapOf("wrtpulse_dmz_1" to dmz("1–21", "1-21"), "wrtpulse_dmz_2" to dmz("23–65535", "23-65535")),
+        )
+    }
+
+    @Test
+    fun `a batch of every kind runs clean, and the review lists it in the batch's order`() {
+        val (s, uci) = used()
+        s.setZonePolicy("@zone[3]", "input", "DROP") // iot: guest is a named zone, and still [2]
+        s.setDefaultFlag("drop_invalid", true)
+        s.toggleForwarding("guest", "lan") // @forwarding[2]
+        s.toggleForwarding("lan", "iot") // @forwarding[4]
+        s.toggleForwarding("iot", "wan") // new
+        s.removeRule("@rule[11]") // Guest-Printer
+        s.toggleRule("@rule[13]") // Plex-Out off
+        val ha = s.newForwardDraft(s.forwardRows().first { it.name == "Home Assistant" }).copy(destIp = "192.168.1.12")
+        assertNull(s.stageForward(ha))
+        val rule = s.newRuleDraft().copy(name = "No-Telnet-Out", proto = "tcp", destPort = "23")
+        assertNull(s.stageRule(rule))
+        val ops = s.ops()
+        uci.run(ops).assertOutcome(
+            deleted = setOf("guestLan", "lanIot", "printer", "ha"),
+            edited = mapOf(
+                "iotZone" to mapOf("input" to "DROP"),
+                "defaults" to mapOf("drop_invalid" to "1"),
+                "plexOut" to mapOf("enabled" to "0"),
+            ),
+            added = mapOf(
+                "wrtpulse_fwd_${ha.id}" to mapOf(
+                    "name" to "Home Assistant", "src" to "wan", "src_dport" to "8123", "dest" to "lan",
+                    "dest_ip" to "192.168.1.12", "proto" to "tcp", "target" to "DNAT",
+                ),
+                "wrtpulse_rule_${rule.id}" to mapOf(
+                    "name" to "No-Telnet-Out", "src" to "lan", "dest" to "wan", "proto" to "tcp",
+                    "dest_port" to "23", "target" to "REJECT",
+                ),
+                "wrtpulse_zone_iot_wan" to mapOf("src" to "iot", "dest" to "wan"),
+            ),
+        )
+        assertEquals(steps(ops), reviewSteps(s.diffLines()))
+    }
+
+    @Test
+    fun `an edit of a forward that is being replaced is left out of the review as it is of the batch`() {
+        val s = store()
+        s.toggleForward("@redirect[1]")
+        s.stageForward(s.newForwardDraft(s.forwardRows().first { it.name == "Plex" }).copy(destIp = "192.168.1.11"))
+        assertFalse(s.ops().any { it.contains("@redirect[1].enabled") })
+        assertFalse(s.diffLines().any { it.first.contains("@redirect[1].enabled") })
+        assertEquals(steps(s.ops()), reviewSteps(s.diffLines()))
+    }
+
     private fun redirectSection(name: String, srcPort: String) = """
         firewall.$name=redirect
         firewall.$name.name='existing'
@@ -416,4 +559,101 @@ class FirewallStoreTest {
     private fun draftSectionOf(s: FirewallStore, d: ForwardDraft): String =
         s.ops().first { it.endsWith("=redirect") }
             .removePrefix("set firewall.").removeSuffix("=redirect")
+
+    private fun sec(id: String, type: String, name: String?, vararg options: Pair<String, String>) =
+        FakeUci.Section(id, type, name, mapOf(*options))
+
+    /**
+     * A firewall after some use: LuCI's anonymous sections with named ones among them. Each
+     * named section still takes an index in its type, and so does the SNAT redirect the store
+     * does not list as a forward.
+     */
+    private val usedFirewall = listOf(
+        sec("defaults", "defaults", null, "input" to "REJECT", "output" to "ACCEPT", "forward" to "REJECT", "syn_flood" to "1"),
+        sec("lanZone", "zone", null, "name" to "lan", "network" to "lan", "input" to "ACCEPT", "output" to "ACCEPT", "forward" to "ACCEPT"),
+        sec("wanZone", "zone", null, "name" to "wan", "network" to "wan", "input" to "REJECT", "output" to "ACCEPT", "forward" to "REJECT", "masq" to "1", "mtu_fix" to "1"),
+        sec("guestZone", "zone", "guest", "name" to "guest", "network" to "guest", "input" to "REJECT", "output" to "ACCEPT", "forward" to "REJECT"),
+        sec("iotZone", "zone", null, "name" to "iot", "network" to "iot", "input" to "REJECT", "output" to "ACCEPT", "forward" to "REJECT"),
+        // @forwarding[0], a named one at 1, then @forwarding[2] to [4]
+        sec("guestWan", "forwarding", null, "src" to "guest", "dest" to "wan"),
+        sec("lanGuest", "forwarding", "wrtpulse_zone_lan_guest", "src" to "lan", "dest" to "guest"),
+        sec("guestLan", "forwarding", null, "src" to "guest", "dest" to "lan"),
+        sec("lanWan", "forwarding", null, "src" to "lan", "dest" to "wan"),
+        sec("lanIot", "forwarding", null, "src" to "lan", "dest" to "iot"),
+        // the stock @rule[0] to [8], kids at 9, @rule[10] and [11], a named one at 12, @rule[13]
+        sec("dhcpRenew", "rule", null, "name" to "Allow-DHCP-Renew", "src" to "wan", "proto" to "udp", "dest_port" to "68", "target" to "ACCEPT", "family" to "ipv4"),
+        sec("ping", "rule", null, "name" to "Allow-Ping", "src" to "wan", "proto" to "icmp", "icmp_type" to "echo-request", "family" to "ipv4", "target" to "ACCEPT"),
+        sec("igmp", "rule", null, "name" to "Allow-IGMP", "src" to "wan", "proto" to "igmp", "family" to "ipv4", "target" to "ACCEPT"),
+        sec("dhcpv6", "rule", null, "name" to "Allow-DHCPv6", "src" to "wan", "proto" to "udp", "dest_port" to "546", "family" to "ipv6", "target" to "ACCEPT"),
+        sec("mld", "rule", null, "name" to "Allow-MLD", "src" to "wan", "proto" to "icmp", "src_ip" to "fe80::/10", "family" to "ipv6", "target" to "ACCEPT"),
+        sec("icmpv6In", "rule", null, "name" to "Allow-ICMPv6-Input", "src" to "wan", "proto" to "icmp", "family" to "ipv6", "target" to "ACCEPT"),
+        sec("icmpv6Fwd", "rule", null, "name" to "Allow-ICMPv6-Forward", "src" to "wan", "dest" to "*", "proto" to "icmp", "family" to "ipv6", "target" to "ACCEPT"),
+        sec("esp", "rule", null, "name" to "Allow-IPSec-ESP", "src" to "wan", "dest" to "lan", "proto" to "esp", "target" to "ACCEPT"),
+        sec("isakmp", "rule", null, "name" to "Allow-ISAKMP", "src" to "wan", "dest" to "lan", "dest_port" to "500", "proto" to "udp", "target" to "ACCEPT"),
+        sec("kids", "rule", "kids", "name" to "Kids tablet", "src" to "lan", "src_ip" to "192.168.1.62", "dest" to "wan", "target" to "REJECT"),
+        sec("telnet", "rule", null, "name" to "Block-Telnet", "src" to "lan", "dest" to "wan", "proto" to "tcp", "dest_port" to "23", "target" to "REJECT"),
+        sec("printer", "rule", null, "name" to "Guest-Printer", "src" to "guest", "dest" to "lan", "dest_ip" to "192.168.1.30", "target" to "ACCEPT"),
+        sec("guestDns", "rule", "wrtpulse_guest_dns", "name" to "Guest-DNS", "src" to "guest", "proto" to "tcpudp", "dest_port" to "53", "target" to "ACCEPT"),
+        sec("plexOut", "rule", null, "name" to "Plex-Out", "src" to "lan", "dest" to "wan", "proto" to "tcp", "dest_port" to "32400", "target" to "ACCEPT"),
+        // @redirect[0] and [1], a named one at 2, a SNAT at 3, @redirect[4], and a hand-written DMZ at 5
+        sec("ha", "redirect", null, "name" to "Home Assistant", "src" to "wan", "src_dport" to "8123", "dest" to "lan", "dest_ip" to "192.168.1.10", "dest_port" to "8123", "proto" to "tcp", "target" to "DNAT"),
+        sec("plex", "redirect", null, "name" to "Plex", "src" to "wan", "src_dport" to "32400", "dest" to "lan", "dest_ip" to "192.168.1.10", "proto" to "tcp", "target" to "DNAT", "enabled" to "0"),
+        sec("nas", "redirect", "nas", "name" to "NAS", "src" to "wan", "src_dport" to "5001", "dest" to "lan", "dest_ip" to "192.168.1.20", "proto" to "tcp", "target" to "DNAT"),
+        sec("snat", "redirect", null, "name" to "Masq exception", "src" to "lan", "src_dip" to "10.0.0.1", "target" to "SNAT"),
+        sec("game", "redirect", null, "name" to "Game", "src" to "wan", "src_dport" to "27015", "dest" to "lan", "dest_ip" to "192.168.1.40", "proto" to "udp", "target" to "DNAT"),
+        sec("dmz", "redirect", null, "name" to "DMZ", "src" to "wan", "dest" to "lan", "dest_ip" to "192.168.1.50", "proto" to "all", "target" to "DNAT"),
+    )
+
+    /** A store loaded from [usedFirewall]'s `uci show`, and the uci its batch will run against. */
+    private fun used(): Pair<FirewallStore, FakeUci> {
+        val uci = FakeUci("firewall", usedFirewall)
+        return storeWith(uci.show()) to uci
+    }
+
+    /**
+     * After the batch: exactly [deleted] gone, every other section of [usedFirewall] as it was
+     * apart from the options in [edited], and the sections in [added] new at the end, in that
+     * order, with exactly those options.
+     */
+    private fun FakeUci.assertOutcome(
+        deleted: Set<String>,
+        edited: Map<String, Map<String, String>> = emptyMap(),
+        added: Map<String, Map<String, String>> = emptyMap(),
+    ) {
+        assertEquals(deleted, this.deleted)
+        usedFirewall.filter { it.id !in deleted }.forEach { s ->
+            assertEquals("section ${s.id}", s.options + edited[s.id].orEmpty(), options(s.id))
+        }
+        assertEquals(added.keys.toList(), ids.filter { id -> usedFirewall.none { it.id == id } })
+        added.forEach { (name, want) -> assertEquals("section $name", want, options(name)) }
+    }
+
+    /** The batch as (sign, path, value) steps: a `set` adds or edits, a `delete` removes. */
+    private fun steps(ops: List<String>): List<Triple<Char, String, String>> = ops.map { op ->
+        val rest = op.substringAfter(' ')
+        if (op.startsWith("delete ")) Triple('-', rest, "")
+        else Triple('+', rest.substringBefore('='), rest.substringAfter('='))
+    }
+
+    /** The review as the same steps: `- path='old'` followed by `+ path='new'` is one edit. */
+    private fun reviewSteps(diff: List<Pair<String, Boolean>>): List<Triple<Char, String, String>> {
+        val lines = diff.map { (line, added) ->
+            val body = line.drop(2)
+            Triple(if (added) '+' else '-', body.substringBefore('='), body.substringAfter('=', ""))
+        }
+        val out = mutableListOf<Triple<Char, String, String>>()
+        var i = 0
+        while (i < lines.size) {
+            val line = lines[i]
+            val next = lines.getOrNull(i + 1)
+            if (line.first == '-' && line.third.isNotEmpty() && next != null && next.first == '+' && next.second == line.second) {
+                out += next
+                i += 2
+            } else {
+                out += if (line.first == '-') Triple('-', line.second, "") else line
+                i++
+            }
+        }
+        return out
+    }
 }
