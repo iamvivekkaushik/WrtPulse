@@ -544,7 +544,7 @@ class FirewallStore(private val session: RouterSession) {
                 dmzRanges(d.except).forEachIndexed { i, (from, to) ->
                     add(
                         Triple(
-                            "wrtpulse_dmz_${i + 1}", "redirect",
+                            FwForward.dmzSection(i + 1), "redirect",
                             listOf(
                                 "name" to "DMZ ${d.targetIp}${if (dmzRanges(d.except).size > 1) " · ports $from–$to" else ""}",
                                 "src" to d.src,
@@ -722,13 +722,14 @@ class FirewallStore(private val session: RouterSession) {
         fun savedDmzExcept(dmz: List<FwForward>): List<Int> {
             if (dmz.isEmpty()) return listOf(SSH_PORT)
             val covered = dmz.mapNotNull { f ->
+                // A DMZ with no port at all covers everything; the except list is then empty on
+                // the router, whatever the app's own ranges beside it leave out.
+                if (f.srcPort.isEmpty()) return@mapNotNull 1 to 65535
                 val r = f.srcPort.split('-')
                 val a = r.getOrNull(0)?.toIntOrNull() ?: return@mapNotNull null
                 val b = r.getOrNull(1)?.toIntOrNull() ?: a
                 a to b
             }.sortedBy { it.first }
-            // A single DMZ with no port at all covers everything; the except list is then empty
-            // on the router, whatever the app would have written.
             if (covered.isEmpty()) return emptyList()
             val holes = mutableListOf<Int>()
             var next = 1

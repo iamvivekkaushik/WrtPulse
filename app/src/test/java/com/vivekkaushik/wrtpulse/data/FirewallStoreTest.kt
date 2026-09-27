@@ -325,6 +325,86 @@ class FirewallStoreTest {
         assertEquals(0, s.pendingCount)
     }
 
+    // ---- the DMZ once applied: the batch run as uci runs it, then read back ----
+    //
+    // Every redirect the app writes for the DMZ names a port range, so it is the
+    // `wrtpulse_dmz_<n>` name that marks them as the DMZ, not a missing src_dport.
+
+    @Test
+    fun `an applied DMZ reads back on its tab and stays off the forward list`() {
+        val (s, uci) = twoForwards()
+        s.setDmz(DmzDraft(enabled = true, targetIp = "192.168.1.50", src = "wan", except = listOf(8123)))
+        s.applyTo(uci)
+        assertEquals(listOf("1-21", "23-8122", "8124-65535"), dmzSections(uci).map { uci.options(it)!!["src_dport"] })
+
+        assertEquals(DmzDraft(enabled = true, targetIp = "192.168.1.50", src = "wan", except = listOf(22, 8123)), s.dmz())
+        assertEquals(0, s.pendingCount)
+        // The tab handing back what it read is no change.
+        s.setDmz(s.dmz())
+        assertEquals(0, s.pendingCount)
+        assertEquals(listOf("Home Assistant", "NAS"), s.forwardRows().map { it.name })
+    }
+
+    @Test
+    fun `turning an applied DMZ off deletes every one of its redirects and nothing else`() {
+        val (s, uci) = twoForwards()
+        s.setDmz(DmzDraft(enabled = true, targetIp = "192.168.1.50", src = "wan", except = listOf(8123)))
+        s.applyTo(uci)
+        s.setDmz(s.dmz().copy(enabled = false))
+        assertEquals(
+            listOf("delete firewall.wrtpulse_dmz_1", "delete firewall.wrtpulse_dmz_2", "delete firewall.wrtpulse_dmz_3"),
+            s.ops(),
+        )
+        s.applyTo(uci)
+        assertEquals(twoForwardsFirewall.map { it.id }, uci.ids)
+        twoForwardsFirewall.forEach { assertEquals("section ${it.id}", it.options, uci.options(it.id)) }
+        assertFalse(s.dmz().enabled)
+        assertEquals(listOf("Home Assistant", "NAS"), s.forwardRows().map { it.name })
+    }
+
+    @Test
+    fun `re-ranging an applied DMZ writes it afresh and leaves no stale range behind`() {
+        val (s, uci) = twoForwards()
+        s.setDmz(DmzDraft(enabled = true, targetIp = "192.168.1.50", src = "wan", except = listOf(8123)))
+        s.applyTo(uci)
+        s.setDmz(s.dmz().copy(targetIp = "192.168.1.60", except = listOf(22)))
+        s.applyTo(uci)
+        assertEquals(listOf("wrtpulse_dmz_1", "wrtpulse_dmz_2"), dmzSections(uci))
+        assertEquals(
+            mapOf(
+                "name" to "DMZ 192.168.1.60 · ports 23–65535", "src" to "wan", "src_dport" to "23-65535", "dest" to "lan",
+                "dest_ip" to "192.168.1.60", "proto" to "tcp udp", "target" to "DNAT",
+            ),
+            uci.options("wrtpulse_dmz_2"),
+        )
+        assertEquals(DmzDraft(enabled = true, targetIp = "192.168.1.60", src = "wan", except = listOf(22)), s.dmz())
+    }
+
+    /** A router with two port forwards, one anonymous and one named, and no DMZ yet. */
+    private val twoForwardsFirewall = listOf(
+        FakeUci.Section("defaults", "defaults", options = mapOf("input" to "REJECT", "output" to "ACCEPT", "forward" to "REJECT")),
+        FakeUci.Section("lanZone", "zone", options = mapOf("name" to "lan", "network" to "lan", "input" to "ACCEPT", "output" to "ACCEPT", "forward" to "ACCEPT")),
+        FakeUci.Section("wanZone", "zone", options = mapOf("name" to "wan", "network" to "wan", "input" to "REJECT", "output" to "ACCEPT", "forward" to "REJECT", "masq" to "1")),
+        FakeUci.Section("lanWan", "forwarding", options = mapOf("src" to "lan", "dest" to "wan")),
+        FakeUci.Section("ha", "redirect", options = mapOf("name" to "Home Assistant", "src" to "wan", "src_dport" to "8123", "dest" to "lan", "dest_ip" to "192.168.1.10", "proto" to "tcp", "target" to "DNAT")),
+        FakeUci.Section("nas", "redirect", "nas", mapOf("name" to "NAS", "src" to "wan", "src_dport" to "5001", "dest" to "lan", "dest_ip" to "192.168.1.20", "proto" to "tcp", "target" to "DNAT")),
+    )
+
+    /** A store loaded from [twoForwardsFirewall]'s `uci show`, and the uci its batches run against. */
+    private fun twoForwards(): Pair<FirewallStore, FakeUci> {
+        val uci = FakeUci("firewall", twoForwardsFirewall)
+        return storeWith(uci.show()) to uci
+    }
+
+    /** What [FirewallStore.apply] does, with [uci] as the router: the batch runs, the store reads it back, the drafts go. */
+    private fun FirewallStore.applyTo(uci: FakeUci) {
+        uci.run(ops())
+        ingest(mapOf("firewall" to uci.show(), "engine" to "fw4", "listen" to "0.0.0.0:22\n"))
+        revert()
+    }
+
+    private fun dmzSections(uci: FakeUci) = uci.ids.filter { it.startsWith("wrtpulse_dmz_") }
+
     // ---- the batch as a whole ----
 
     @Test

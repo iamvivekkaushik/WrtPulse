@@ -222,6 +222,8 @@ class DmzRangeTest {
         val saved = FirewallStore.dmzRanges(listOf(22, 8123)).mapIndexed { i, (a, b) ->
             Parsers.FwForward("wrtpulse_dmz_${i + 1}", "DMZ", "wan", "lan", "tcp udp", "$a-$b", "192.168.1.50", "", true)
         }
+        // Each names a port range, and is the DMZ all the same.
+        assertTrue(saved.all { it.isDmz })
         assertEquals(listOf(22, 8123), FirewallStore.savedDmzExcept(saved))
     }
 
@@ -230,6 +232,23 @@ class DmzRangeTest {
         val saved = listOf(Parsers.FwForward("@redirect[3]", "dmz", "wan", "lan", "tcp udp", "", "192.168.1.50", "", true))
         assertTrue(saved.single().isDmz)
         assertTrue(FirewallStore.savedDmzExcept(saved).isEmpty())
+    }
+
+    @Test
+    fun `beside the app's ranges, a DMZ with no port still covers the ports they leave out`() {
+        val saved = FirewallStore.dmzRanges(listOf(22)).mapIndexed { i, (a, b) ->
+            Parsers.FwForward("wrtpulse_dmz_${i + 1}", "DMZ", "wan", "lan", "tcp udp", "$a-$b", "192.168.1.50", "", true)
+        } + Parsers.FwForward("@redirect[3]", "dmz", "wan", "lan", "tcp udp", "", "192.168.1.50", "", true)
+        assertTrue(FirewallStore.savedDmzExcept(saved).isEmpty())
+    }
+
+    @Test
+    fun `a forward that names a port is the DMZ only under one of the app's DMZ names`() {
+        fun forward(section: String) = Parsers.FwForward(section, "x", "wan", "lan", "tcp", "8080", "192.168.1.50", "", true)
+        assertTrue(forward(Parsers.FwForward.dmzSection(12)).isDmz)
+        assertFalse(forward("@redirect[0]").isDmz)
+        assertFalse(forward("wrtpulse_fwd_3").isDmz)
+        assertFalse(forward("wrtpulse_dmz_1_old").isDmz)
     }
 }
 

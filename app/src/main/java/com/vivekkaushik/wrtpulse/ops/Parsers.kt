@@ -2682,7 +2682,10 @@ object Parsers {
         val mtuFix: Boolean,
     )
 
-    /** `config redirect` with target DNAT — a port forward, or a DMZ when it names no port. */
+    /**
+     * `config redirect` with target DNAT — a port forward, or part of the DMZ: one of the app's
+     * own [dmzSection]s, or one written by hand that names no port.
+     */
     data class FwForward(
         val section: String,
         val name: String,
@@ -2696,7 +2699,18 @@ object Parsers {
         val destPort: String,
         val enabled: Boolean,
     ) {
-        val isDmz: Boolean get() = srcPort.isEmpty() && destIp.isNotEmpty()
+        val isDmz: Boolean get() = DMZ_SECTION.matches(section) || (srcPort.isEmpty() && destIp.isNotEmpty())
+
+        companion object {
+            /**
+             * The app's DMZ redirects, `wrtpulse_dmz_1` up. fw4 takes one port range per
+             * redirect, so a DMZ with exceptions is one redirect per range around them — each
+             * with a `src_dport`, which is why the name is what marks them as the DMZ.
+             */
+            fun dmzSection(n: Int) = "wrtpulse_dmz_$n"
+
+            private val DMZ_SECTION = Regex("""^wrtpulse_dmz_\d+$""")
+        }
     }
 
     /** `config rule` — a traffic rule, with fw4's optional schedule. */
