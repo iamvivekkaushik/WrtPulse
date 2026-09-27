@@ -89,7 +89,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
 
@@ -804,6 +806,12 @@ fun HoldButton(
     enabled: Boolean = true,
     holdMs: Int = 3_000,
     height: Dp = 44.dp,
+    /**
+     * For a hold standing inline beside text, in place of a chip: the parent measures and
+     * aligns the button alone, and the caption hangs below it into room the parent keeps
+     * free — so the row lines up on the button and stays the height it was.
+     */
+    captionHangs: Boolean = false,
     onHoldingChange: (Boolean) -> Unit = {},
     onConfirm: () -> Unit,
 ) {
@@ -861,7 +869,17 @@ fun HoldButton(
     Text(
         "Hold for ${holdMs / 1000} s",
         style = mono(9.5f, 500, Wrt.TextFaint),
-        modifier = Modifier.padding(top = 5.dp),
+        modifier = if (captionHangs) {
+            // Measured as nothing and drawn in full, a little closer under a button this small.
+            Modifier
+                .layout { measurable, constraints ->
+                    val caption = measurable.measure(constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity))
+                    layout(caption.width, 0) { caption.place(0, 0) }
+                }
+                .padding(top = 2.dp)
+        } else {
+            Modifier.padding(top = 5.dp)
+        },
     )
     }
 }

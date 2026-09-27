@@ -233,13 +233,12 @@ fun BackupScreen(
                             onShare = { shareBackup(context, backup.file) },
                             onSave = { saving = backup; saver.launch(backup.name) },
                             onRestore = { result = 3 to store.stageLocal(backup) },
+                            // Delete behind the swipe only arms the row. The hold it puts in
+                            // Restore's place is the one way through, however often it is tapped.
+                            onArmDelete = { confirmDelete = backup.name },
                             onDelete = {
-                                if (confirmDelete == backup.name) {
-                                    result = 2 to store.delete(backup)
-                                    confirmDelete = null
-                                } else {
-                                    confirmDelete = backup.name
-                                }
+                                result = 2 to store.delete(backup)
+                                confirmDelete = null
                             },
                         )
                         if (index < store.local.lastIndex) {
@@ -415,13 +414,14 @@ private fun BackupRow(
     onShare: () -> Unit,
     onSave: () -> Unit,
     onRestore: () -> Unit,
+    onArmDelete: () -> Unit,
     onDelete: () -> Unit,
 ) {
     SwipeToReveal(
         actions = listOf(
             RevealAction("Share", WrtIcons.ShareUp, Wrt.TextTertiary, onShare),
             RevealAction("Save", WrtIcons.Backup, Wrt.TextTertiary, onSave),
-            RevealAction("Delete", WrtIcons.Trash, Wrt.Red, onDelete),
+            RevealAction("Delete", WrtIcons.Trash, Wrt.Red, onArmDelete),
         ),
         resetKey = backup.name,
         revealWidth = 64.dp,
@@ -429,7 +429,9 @@ private fun BackupRow(
         base = Wrt.BgCard,
     ) { swipe ->
         Row(
-            swipe.fillMaxWidth().padding(vertical = 10.dp),
+            // 13 dp and not 10, armed or not: the lower one is where the hold's caption hangs,
+            // so arming changes what is on the right and not how tall the row is.
+            swipe.fillMaxWidth().padding(vertical = 13.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -454,7 +456,11 @@ private fun BackupRow(
                 )
             }
             if (confirmDelete) {
-                HoldButton("Hold to delete", "Keep holding…", danger = true, height = 30.dp, onConfirm = onDelete)
+                // Restore's size, centred on the name the way Restore is.
+                HoldButton(
+                    "Hold to delete", "Keep holding…", danger = true, height = 24.dp,
+                    captionHangs = true, onConfirm = onDelete,
+                )
             } else {
                 ActionChip("Restore", color = Wrt.Accent, onClick = onRestore)
             }
