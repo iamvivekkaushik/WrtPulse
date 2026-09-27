@@ -278,15 +278,29 @@ object Commands {
      * The same, across more than one config file — joining an upstream network touches
      * `wireless` and `network` together, and half of that landing would leave a station
      * with nowhere to get an address.
+     *
+     * An empty [commitPackages] commits the files the operations write into. Taken at its word
+     * it left `&& reload` on a line of its own: a syntax error the shell only reaches after the
+     * batch has staged everything into uci's delta, where the next screen's commit picks it up.
      */
     fun uciBatch(operations: List<String>, commitPackages: List<String>, reload: String): String =
         buildString {
             append("uci batch <<'WRTPULSE_EOF'\n")
             operations.forEach { append(it).append('\n') }
             append("WRTPULSE_EOF\n")
-            append(commitPackages.joinToString(" && ") { "uci commit $it" })
-            append(" && ").append(reload)
+            val packages = commitPackages.ifEmpty { batchPackages(operations) }
+            append((packages.map { "uci commit $it" } + reload).joinToString(" && "))
         }
+
+    /** The config files batch operations write into, first touched first: `set dhcp.lan.start='50'` is `dhcp`. */
+    private fun batchPackages(operations: List<String>): List<String> =
+        operations.mapNotNull { op ->
+            // The file is the path's first word. Stopping at the first character a config name
+            // cannot hold also keeps anything else off the unquoted `uci commit` line.
+            op.trim().substringAfter(' ', "").trimStart()
+                .takeWhile { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it in "_-" }
+                .ifEmpty { null }
+        }.distinct()
 
     /** The uci network a router-as-client interface is bridged to. */
     const val WWAN = "wwan"

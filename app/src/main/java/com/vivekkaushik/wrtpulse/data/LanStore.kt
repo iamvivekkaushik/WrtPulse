@@ -764,7 +764,7 @@ class LanStore(private val session: RouterSession) : Refreshable {
     fun packages(): List<String> {
         val paths = staged.keys + stagedLists.keys + deletions +
             (if (resvDrafts.isNotEmpty()) setOf("dhcp.x") else emptySet()) +
-            (if (vlanDrafts.isNotEmpty()) setOf("network.x") else emptySet())
+            (if (vlanDrafts.isNotEmpty() || swVlanDrafts.isNotEmpty()) setOf("network.x") else emptySet())
         return listOf("network", "dhcp").filter { pkg -> paths.any { it.startsWith("$pkg.") } }
     }
 
