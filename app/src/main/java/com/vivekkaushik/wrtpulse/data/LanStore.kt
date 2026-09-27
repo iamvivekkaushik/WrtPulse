@@ -769,62 +769,89 @@ class LanStore(private val session: RouterSession) : Refreshable {
     }
 
     /**
-     * The address writes, which depend on how the router spells its own address. A config
-     * carrying `ipaddr '192.168.1.1/24'` has no `netmask` option, and writing the two
-     * separately would leave the prefix behind on the old value — so both edits collapse
-     * into one CIDR write.
+     * The address writes, as (path, saved, written). They depend on how the router spells its
+     * own address: a config carrying `ipaddr '192.168.1.1/24'` has no `netmask` option, and
+     * writing the two separately would leave the prefix behind on the old value — so both
+     * edits collapse into one CIDR write.
      */
-    private fun addressOps(): List<String> {
+    private fun addressWrites(): List<Triple<String, String, String>> {
         if (ipPath !in staged && maskPath !in staged) return emptyList()
-        if (cidrStyle) return listOf("set $ipPath='$routerIp/$prefix'")
+        if (cidrStyle) return listOf(Triple(ipPath, "${net?.ipaddr}/${net?.cidrPrefix}", "$routerIp/$prefix"))
         return listOfNotNull(
-            staged[ipPath]?.let { "set $ipPath='${Commands.escapeValue(it.second)}'" },
-            staged[maskPath]?.let { "set $maskPath='${Commands.escapeValue(it.second)}'" },
+            staged[ipPath]?.let { Triple(ipPath, it.first, it.second) },
+            staged[maskPath]?.let { Triple(maskPath, it.first, it.second) },
         )
     }
 
+    /** False for a path inside a section the batch deletes: an edit there goes with it. */
+    private fun survives(path: String): Boolean = deletions.none { path.startsWith("$it.") }
+
+    /** Staged options that reach the batch, bar the address, which [addressWrites] spells. */
+    private fun liveEdits(): List<Map.Entry<String, Pair<String, String>>> = staged.entries
+        .filter { survives(it.key) && it.key != ipPath && it.key != maskPath }
+        .sortedBy { it.key }
+
+    /** Staged lists that reach the batch. */
+    private fun liveLists(): List<Map.Entry<String, Pair<List<String>, List<String>>>> = stagedLists.entries
+        .filter { survives(it.key) }
+        .sortedBy { it.key }
+
+    /**
+     * Sections the batch deletes, in the order uci needs them: anonymous ones highest index
+     * first, named ones after ([Commands.uciDeleteOrder]). A LuCI static lease is `@host[i]`
+     * and a LuCI VLAN `@bridge-vlan[i]`, so deleting two in text order took the wrong second one.
+     */
+    private fun removals(): List<String> = Commands.uciDeleteOrder(deletions)
+
+    /** A section the batch creates: its options in the order they are written, then its lists. */
+    private data class NewSection(
+        val path: String,
+        val type: String,
+        val options: List<Pair<String, String>>,
+        val lists: List<Pair<String, List<String>>> = emptyList(),
+    )
+
+    /** New sections, so [ops] and [diffLines] agree by construction. */
+    private fun additions(): List<NewSection> =
+        resvDrafts.map { NewSection("dhcp.${resvSection(it)}", "host", resvOptions(it)) } +
+            vlanDrafts.map { draft ->
+                NewSection(
+                    "network.${vlanSection(draft)}", "bridge-vlan",
+                    listOf("device" to draft.device, "vlan" to draft.vlan.toString()),
+                    listOf("ports" to draft.ports.map { it.token() }),
+                )
+            } +
+            swVlanDrafts.map { draft ->
+                NewSection(
+                    "network.${swVlanSection(draft)}", "switch_vlan",
+                    listOf(
+                        "device" to draft.device,
+                        "vlan" to draft.vlan.toString(),
+                        "ports" to Parsers.swPortsValue(draft.ports),
+                    ),
+                )
+            }
+
     fun ops(): List<String> {
-        val alive = { path: String -> deletions.none { path.startsWith("$it.") } }
-        val scalars = addressOps() + staged.entries
-            .filter { alive(it.key) && it.key != ipPath && it.key != maskPath }
-            .sortedBy { it.key }
-            .map { (path, change) ->
-                // An emptied option is removed rather than set to '': uci keeps the empty
-                // string, and netifd reads that as a configured value of nothing.
-                if (change.second.isEmpty()) "delete $path"
-                else "set $path='${Commands.escapeValue(change.second)}'"
-            }
-        val lists = stagedLists.entries
-            .filter { alive(it.key) }
-            .sortedBy { it.key }
-            .flatMap { (path, change) -> Commands.listOps(path, change.second) }
-        val removals = deletions.sorted().map { "delete $it" }
-        val newReservations = resvDrafts.flatMap { draft ->
-            val name = resvSection(draft)
-            listOf("set dhcp.$name=host") + resvOptions(draft).map { (option, value) ->
-                "set dhcp.$name.$option='${Commands.escapeValue(value)}'"
-            }
+        val address = addressWrites().map { (path, _, value) -> "set $path='${Commands.escapeValue(value)}'" }
+        val scalars = liveEdits().map { (path, change) ->
+            // An emptied option is written as its removal, which is what uci makes of
+            // `set …=''` anyway — the batch just says so.
+            if (change.second.isEmpty()) "delete $path"
+            else "set $path='${Commands.escapeValue(change.second)}'"
         }
-        val newSwVlans = swVlanDrafts.flatMap { draft ->
-            val name = swVlanSection(draft)
-            listOf(
-                "set network.$name=switch_vlan",
-                "set network.$name.device='${draft.device}'",
-                "set network.$name.vlan='${draft.vlan}'",
-                "set network.$name.ports='${Parsers.swPortsValue(draft.ports)}'",
-            )
-        }
-        val newVlans = vlanDrafts.flatMap { draft ->
-            val name = vlanSection(draft)
-            listOf(
-                "set network.$name=bridge-vlan",
-                "set network.$name.device='${draft.device}'",
-                "set network.$name.vlan='${draft.vlan}'",
-            ) + Commands.listOps("network.$name.ports", draft.ports.map { it.token() })
+        val listEdits = liveLists().flatMap { (path, change) -> Commands.listOps(path, change.second) }
+        val adds = additions().flatMap { (path, type, options, lists) ->
+            listOf("set $path=$type") +
+                options.map { (option, value) -> "set $path.$option='${Commands.escapeValue(value)}'" } +
                 // A brand new list has nothing to delete first.
-                .filterNot { it.startsWith("delete ") }
+                lists.flatMap { (option, values) ->
+                    values.map { "add_list $path.$option='${Commands.escapeValue(it)}'" }
+                }
         }
-        return scalars + lists + removals + newReservations + newVlans + newSwVlans
+        // Edits and lists first, while every `@type[i]` still names the section it was read as:
+        // a delete renumbers every later section of its type.
+        return address + scalars + listEdits + removals().map { "delete $it" } + adds
     }
 
     private fun swVlanSection(draft: SwVlanDraft): String =
@@ -836,42 +863,28 @@ class LanStore(private val session: RouterSession) : Refreshable {
         add("ip" to draft.ip)
     }
 
-    /** `- old` / `+ new` for the review sheet, grouped the way the diff reads. */
+    /**
+     * `- old` / `+ new` for the review sheet: the same changes as [ops], section for section,
+     * in the same order.
+     */
     fun diffLines(): List<Pair<String, Boolean>> = buildList {
-        if (cidrStyle && (ipPath in staged || maskPath in staged)) {
-            add("- $ipPath='${net?.ipaddr}/${net?.cidrPrefix}'" to false)
-            add("+ $ipPath='$routerIp/$prefix'" to true)
+        addressWrites().forEach { (path, saved, value) ->
+            add("- $path='$saved'" to false)
+            add("+ $path='$value'" to true)
         }
-        staged.entries
-            .filter { entry -> deletions.none { entry.key.startsWith("$it.") } }
-            .filterNot { cidrStyle && (it.key == ipPath || it.key == maskPath) }
-            .sortedBy { it.key }
-            .forEach { (path, change) ->
-                add("- $path='${change.first}'" to false)
-                if (change.second.isNotEmpty()) add("+ $path='${change.second}'" to true)
-            }
-        stagedLists.entries.sortedBy { it.key }.forEach { (path, change) ->
+        liveEdits().forEach { (path, change) ->
+            add("- $path='${change.first}'" to false)
+            if (change.second.isNotEmpty()) add("+ $path='${change.second}'" to true)
+        }
+        liveLists().forEach { (path, change) ->
             change.first.forEach { add("- $path='$it'" to false) }
             change.second.forEach { add("+ $path='$it'" to true) }
         }
-        deletions.sorted().forEach { add("- $it" to false) }
-        resvDrafts.forEach { draft ->
-            val name = resvSection(draft)
-            add("+ dhcp.$name=host" to true)
-            resvOptions(draft).forEach { (option, value) -> add("+ dhcp.$name.$option='$value'" to true) }
-        }
-        swVlanDrafts.forEach { draft ->
-            val name = swVlanSection(draft)
-            add("+ network.$name=switch_vlan" to true)
-            add("+ network.$name.device='${draft.device}'" to true)
-            add("+ network.$name.vlan='${draft.vlan}'" to true)
-            add("+ network.$name.ports='${Parsers.swPortsValue(draft.ports)}'" to true)
-        }
-        vlanDrafts.forEach { draft ->
-            val name = vlanSection(draft)
-            add("+ network.$name=bridge-vlan" to true)
-            add("+ network.$name.vlan='${draft.vlan}'" to true)
-            draft.ports.forEach { add("+ network.$name.ports='${it.token()}'" to true) }
+        removals().forEach { add("- $it" to false) }
+        additions().forEach { (path, type, options, lists) ->
+            add("+ $path=$type" to true)
+            options.forEach { (option, value) -> add("+ $path.$option='$value'" to true) }
+            lists.forEach { (option, values) -> values.forEach { add("+ $path.$option='$it'" to true) } }
         }
     }
 

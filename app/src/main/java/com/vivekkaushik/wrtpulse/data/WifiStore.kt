@@ -416,20 +416,20 @@ class WifiStore(private val session: RouterSession) : Refreshable {
         deletions.clear()
     }
 
-    /** `- key='old'` / `+ key='new'` pairs for the review sheet, secrets masked. */
-    fun diffLines(): List<Pair<String, Boolean>> = staged.entries
-        .filterNot { it.key.substringBefore('.') in deletions }
-        .sortedBy { it.key }
+    /**
+     * `- key='old'` / `+ key='new'` pairs for the review sheet, secrets masked: the same changes
+     * as [ops], in the same order.
+     */
+    fun diffLines(): List<Pair<String, Boolean>> = liveEdits()
         .flatMap { (key, change) ->
             val (old, new) = change
             val secret = key.endsWith(".key")
-            val removed = secret && new.isEmpty()
             listOf(
                 "- $key='${if (secret) "••••••••" else old}'" to false,
-            ) + if (removed) emptyList() else listOf(
+            ) + if (removesOption(key, new)) emptyList() else listOf(
                 "+ $key='${if (secret) mask(new) else new}'" to true,
             )
-        } + deletions.sorted().map { "- $it=wifi-iface" to false } + drafts.flatMap { draft ->
+        } + removals().map { "- $it=wifi-iface" to false } + drafts.flatMap { draft ->
             draft.devices.flatMap { device ->
                 val section = draft.sections.getValue(device)
                 listOf("+ $section=wifi-iface" to true) +
@@ -445,7 +445,7 @@ class WifiStore(private val session: RouterSession) : Refreshable {
      * client interface that is a whole uplink stanza orphaned, so the sheet says so instead
      * of the app silently reaching into two more config files.
      */
-    fun deletionNotes(): List<String> = deletions.sorted().flatMap { section ->
+    fun deletionNotes(): List<String> = removals().flatMap { section ->
         val net = networks.firstOrNull { it.section == section } ?: return@flatMap emptyList()
         val live = !net.disabled && radioEnabled(net.device)
         val uplink = net.isClient && zoneFor(net.network) == "wan"
@@ -564,19 +564,36 @@ class WifiStore(private val session: RouterSession) : Refreshable {
         }
     }
 
-    fun ops(): List<String> = staged.entries
-        // An option set on a section that is about to be deleted is noise at best. The
-        // delete supersedes it, so it never reaches the batch.
+    /**
+     * Staged edits that reach the batch. An option set on a section that is about to be deleted
+     * is noise at best: the delete supersedes it, so it never reaches the batch.
+     */
+    private fun liveEdits(): List<Map.Entry<String, Pair<String, String>>> = staged.entries
         .filterNot { it.key.substringBefore('.') in deletions }
         .sortedBy { it.key }
+
+    /**
+     * Whether an edit is written as the option's removal. Switching a network to open leaves
+     * the old passphrase sitting in the config file unless the option goes with it; "auto" TX
+     * power and beamforming "on" are likewise the option's absence.
+     */
+    private fun removesOption(key: String, value: String): Boolean =
+        value.isEmpty() && key.substringAfterLast('.') in DELETE_WHEN_EMPTY
+
+    /**
+     * The staged deletes in the order uci needs them: anonymous `@wifi-iface[i]` highest index
+     * first, named ones after ([Commands.uciDeleteOrder]).
+     */
+    private fun removals(): List<String> = Commands.uciDeleteOrder(deletions)
+
+    fun ops(): List<String> = liveEdits()
         .map { (key, change) ->
-            // Switching a network to open leaves the old passphrase sitting in the config
-            // file unless the option goes with it; "auto" TX power and beamforming "on" are
-            // likewise the option's absence.
-            if (change.second.isEmpty() && key.substringAfterLast('.') in DELETE_WHEN_EMPTY) "delete wireless.$key"
+            if (removesOption(key, change.second)) "delete wireless.$key"
             else "set wireless.$key='${escape(change.second)}'"
         } +
-        deletions.sorted().map { "delete wireless.$it" } +
+        // After the edits, which may name a section `@wifi-iface[i]` too: a delete renumbers
+        // every later wifi-iface.
+        removals().map { "delete wireless.$it" } +
         drafts.flatMap { draft ->
             draft.devices.flatMap { device ->
                 val section = draft.sections.getValue(device)

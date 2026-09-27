@@ -349,4 +349,57 @@ class RouteStoreTest {
         assertTrue(script.contains("uci commit network && /etc/init.d/network reload"))
         assertFalse(script.contains("uci commit firewall"))
     }
+
+    // ---- anonymous sections: the batch run the way uci runs it ----
+
+    /**
+     * A named route counts in `@route[i]` like any other. Sorted as text, `4g_route` came before
+     * `@route` and went first, so every anonymous delete after it hit the route below its target.
+     */
+    @Test
+    fun `a named route ahead of anonymous ones is deleted after them, and edits land where aimed`() {
+        val (s, uci) = used()
+        s.removeRoute("4g_route") // named, at 1: as text `4` sorts ahead of `@`
+        s.removeRoute("@route[2]") // lab
+        s.toggleDisabled("@route[3]") // vpn, above both
+        assertNull(s.stageRoute(s.newDraft(s.routes.single { it.section == "@route[0]" }).copy(metric = "9")))
+        assertEquals(
+            listOf(
+                "set network.@route[3].disabled='1'",
+                "set network.@route[0].metric='9'",
+                "delete network.@route[2]",
+                "delete network.4g_route",
+            ),
+            s.ops(),
+        )
+        uci.run(s.ops()).assertLeaves(
+            usedRoutes,
+            deleted = setOf("lte", "lab"),
+            edited = mapOf("vpn" to mapOf("disabled" to "1"), "office" to mapOf("metric" to "9")),
+        )
+        assertEquals(batchChanges(s.ops()), reviewChanges(s.diffLines()))
+    }
+
+    private fun route(
+        id: String, section: String?, iface: String, target: String, gateway: String, vararg more: Pair<String, String>,
+    ) = FakeUci.Section(id, "route", section, mapOf("interface" to iface, "target" to target, "gateway" to gateway, *more))
+
+    /** LuCI's `@route[i]` with a hand-named `4g_route` among them, and a route6 that is not their type. */
+    private val usedRoutes = listOf(
+        FakeUci.Section("lan", "interface", "lan", mapOf("device" to "br-lan", "proto" to "static", "ipaddr" to "192.168.0.1", "netmask" to "255.255.255.0")),
+        FakeUci.Section("wan", "interface", "wan", mapOf("device" to "eth0.2", "proto" to "dhcp")),
+        FakeUci.Section("loopback", "interface", "loopback", mapOf("device" to "lo")),
+        // @route[0], the named 4g_route at 1, then @route[2] and [3]
+        route("office", null, "lan", "10.20.0.0/16", "192.168.0.2", "metric" to "5"),
+        route("lte", "4g_route", "wan", "10.40.0.0/16", "192.168.68.1"),
+        route("lab", null, "wan", "10.30.0.0/16", "192.168.68.1"),
+        route("vpn", null, "lan", "10.50.0.0/16", "192.168.0.3"),
+        FakeUci.Section("v6", "route6", null, mapOf("interface" to "wan", "target" to "2001:db8::/32", "gateway" to "fe80::1")),
+    )
+
+    /** A store loaded from [usedRoutes], and the uci its batch will run against. */
+    private fun used(): Pair<RouteStore, FakeUci> {
+        val uci = FakeUci("network", usedRoutes)
+        return store(uci.show()) to uci
+    }
 }

@@ -394,11 +394,11 @@ class RouteStore(private val session: RouterSession) : Refreshable {
 
     /**
      * Deletions, highest anonymous index first: `delete network.@route[0]` turns `@route[1]`
-     * into `@route[0]`, so the batch has to take them from the top.
+     * into `@route[0]`, so the batch has to take them from the top. Named ones go after every
+     * anonymous one, because a named route ahead of them counts in their index too — sorted by
+     * text, a name starting with a digit (`4g_route`) went first and shifted them.
      */
-    private fun removals(): List<String> = deletions.sortedWith(
-        compareBy<String>({ it.substringBefore('[') }, { -(Regex("""\[(\d+)]""").find(it)?.groupValues?.get(1)?.toIntOrNull() ?: -1) }, { it })
-    )
+    private fun removals(): List<String> = Commands.uciDeleteOrder(deletions)
 
     fun ops(): List<String> {
         val gone = removals()
