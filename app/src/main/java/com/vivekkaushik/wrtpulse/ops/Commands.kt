@@ -288,6 +288,30 @@ object Commands {
             append(" && ").append(reload)
         }
 
+    /** How `uci show` spells a section with no name, `@type[i]`, with or without the `package.` ahead of it. */
+    private val ANONYMOUS_SECTION = Regex("""^(.*@[^.\[\]]+)\[(\d+)]$""")
+
+    /** Whether [path] — `package.section` or a bare section — ends in an anonymous `@type[i]`. */
+    fun isAnonymousSection(path: String): Boolean = ANONYMOUS_SECTION.matches(path)
+
+    /**
+     * Section deletes in an order `uci batch` carries out as meant.
+     *
+     * `@type[i]` is the i-th section of that type, named sections counted too, and uci resolves
+     * it as each command runs — so deleting a section renumbers every later section of its type.
+     * Anonymous deletes therefore go first, highest index first within a type (by number:
+     * `@rule[10]` before `@rule[9]`), and named deletes after all of them, because a named
+     * section can sit ahead of anonymous ones of its type. Anything else in the batch that names
+     * a section by index has to run before the first delete.
+     */
+    fun uciDeleteOrder(paths: Collection<String>): List<String> {
+        val (anonymous, named) = paths.distinct().partition { ANONYMOUS_SECTION.matches(it) }
+        return anonymous.sortedWith(
+            compareBy<String> { ANONYMOUS_SECTION.matchEntire(it)!!.groupValues[1] }
+                .thenByDescending { ANONYMOUS_SECTION.matchEntire(it)!!.groupValues[2].toInt() }
+        ) + named.sorted()
+    }
+
     /** The uci network a router-as-client interface is bridged to. */
     const val WWAN = "wwan"
 

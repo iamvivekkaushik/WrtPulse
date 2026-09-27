@@ -274,3 +274,39 @@ class FirewallHelpersTest {
         assertFalse(Commands.FIREWALL_STATE.contains("fw4 reload"))
     }
 }
+
+class UciDeleteOrderTest {
+
+    @Test
+    fun `anonymous deletes run per type, highest index first by number, then named ones`() {
+        assertEquals(
+            listOf(
+                "firewall.@forwarding[2]", "firewall.@forwarding[0]",
+                "firewall.@rule[10]", "firewall.@rule[3]", "firewall.@rule[2]",
+                "firewall.kids", "firewall.wrtpulse_fwd_4",
+            ),
+            Commands.uciDeleteOrder(
+                listOf(
+                    "firewall.wrtpulse_fwd_4", "firewall.@rule[2]", "firewall.@forwarding[0]", "firewall.kids",
+                    "firewall.@rule[10]", "firewall.@forwarding[2]", "firewall.@rule[3]", "firewall.@rule[10]",
+                )
+            ),
+        )
+    }
+
+    @Test
+    fun `bare sections and hyphenated types are ordered the same way`() {
+        assertEquals(
+            listOf("@wifi-iface[3]", "@wifi-iface[1]", "guest_ap"),
+            Commands.uciDeleteOrder(listOf("guest_ap", "@wifi-iface[1]", "@wifi-iface[3]")),
+        )
+    }
+
+    @Test
+    fun `only an index at the end makes a section anonymous`() {
+        assertTrue(Commands.isAnonymousSection("@redirect[0]"))
+        assertTrue(Commands.isAnonymousSection("firewall.@redirect[12]"))
+        assertFalse(Commands.isAnonymousSection("wrtpulse_fwd_3"))
+        assertFalse(Commands.isAnonymousSection("firewall.@redirect[0].enabled"))
+    }
+}
