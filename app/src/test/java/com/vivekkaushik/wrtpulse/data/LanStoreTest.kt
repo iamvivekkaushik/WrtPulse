@@ -1037,6 +1037,241 @@ class LanStoreTest {
         assertNull(s.pool)
         assertEquals(100, s.poolStart)
     }
+
+    // ---- anonymous sections: the batch run the way uci runs it ----
+    //
+    // LuCI writes a static lease as `@host[i]` and a VLAN as `@bridge-vlan[i]` or
+    // `@switch_vlan[i]`. The index counts the named sections of the type too, and uci resolves
+    // it command by command, so every delete renumbers what follows. These run ops() through
+    // FakeUci against configs read from its own `uci show`, and check what actually got deleted
+    // and edited.
+
+    @Test
+    fun `deleting static leases takes exactly those, and an edit above them lands on its own lease`() {
+        val (s, _, dhcp) = used()
+        s.stageDelete("dhcp.@host[3]") // doorbell
+        s.stageDelete("dhcp.@host[10]") // office-switch: as text it sorts ahead of @host[3]
+        s.stageDelete("dhcp.@host[4]") // thermostat
+        s.stageDelete("dhcp.printer") // named, but it sits ahead of all three and counts
+        s.editReservation("@host[12]", "desk-pc", "D8:BB:C1:0A:44:12", "192.168.1.30") // above every delete
+        assertEquals(
+            listOf(
+                "set dhcp.@host[12].ip='192.168.1.30'",
+                "delete dhcp.@host[10]",
+                "delete dhcp.@host[4]",
+                "delete dhcp.@host[3]",
+                "delete dhcp.printer",
+            ),
+            s.ops(),
+        )
+        dhcp.run(s.ops()).assertLeaves(
+            usedDhcp,
+            deleted = setOf("doorbell", "thermostat", "officeSwitch", "printer"),
+            edited = mapOf("desk" to mapOf("ip" to "192.168.1.30")),
+        )
+    }
+
+    /** The hazard, spelled out: in text order the third delete lands on the lease after the one meant. */
+    @Test
+    fun `the same leases deleted in text order would take the wrong one`() {
+        val uci = FakeUci("dhcp", usedDhcp)
+            .run(listOf("delete dhcp.@host[10]", "delete dhcp.@host[3]", "delete dhcp.@host[4]", "delete dhcp.printer"))
+        assertEquals(setOf("officeSwitch", "doorbell", "cameraFront", "printer"), uci.deleted)
+    }
+
+    @Test
+    fun `deleting vlans takes exactly those, and a port change above them lands on its own vlan`() {
+        val (s, network, _) = used()
+        s.stageDelete("network.@bridge-vlan[1]") // VLAN 10
+        s.stageDelete("network.@bridge-vlan[3]") // VLAN 30
+        s.stageDelete("network.vlan20") // named, and between them
+        s.setPort(s.vlanRows().single { it.vlan == 40 }, "lan3", PortState.Tagged) // @bridge-vlan[4]
+        assertEquals(
+            listOf(
+                "delete network.@bridge-vlan[4].ports",
+                "add_list network.@bridge-vlan[4].ports='lan2:t'",
+                "add_list network.@bridge-vlan[4].ports='lan3:t'",
+                "add_list network.@bridge-vlan[4].ports='lan4:t'",
+                "delete network.@bridge-vlan[3]",
+                "delete network.@bridge-vlan[1]",
+                "delete network.vlan20",
+            ),
+            s.ops(),
+        )
+        network.run(s.ops()).assertLeaves(
+            usedNetwork,
+            deleted = setOf("vlan10", "vlan20", "vlan30"),
+            editedLists = mapOf("vlan40" to mapOf("ports" to listOf("lan2:t", "lan3:t", "lan4:t"))),
+        )
+    }
+
+    /** On swconfig the port map is one string, and the VLANs are `@switch_vlan[i]`. */
+    @Test
+    fun `on a swconfig board the deletes and a port change land on the vlans they name`() {
+        val network = FakeUci("network", usedSwitch)
+        val s = LanStore(RouterSession(SshTarget("192.168.0.1"), unusedClient, { error("unused") })).apply {
+            ingest(mapOf("net" to network.show(), "dhcp" to DHCP_UCI, "live" to "{}", "swconfig" to SWCONFIG_OUT))
+        }
+        s.stageDelete("network.@switch_vlan[2]") // VLAN 3
+        s.stageDelete("network.@switch_vlan[4]") // VLAN 5
+        s.stageDelete("network.swvlan4") // the app's own, between them
+        s.setSwPort(s.swVlanRows().single { it.vlan == 6 }, 3, PortState.Tagged) // @switch_vlan[5]
+        assertEquals(
+            listOf(
+                "set network.@switch_vlan[5].ports='0t 1t 2t 3t'",
+                "delete network.@switch_vlan[4]",
+                "delete network.@switch_vlan[2]",
+                "delete network.swvlan4",
+            ),
+            s.ops(),
+        )
+        network.run(s.ops()).assertLeaves(
+            usedSwitch,
+            deleted = setOf("vlan3", "vlan4", "vlan5"),
+            edited = mapOf("vlan6" to mapOf("ports" to "0t 1t 2t 3t")),
+        )
+    }
+
+    @Test
+    fun `a batch of every kind runs clean, and the review lists it in the batch's order`() {
+        val (s, network, dhcp) = used()
+        s.stageRouterIp("192.168.1.2")
+        s.stagePoolStart("50")
+        s.stageDns(listOf("1.1.1.1", "8.8.8.8"))
+        s.editReservation("@host[11]", "ap-hall", "D8:BB:C1:0A:44:11", "192.168.1.40")
+        s.stageDelete("dhcp.@host[0]") // synology-nas
+        s.stageDelete("dhcp.@host[5]") // camera-front
+        s.setPort(s.vlanRows().single { it.vlan == 30 }, "lan2", PortState.Untagged) // @bridge-vlan[3]
+        s.stageDelete("network.@bridge-vlan[1]") // VLAN 10
+        s.addReservation("nas-backup", "00:11:32:6f:b2:45", "192.168.1.60")
+        val vlan = s.addVlan(50)
+        s.setPort(s.vlanRows().single { it.draftId == vlan.id }, "lan1", PortState.Tagged)
+        val ops = s.ops()
+        batch(ops, network, dhcp)
+        network.assertLeaves(
+            usedNetwork,
+            deleted = setOf("vlan10"),
+            edited = mapOf("lan" to mapOf("ipaddr" to "192.168.1.2")),
+            editedLists = mapOf(
+                "lan" to mapOf("dns" to listOf("1.1.1.1", "8.8.8.8")),
+                "vlan30" to mapOf("ports" to listOf("lan2:u*", "lan3:t", "lan4:t")),
+            ),
+            added = listOf(bridgeVlan("vlan50", "vlan50", 50, "lan1:t")),
+        )
+        dhcp.assertLeaves(
+            usedDhcp,
+            deleted = setOf("nas", "cameraFront"),
+            edited = mapOf(
+                "lanPool" to mapOf("start" to "50"),
+                "apUpstairs" to mapOf("name" to "ap-hall", "ip" to "192.168.1.40"),
+            ),
+            added = listOf(host("nas_backup", "nas_backup", "nas-backup", "00:11:32:6f:b2:45", "192.168.1.60")),
+        )
+        assertEquals(batchChanges(ops), reviewChanges(s.diffLines()))
+    }
+
+    /** An edit of a section the batch deletes goes with it, in the review as in the batch. */
+    @Test
+    fun `a port change on a vlan being deleted is left out of the review too`() {
+        val (s, _, _) = used()
+        s.setPort(s.vlanRows().single { it.vlan == 30 }, "lan2", PortState.Tagged)
+        s.stageDelete("network.@bridge-vlan[3]")
+        assertEquals(listOf("delete network.@bridge-vlan[3]"), s.ops())
+        assertEquals(listOf("- network.@bridge-vlan[3]" to false), s.diffLines())
+    }
+
+    private fun sec(id: String, type: String, section: String?, vararg options: Pair<String, String>) =
+        FakeUci.Section(id, type, section, mapOf(*options))
+
+    private fun host(id: String, section: String?, name: String, mac: String, ip: String) =
+        sec(id, "host", section, "name" to name, "mac" to mac, "ip" to ip)
+
+    private fun bridgeVlan(id: String, section: String?, vlan: Int, vararg ports: String) =
+        FakeUci.Section(id, "bridge-vlan", section, mapOf("device" to "br-lan", "vlan" to "$vlan"), mapOf("ports" to ports.toList()))
+
+    private fun switchVlan(id: String, section: String?, vlan: Int, ports: String) =
+        sec(id, "switch_vlan", section, "device" to "switch0", "vlan" to "$vlan", "ports" to ports)
+
+    /** A DSA router after some use: LuCI's anonymous VLANs, and one named among them that still counts. */
+    private val usedNetwork = listOf(
+        sec("loopback", "interface", "loopback", "device" to "lo", "proto" to "static", "ipaddr" to "127.0.0.1", "netmask" to "255.0.0.0"),
+        sec("globals", "globals", "globals", "ula_prefix" to "fd8e:1f4f:3c9d::/48"),
+        FakeUci.Section("brLan", "device", null, mapOf("name" to "br-lan", "type" to "bridge"), mapOf("ports" to listOf("lan1", "lan2", "lan3", "lan4"))),
+        // @bridge-vlan[0] and [1], a named one at 2, then @bridge-vlan[3] and [4]
+        bridgeVlan("vlan1", null, 1, "lan1:u*", "lan2:u*", "lan3:u*"),
+        bridgeVlan("vlan10", null, 10, "lan3:t", "lan4:u*"),
+        bridgeVlan("vlan20", "vlan20", 20, "lan4:t"),
+        bridgeVlan("vlan30", null, 30, "lan3:t", "lan4:t"),
+        bridgeVlan("vlan40", null, 40, "lan2:t", "lan4:t"),
+        FakeUci.Section(
+            "lan", "interface", "lan",
+            mapOf("device" to "br-lan.1", "proto" to "static", "ipaddr" to "192.168.1.1", "netmask" to "255.255.255.0", "ip6assign" to "60"),
+            mapOf("dns" to listOf("9.9.9.9", "1.1.1.1")),
+        ),
+        sec("wan", "interface", "wan", "device" to "wan", "proto" to "dhcp"),
+    )
+
+    /** Thirteen static leases, `@host[0]` to `[12]`, with a hand-named one at 2 that counts too. */
+    private val usedDhcp = listOf(
+        sec("dnsmasq", "dnsmasq", null, "domainneeded" to "1", "localise_queries" to "1", "local" to "/lan/", "domain" to "lan"),
+        FakeUci.Section(
+            "lanPool", "dhcp", "lan",
+            mapOf("interface" to "lan", "start" to "100", "limit" to "150", "leasetime" to "12h"),
+            mapOf("dhcp_option" to listOf("6,9.9.9.9,1.1.1.1", "42,192.168.1.10")),
+        ),
+        sec("wanPool", "dhcp", "wan", "interface" to "wan", "ignore" to "1"),
+        host("nas", null, "synology-nas", "00:11:32:6F:B2:44", "192.168.1.10"),
+        host("tv", null, "living-room-tv", "A8:23:FE:10:22:01", "192.168.1.11"),
+        host("printer", "printer", "printer-hp", "84:2A:FD:1C:99:30", "192.168.1.61"),
+        host("doorbell", null, "doorbell", "64:16:66:3B:0D:13", "192.168.1.13"),
+        host("thermostat", null, "thermostat", "18:B4:30:5C:2E:14", "192.168.1.14"),
+        host("cameraFront", null, "camera-front", "9C:8E:CD:11:22:15", "192.168.1.15"),
+        host("cameraBack", null, "camera-back", "9C:8E:CD:11:22:16", "192.168.1.16"),
+        host("speaker", null, "kitchen-speaker", "F0:F5:BD:4A:77:17", "192.168.1.17"),
+        host("laptop", null, "work-laptop", "3C:22:FB:90:11:5E", "192.168.1.18"),
+        host("pihole", null, "pi-hole", "DC:A6:32:01:02:19", "192.168.1.19"),
+        host("officeSwitch", null, "office-switch", "60:32:B1:0E:55:20", "192.168.1.20"),
+        host("apUpstairs", null, "ap-upstairs", "D8:BB:C1:0A:44:11", "192.168.1.21"),
+        host("desk", null, "desk-pc", "D8:BB:C1:0A:44:12", "192.168.1.22"),
+    )
+
+    /** A swconfig board the same way: `@switch_vlan[0]` to `[5]`, with the app's own `swvlan4` at 3. */
+    private val usedSwitch = listOf(
+        sec("lan", "interface", "lan", "device" to "br-lan", "proto" to "static", "ipaddr" to "192.168.0.1/24"),
+        FakeUci.Section("brLan", "device", "br_lan", mapOf("name" to "br-lan", "type" to "bridge"), mapOf("ports" to listOf("eth0.1"))),
+        sec("switch", "switch", null, "name" to "switch0", "reset" to "1", "enable_vlan" to "1"),
+        switchVlan("vlan1", null, 1, "1 2 3 0t"),
+        switchVlan("vlan2", null, 2, "4 0t"),
+        switchVlan("vlan3", null, 3, "3t 0t"),
+        switchVlan("vlan4", "swvlan4", 4, "2t 0t"),
+        switchVlan("vlan5", null, 5, "1t 0t"),
+        switchVlan("vlan6", null, 6, "1t 2t 0t"),
+    )
+
+    /** A store loaded from [usedNetwork] and [usedDhcp], and the two packages its batch runs against. */
+    private fun used(): Triple<LanStore, FakeUci, FakeUci> {
+        val network = FakeUci("network", usedNetwork)
+        val dhcp = FakeUci("dhcp", usedDhcp)
+        val s = LanStore(RouterSession(SshTarget("192.168.1.1"), unusedClient, { error("unused") })).apply {
+            ingest(
+                mapOf(
+                    "net" to network.show(),
+                    "dhcp" to dhcp.show(),
+                    "live" to LAN_STATUS,
+                    "links" to NETDEV_LINES,
+                    "dnsmasq" to "running",
+                )
+            )
+        }
+        return Triple(s, network, dhcp)
+    }
+
+    /** One batch over both packages: each runs its own lines, in the batch's order. */
+    private fun batch(ops: List<String>, vararg packages: FakeUci) {
+        val byPackage = ops.groupBy { it.substringAfter(' ').substringBefore('.') }
+        assertEquals(packages.map { it.pkg }.toSet(), byPackage.keys)
+        packages.forEach { it.run(byPackage.getValue(it.pkg)) }
+    }
 }
 
 /**

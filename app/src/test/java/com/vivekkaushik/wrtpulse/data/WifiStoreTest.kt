@@ -5,6 +5,7 @@ import com.vivekkaushik.wrtpulse.net.SshAuth
 import com.vivekkaushik.wrtpulse.net.SshClient
 import com.vivekkaushik.wrtpulse.net.SshConnection
 import com.vivekkaushik.wrtpulse.net.SshTarget
+import com.vivekkaushik.wrtpulse.ops.MeshOps
 import com.vivekkaushik.wrtpulse.ops.Parsers
 import com.vivekkaushik.wrtpulse.ops.WifiNetwork
 import org.junit.Assert.assertEquals
@@ -414,6 +415,118 @@ class WifiStoreTest {
         assertEquals("WPA2/3", Parsers.encryptionLabel("sae-mixed"))
         assertEquals("WPA2-PSK", Parsers.encryptionLabel("psk2+ccmp"))
         assertEquals("OPEN", Parsers.encryptionLabel("none"))
+    }
+
+    // ---- anonymous sections: the batch run the way uci runs it ----
+    //
+    // A wifi-iface LuCI adds is `@wifi-iface[i]`. The index counts the named interfaces too, and
+    // uci resolves it command by command, so every delete renumbers the interfaces after it.
+    // These run ops() through FakeUci against a config read from its own `uci show`.
+
+    @Test
+    fun `deleting interfaces takes exactly those, and edits above them land on their own`() {
+        val (s, uci) = used()
+        s.stageDelete("@wifi-iface[2]") // Casa-IoT
+        s.stageDelete("@wifi-iface[5]") // Casa-Old
+        s.stageDelete("guest_5g") // named, but it sits between them and counts
+        s.stage("@wifi-iface[4]", "key", "upstream-key", "new-upstream-key") // between the two
+        s.stageFastTransition(s.networks.single { it.ssid == "Casa-Work" }, on = false) // @wifi-iface[6], above all
+        s.stage("radio1", "channel", "36", "149")
+        s.addDraft(listOf("radio0"), "ap", "Casa-Lab", "psk2", "lab-password")
+        val ops = s.ops()
+        assertEquals(
+            listOf(
+                "set wireless.@wifi-iface[4].key='new-upstream-key'",
+                "delete wireless.@wifi-iface[6].bss_transition",
+                "delete wireless.@wifi-iface[6].ft_over_ds",
+                "delete wireless.@wifi-iface[6].ft_psk_generate_local",
+                "delete wireless.@wifi-iface[6].ieee80211k",
+                "delete wireless.@wifi-iface[6].ieee80211r",
+                "delete wireless.@wifi-iface[6].mobility_domain",
+                "set wireless.radio1.channel='149'",
+                "delete wireless.@wifi-iface[5]",
+                "delete wireless.@wifi-iface[2]",
+                "delete wireless.guest_5g",
+                "set wireless.wrtpulse_casa_lab=wifi-iface",
+                "set wireless.wrtpulse_casa_lab.device='radio0'",
+                "set wireless.wrtpulse_casa_lab.mode='ap'",
+                "set wireless.wrtpulse_casa_lab.ssid='Casa-Lab'",
+                "set wireless.wrtpulse_casa_lab.encryption='psk2'",
+                "set wireless.wrtpulse_casa_lab.key='lab-password'",
+                "set wireless.wrtpulse_casa_lab.network='lan'",
+            ),
+            ops,
+        )
+        uci.run(ops).assertLeaves(
+            usedWireless,
+            deleted = setOf("iot", "old", "guest"),
+            edited = mapOf(
+                "radio1" to mapOf("channel" to "149"),
+                "uplink" to mapOf("key" to "new-upstream-key"),
+                "work" to WifiStore.FT_OPTIONS.associateWith { null },
+            ),
+            added = listOf(
+                iface(
+                    "wrtpulse_casa_lab", "wrtpulse_casa_lab",
+                    "device" to "radio0", "mode" to "ap", "ssid" to "Casa-Lab", "encryption" to "psk2",
+                    "key" to "lab-password", "network" to "lan",
+                ),
+            ),
+        )
+        // The review lists the same changes in the same order: paths without the package, keys masked.
+        assertEquals(
+            batchChanges(ops).map { (path, values) ->
+                path.removePrefix("wireless.") to if (path.endsWith(".key")) values.map(WifiStore::mask) else values
+            },
+            reviewChanges(s.diffLines()),
+        )
+    }
+
+    /** An option the batch removes is shown going, not as a `+` line setting it to nothing. */
+    @Test
+    fun `auto tx power and fast roaming off read as removals in the review`() {
+        val s = store()
+        s.stage("radio0", "txpower", "20", "")
+        val work = WifiNetwork(
+            "work", "radio0", "Casa-Work", "sae", "work-password", disabled = false, network = "lan",
+            ieee80211r = true, mobilityDomain = MeshOps.mobilityDomain("Casa-Work"),
+        )
+        s.networks.add(work)
+        s.stageFastTransition(work, on = false)
+        assertTrue(s.ops().none { it.startsWith("set ") })
+        assertTrue(s.diffLines().none { it.second })
+        assertEquals(
+            batchChanges(s.ops()).map { (path, values) -> path.removePrefix("wireless.") to values },
+            reviewChanges(s.diffLines()),
+        )
+    }
+
+    private fun iface(id: String, section: String?, vararg options: Pair<String, String>) =
+        FakeUci.Section(id, "wifi-iface", section, mapOf(*options))
+
+    /** Two radios and seven interfaces: the stock one, LuCI's anonymous ones, and a guest AP named by hand. */
+    private val usedWireless = listOf(
+        FakeUci.Section("radio0", "wifi-device", "radio0", mapOf("type" to "mac80211", "band" to "2g", "channel" to "6", "htmode" to "HE20")),
+        FakeUci.Section("radio1", "wifi-device", "radio1", mapOf("type" to "mac80211", "band" to "5g", "channel" to "36", "htmode" to "HE80")),
+        // default_radio0 at 0, @wifi-iface[1] and [2], guest_5g at 3, then @wifi-iface[4] to [6]
+        iface("casa2", "default_radio0", "device" to "radio0", "mode" to "ap", "ssid" to "Casa", "encryption" to "sae", "key" to "tr0ub4dor&3", "network" to "lan"),
+        iface("casa5", null, "device" to "radio1", "mode" to "ap", "ssid" to "Casa", "encryption" to "sae", "key" to "tr0ub4dor&3", "network" to "lan"),
+        iface("iot", null, "device" to "radio0", "mode" to "ap", "ssid" to "Casa-IoT", "encryption" to "psk2", "key" to "iot-devices", "network" to "iot"),
+        iface("guest", "guest_5g", "device" to "radio1", "mode" to "ap", "ssid" to "Casa-Guest", "encryption" to "psk2", "key" to "welcome-in", "network" to "guest", "isolate" to "1"),
+        iface("uplink", null, "device" to "radio1", "mode" to "sta", "ssid" to "Upstream", "encryption" to "psk2", "key" to "upstream-key", "network" to "wwan"),
+        iface("old", null, "device" to "radio0", "mode" to "ap", "ssid" to "Casa-Old", "encryption" to "psk2", "key" to "old-password", "network" to "lan", "disabled" to "1"),
+        iface(
+            "work", null,
+            "device" to "radio1", "mode" to "ap", "ssid" to "Casa-Work", "encryption" to "sae", "key" to "work-password", "network" to "lan",
+            *MeshOps.roamingOptions("Casa-Work", "sae").toTypedArray(),
+        ),
+    )
+
+    /** A store holding [usedWireless] as load() reads it, and the uci its batch will run against. */
+    private fun used(): Pair<WifiStore, FakeUci> {
+        val uci = FakeUci("wireless", usedWireless)
+        val (radios, networks) = Parsers.wireless(Parsers.uciShow(uci.show()))
+        return store().apply { this.radios.addAll(radios); this.networks.addAll(networks) } to uci
     }
 }
 
