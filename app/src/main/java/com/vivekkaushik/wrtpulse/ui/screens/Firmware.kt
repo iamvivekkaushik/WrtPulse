@@ -1,7 +1,6 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
 import androidx.compose.foundation.background
-import com.vivekkaushik.wrtpulse.ui.HoldButton
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -156,11 +155,15 @@ fun FirmwareScreen(
                     store.backupWaived -> GateState.Skipped
                     else -> GateState.StartHere
                 }
+                val gate1Behind = gate1 == GateState.Done || gate1 == GateState.Skipped
                 val gate2 = when {
                     store.busy && store.progress?.contains("server", true) == true -> GateState.Running
                     store.check?.safe == false -> GateState.Blocked
                     store.check != null -> GateState.Done
-                    gate1 == GateState.Done || gate1 == GateState.Skipped -> GateState.StartHere
+                    // Nothing here to ask the server with, so it is skipped from the start —
+                    // not lit as the next step with nothing to press.
+                    store.loaded && store.status.tool != "owut" -> GateState.NoTool
+                    gate1Behind -> GateState.StartHere
                     else -> GateState.Waiting
                 }
                 val rebuildOnly = store.check?.sameVersion == true
@@ -168,6 +171,8 @@ fun FirmwareScreen(
                     store.busy && (store.progress?.contains("ownload", true) == true ||
                         store.progress?.contains("Sending", true) == true) -> GateState.Running
                     store.image != null -> GateState.Done
+                    // No server build, so the next step is an image by URL or from this phone.
+                    gate2 == GateState.NoTool -> if (gate1Behind) GateState.StartHere else GateState.Waiting
                     gate2 != GateState.Done -> GateState.Waiting
                     // Nothing newer exists: rebuilding is a choice, not the next step.
                     rebuildOnly -> GateState.Optional
@@ -193,9 +198,20 @@ fun FirmwareScreen(
                 ) {
                     if (store.backupDone) {
                         InlineAction("Share the backup", Wrt.Accent) { shareBackup(context, store.backupFile) }
+                    } else if (gate1 == GateState.Skipped) {
+                        // Decided, so it loses its controls the way Done does. What stays is the
+                        // way back: Skip is one tap, and so is a mistaken one.
+                        InlineAction("Back up after all", Wrt.Accent) {
+                            if (!store.busy) {
+                                scope.launch { result = 1 to store.backUp(File(context.filesDir, "backups")) }
+                            }
+                        }
                     } else {
                         CodeLine("sysupgrade -b ${Commands.BACKUP_FILE}")
                         Spacer(Modifier.height(10.dp))
+                        // The way through and, beside it and no bigger, the way past. One tap:
+                        // skipping only opens the next gates, and the flash keeps its hold. "or"
+                        // travels with Skip, so a line too narrow for all three breaks before it.
                         FlowRow(
                             itemVerticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -206,11 +222,16 @@ fun FirmwareScreen(
                                     scope.launch { result = 1 to store.backUp(File(context.filesDir, "backups")) }
                                 }
                             }
-                            Text("or", style = sans(10.5f, 400, Wrt.TextDim))
-                            // "asks once more" in the design — here a hold, not a second tap.
-                            HoldButton("Continue without a backup", "Hold — no backup", danger = true, height = 32.dp) {
-                                store.waiveBackup()
-                                result = 1 to "Continuing without a backup"
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                Text("or", style = sans(10.5f, 400, Wrt.TextDim))
+                                OutlineChip("Skip", color = Wrt.Red) {
+                                    store.waiveBackup()
+                                    // The card's own SKIPPED says it; a line under it would repeat it.
+                                    result = null
+                                }
                             }
                         }
                     }
@@ -283,7 +304,8 @@ fun FirmwareScreen(
                             img.sizeBytes?.let { preciseBytes(it) },
                             img.sha256?.take(12),
                         ).joinToString(" · ")
-                    } ?: "built by the server with your installed packages",
+                    } ?: if (gate2 == GateState.NoTool) "an image by URL + sha256, or a file on this phone"
+                    else "built by the server with your installed packages",
                     message = result?.takeIf { it.first == 3 }?.second,
                 ) {
                     if (store.busy && store.downloadLine != null) {
@@ -323,9 +345,11 @@ fun FirmwareScreen(
                         }
                         Spacer(Modifier.height(9.dp))
                     }
-                    // These bypass owut entirely, so they stay available whatever gate 2 said.
+                    // These bypass owut entirely, so they stay available whatever gate 2 said —
+                    // and without owut they are the gate's own controls, coloured as the next step.
                     // FlowRow, not Row: four labels do not fit 360dp, and a Row makes the last
                     // one spell itself vertically down the edge rather than wrapping.
+                    val manual = if (gate2 == GateState.NoTool && gate3 == GateState.StartHere) Wrt.Accent else Wrt.TextTertiary
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -335,10 +359,10 @@ fun FirmwareScreen(
                                 scope.launch { result = 3 to store.downloadWithTool() }
                             }
                         }
-                        InlineAction(if (urlOpen) "Hide the URL field" else "Use a URL + sha256") {
+                        InlineAction(if (urlOpen) "Hide the URL field" else "Use a URL + sha256", manual) {
                             urlOpen = !urlOpen
                         }
-                        InlineAction("Flash a local file") { picker.launch(arrayOf("*/*")) }
+                        InlineAction("Flash a local file", manual) { picker.launch(arrayOf("*/*")) }
                         if (store.image != null) {
                             InlineAction("Discard image", Wrt.Red) {
                                 scope.launch { result = 3 to store.discardImage() }
@@ -527,7 +551,7 @@ private fun ServerAnswerBox(check: com.vivekkaushik.wrtpulse.ops.UpgradeCheck, d
 }
 
 /** Where a gate stands in the sequence — designs 40, 40a and 40b between them show all of these. */
-internal enum class GateState { Done, Running, StartHere, Waiting, Optional, Locked, Blocked, Skipped }
+internal enum class GateState { Done, Running, StartHere, Waiting, Optional, Locked, Blocked, Skipped, NoTool }
 
 private val GateState.badge: String
     get() = when (this) {
@@ -539,6 +563,7 @@ private val GateState.badge: String
         GateState.Locked -> "LOCKED"
         GateState.Blocked -> "BLOCKED"
         GateState.Skipped -> "SKIPPED"
+        GateState.NoTool -> "NO OWUT"
     }
 
 /** One numbered gate: what it is, where it stands, and — only when it is the next thing — its control. */
@@ -556,17 +581,19 @@ private fun GateCard(
         GateState.Running -> Wrt.Amber
         GateState.Done -> Wrt.Accent
         GateState.StartHere, GateState.Optional -> Wrt.Accent
-        GateState.Skipped -> Wrt.Amber
+        GateState.Skipped, GateState.NoTool -> Wrt.Amber
         GateState.Waiting, GateState.Locked -> Wrt.TextDim
     }
     Card {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             // A ring for anything not yet done — bright on the one that is live, dim on the
-            // rest — and a tick once it is behind you.
+            // rest — and a tick once it is behind you, amber when it was skipped (by choice, or
+            // for want of owut) rather than done.
             Box(
                 Modifier.size(14.dp).let {
                     when (state) {
-                        GateState.Done -> it.background(accent.copy(alpha = 0.15f), CircleShape)
+                        GateState.Done, GateState.Skipped, GateState.NoTool ->
+                            it.background(accent.copy(alpha = 0.15f), CircleShape)
                         GateState.StartHere, GateState.Running, GateState.Optional ->
                             it.border(2.dp, accent, CircleShape)
                         else -> it.border(1.5.dp, Wrt.DotOff, CircleShape)
@@ -575,7 +602,8 @@ private fun GateCard(
                 contentAlignment = Alignment.Center,
             ) {
                 when (state) {
-                    GateState.Done -> Icon(WrtIcons.Check, null, Modifier.size(9.dp), tint = accent)
+                    GateState.Done, GateState.Skipped, GateState.NoTool ->
+                        Icon(WrtIcons.Check, null, Modifier.size(9.dp), tint = accent)
                     GateState.Blocked -> Icon(WrtIcons.Close, null, Modifier.size(8.dp), tint = accent)
                     else -> Unit
                 }
@@ -622,14 +650,17 @@ private fun AccentChip(text: String, busy: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** 40b's "Rebuild": offered, but outlined rather than filled — it is a choice, not the next step. */
+/**
+ * 40b's "Rebuild": offered, but outlined rather than filled — it is a choice, not the next
+ * step. In red it is the way past a gate, like the backup gate's Skip.
+ */
 @Composable
-private fun OutlineChip(text: String, onClick: () -> Unit) {
+private fun OutlineChip(text: String, color: Color = Wrt.Accent, onClick: () -> Unit) {
     Text(
         text,
-        style = sans(11f, 600, Wrt.Accent),
+        style = sans(11f, 600, color),
         modifier = Modifier
-            .border(1.dp, Wrt.Accent.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+            .border(1.dp, color.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 7.dp),
     )
