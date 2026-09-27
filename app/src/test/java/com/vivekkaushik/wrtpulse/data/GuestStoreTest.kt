@@ -115,6 +115,59 @@ class GuestOpsTest {
         assertTrue(ops.contains("delete firewall.wrtpulse_guest_wan"))
         assertTrue(ops.contains("delete firewall.wrtpulse_guest_dns"))
     }
+
+    // ---- anonymous sections: the batch run the way uci runs it ----
+
+    /**
+     * A guest network made in LuCI, found by its zone: its APs are `@wifi-iface[i]`, one per
+     * band, and detect() lists them in file order. Deleted in that order, the second delete took
+     * the IoT AP after them and left the 5 GHz guest AP on the air.
+     */
+    @Test
+    fun `removing a stock guest network deletes exactly its APs`() {
+        val wireless = FakeUci("wireless", stockGuestWireless)
+        val (_, networks) = Parsers.wireless(Parsers.uciShow(wireless.show()))
+        val firewall = Parsers.firewallConfig(
+            Parsers.uciShow(
+                """
+                firewall.@zone[0]=zone
+                firewall.@zone[0].name='lan'
+                firewall.@zone[0].network='lan'
+                firewall.@zone[1]=zone
+                firewall.@zone[1].name='wan'
+                firewall.@zone[1].network='wan' 'wan6'
+                firewall.@zone[2]=zone
+                firewall.@zone[2].name='guest'
+                firewall.@zone[2].network='guest'
+                """.trimIndent()
+            )
+        )
+        val net = GuestStore.detect(networks, firewall)!!
+        assertEquals(listOf("@wifi-iface[2]", "@wifi-iface[3]"), net.apSections)
+        // Only the wireless lines run here: the firewall's is a single `@zone[i]`, and the rest
+        // name the app's own sections, which a network made in LuCI does not have.
+        val ops = GuestStore.removeOps(net).filter { it.startsWith("delete wireless.") }
+        assertEquals(listOf("delete wireless.@wifi-iface[3]", "delete wireless.@wifi-iface[2]"), ops)
+        wireless.run(ops).assertLeaves(stockGuestWireless, deleted = setOf("guest2g", "guest5g"))
+    }
+
+    private fun ap(id: String, section: String?, device: String, ssid: String, network: String, vararg more: Pair<String, String>) =
+        FakeUci.Section(
+            id, "wifi-iface", section,
+            mapOf("device" to device, "mode" to "ap", "ssid" to ssid, "encryption" to "psk2", "key" to "$ssid-password", "network" to network, *more),
+        )
+
+    /** The stock APs by name, a guest network's two added in LuCI, and an IoT AP added after those. */
+    private val stockGuestWireless = listOf(
+        FakeUci.Section("radio0", "wifi-device", "radio0", mapOf("type" to "mac80211", "band" to "2g", "channel" to "1", "htmode" to "HE20")),
+        FakeUci.Section("radio1", "wifi-device", "radio1", mapOf("type" to "mac80211", "band" to "5g", "channel" to "36", "htmode" to "HE80")),
+        // default_radio0 and default_radio1 are @wifi-iface[0] and [1], then @wifi-iface[2] to [4]
+        ap("casa2g", "default_radio0", "radio0", "Casa", "lan"),
+        ap("casa5g", "default_radio1", "radio1", "Casa", "lan"),
+        ap("guest2g", null, "radio0", "Casa-Guest", "guest", "isolate" to "1"),
+        ap("guest5g", null, "radio1", "Casa-Guest", "guest", "isolate" to "1"),
+        ap("iot", null, "radio0", "Casa-IoT", "iot"),
+    )
 }
 
 class GuestDetectTest {

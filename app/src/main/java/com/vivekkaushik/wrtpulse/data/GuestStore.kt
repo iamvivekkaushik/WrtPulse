@@ -367,7 +367,10 @@ class GuestStore(private val session: RouterSession, val kind: NetworkKind = Net
 
         /** Tears down exactly what [createOps] built, plus any stock guest bits detected. */
         fun removeOps(net: GuestNetwork, kind: NetworkKind = NetworkKind.GUEST): List<String> = buildList {
-            net.apSections.forEach { add("delete wireless.$it") }
+            // A guest network made in LuCI has `@wifi-iface[i]` APs, and each delete renumbers
+            // the ones after it: highest index first ([Commands.uciDeleteOrder]), or the second
+            // delete takes the AP after the one meant.
+            Commands.uciDeleteOrder(net.apSections).forEach { add("delete wireless.$it") }
             add("delete network.${kind.net}")
             add("delete network.${kind.dev}")
             add("delete dhcp.${kind.net}")

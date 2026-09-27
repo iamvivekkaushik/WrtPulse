@@ -1,5 +1,6 @@
 package com.vivekkaushik.wrtpulse.data
 
+import com.vivekkaushik.wrtpulse.net.ExecResult
 import com.vivekkaushik.wrtpulse.net.RouterSession
 import com.vivekkaushik.wrtpulse.net.SshAuth
 import com.vivekkaushik.wrtpulse.net.SshClient
@@ -10,6 +11,7 @@ import com.vivekkaushik.wrtpulse.ops.DECO_LEDS
 import com.vivekkaushik.wrtpulse.ops.DECO_SYSTEM_UCI
 import com.vivekkaushik.wrtpulse.ops.LedMode
 import com.vivekkaushik.wrtpulse.ops.WatchState
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -29,7 +31,8 @@ class LedStoreTest {
         leds: String = DECO_LEDS,
         uci: String = DECO_SYSTEM_UCI,
         watch: String = "",
-    ): LedStore = LedStore(RouterSession(SshTarget("t"), unusedClient, { error("unused") })).apply {
+        session: RouterSession = RouterSession(SshTarget("t"), unusedClient, { error("unused") }),
+    ): LedStore = LedStore(session).apply {
         ingest(mapOf("leds" to leds, "dt" to DECO_DT, "uci" to uci, "netdevs" to "br-lan\neth0\neth0.2\nlo", "watch" to watch))
     }
 
@@ -87,4 +90,63 @@ class LedStoreTest {
         assertFalse(s.watch!!.legacy)
         assertTrue(store(watch = "legacy").watch!!.legacy)
     }
+
+    // ---- anonymous sections: the batch run the way uci runs it ----
+    //
+    // An LED section made in LuCI is `@led[i]`. The index counts the named LED sections too, and
+    // uci resolves it line by line, so each delete renumbers the LED sections after it. These run
+    // the batch the store sends through FakeUci against a config read from its own `uci show`.
+
+    /** In file order the second delete took ath9k's section, which is outside the lens. */
+    @Test
+    fun `installing the watch deletes the sections of the LEDs it drives and no other`() = runBlocking {
+        val uci = FakeUci("system", usedSystem)
+        val session = RecordingSession(unusedClient)
+        val s = store(uci = uci.show(), session = session)
+        val cfg = s.watchConfig!!
+        assertEquals(setOf("red:wlan2g", "green:power", "blue:wlan5g"), cfg.leds)
+        assertTrue(s.installWatch(cfg))
+        val batch = batchLines(session.execs.first())
+        assertEquals(listOf("delete system.@led[1]", "delete system.@led[0]"), batch)
+        uci.run(batch).assertLeaves(usedSystem, deleted = setOf("power", "wlan2g"))
+    }
+
+    /** In /sys/class/leds order the last delete asked for an `@led[1]` there no longer was, and one LED kept its section. */
+    @Test
+    fun `resetting every LED deletes all of their sections`() = runBlocking {
+        val uci = FakeUci("system", usedSystem)
+        val session = RecordingSession(unusedClient)
+        val s = store(uci = uci.show(), session = session)
+        assertTrue(s.resetAll())
+        val batch = batchLines(session.execs.first())
+        assertEquals(listOf("delete system.@led[2]", "delete system.@led[1]", "delete system.@led[0]"), batch)
+        uci.run(batch).assertLeaves(usedSystem, deleted = setOf("power", "wlan2g", "phy1"))
+    }
+
+    /** A session that answers every command with success, and remembers what it was asked to run. */
+    private class RecordingSession(client: SshClient) : RouterSession(SshTarget("t"), client, { error("unused") }) {
+        val execs = mutableListOf<String>()
+        override suspend fun exec(command: String, timeoutMs: Long): ExecResult {
+            execs += command
+            return ExecResult("", "", 0)
+        }
+    }
+
+    /** The lines a command feeds `uci batch`, whatever its heredoc is called. */
+    private fun batchLines(command: String): List<String> {
+        val start = Regex("uci batch <<'(\\w+)'\n").find(command) ?: error("no uci batch in: $command")
+        return command.substring(start.range.last + 1).substringBefore("\n${start.groupValues[1]}\n").lines()
+    }
+
+    private fun led(id: String, name: String, sysfs: String, vararg options: Pair<String, String>) =
+        FakeUci.Section(id, "led", null, mapOf("name" to name, "sysfs" to sysfs, *options))
+
+    /** The Deco after LuCI made three LED sections, `@led[0]` to `[2]`: two for the lens, then the ath9k LED outside it. */
+    private val usedSystem = listOf(
+        FakeUci.Section("system", "system", null, mapOf("hostname" to "Deco", "timezone" to "UTC")),
+        FakeUci.Section("ntp", "timeserver", "ntp", mapOf("enabled" to "1")),
+        led("power", "Power", "green:power", "trigger" to "default-on"),
+        led("wlan2g", "WLAN2G", "red:wlan2g", "trigger" to "phy1tpt"),
+        led("phy1", "ath9k", "ath9k-phy1", "trigger" to "netdev", "dev" to "eth0.2", "mode" to "link tx rx"),
+    )
 }
