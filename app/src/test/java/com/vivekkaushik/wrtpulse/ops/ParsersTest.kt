@@ -164,4 +164,21 @@ class ParsersTest {
         assertTrue(script.contains("set wireless.radio0.channel='11'"))
         assertTrue(script.trimEnd().endsWith("uci commit wireless && wifi reload"))
     }
+
+    /**
+     * An empty package list used to leave the commit line a bare `&& reload`: a syntax error
+     * the shell reached only after the batch had staged everything into uci's delta, where the
+     * next screen's commit of that package would pick it up.
+     */
+    @Test
+    fun `a batch given no package commits the ones its operations write`() {
+        val script = Commands.uciBatch(
+            listOf("set network.swvlan2=switch_vlan", "add_list dhcp.lan.dhcp_option='6,1.1.1.1'", "set network.swvlan2.vlan='2'"),
+            commitPackages = emptyList(),
+            reload = "echo done",
+        )
+        assertTrue(script.endsWith("WRTPULSE_EOF\nuci commit network && uci commit dhcp && echo done"))
+        // With nothing to commit at all, the reload is a command of its own, not a dangling `&&`.
+        assertTrue(Commands.uciBatch(emptyList(), emptyList(), "echo done").endsWith("WRTPULSE_EOF\necho done"))
+    }
 }

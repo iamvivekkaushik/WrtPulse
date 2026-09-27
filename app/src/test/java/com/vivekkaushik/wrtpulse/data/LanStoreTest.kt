@@ -1,5 +1,6 @@
 package com.vivekkaushik.wrtpulse.data
 
+import com.vivekkaushik.wrtpulse.net.ExecResult
 import com.vivekkaushik.wrtpulse.net.RouterSession
 import com.vivekkaushik.wrtpulse.net.SshAuth
 import com.vivekkaushik.wrtpulse.net.SshClient
@@ -12,6 +13,7 @@ import com.vivekkaushik.wrtpulse.ops.NETDEV_LINES
 import com.vivekkaushik.wrtpulse.ops.NETWORK_UCI
 import com.vivekkaushik.wrtpulse.ops.SWCONFIG_OUT
 import com.vivekkaushik.wrtpulse.ops.SwPort
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -38,6 +40,16 @@ private val NEIGH = """
     192.168.1.1 dev phy0-sta0 lladdr 14:a7:2b:ea:57:1c ref 1 used 0/0/0 probes 1 REACHABLE
     fe80::3098:37ff:fee5:fcaf dev br-lan.1 lladdr 32:98:37:e5:fc:af ref 1 used 0/0/0 probes 1 STALE
 """.trimIndent()
+
+/** A router that answers every command with success and remembers what it was asked to run. */
+private class RecordingSession(client: SshClient) :
+    RouterSession(SshTarget("192.168.0.1"), client, { error("unused") }) {
+    val execs = mutableListOf<String>()
+    override suspend fun exec(command: String, timeoutMs: Long): ExecResult {
+        execs += command
+        return ExecResult("", "", 0)
+    }
+}
 
 class LanStoreTest {
 
@@ -699,8 +711,12 @@ class LanStoreTest {
      * CPU port tagged, and the LAN riding it through the bridge member `eth0.1` rather than
      * through `network.lan.device`.
      */
-    private fun swStore(dhcp: String = DHCP_UCI, board: String = ""): LanStore =
-        LanStore(RouterSession(SshTarget("192.168.0.1"), unusedClient, { error("unused") })).apply {
+    private fun swStore(
+        dhcp: String = DHCP_UCI,
+        board: String = "",
+        session: RouterSession = RouterSession(SshTarget("192.168.0.1"), unusedClient, { error("unused") }),
+    ): LanStore =
+        LanStore(session).apply {
             ingest(
                 mapOf(
                     "board" to board,
@@ -847,6 +863,43 @@ class LanStoreTest {
         assertTrue(ops.contains("set network.swvlan2.device='switch0'"))
         assertTrue(ops.contains("set network.swvlan2.vlan='2'"))
         assertTrue(ops.contains("set network.swvlan2.ports='0t 5'"))
+    }
+
+    /**
+     * With the chip already in VLAN mode no `enable_vlan` write comes along, so the new VLAN
+     * is the only thing staged. It still writes `network`: an empty package list left the
+     * commit line a bare `&& echo done` — a syntax error the shell only reached after the batch
+     * had staged the VLAN into uci's delta, for the next screen's `uci commit network` to take.
+     */
+    @Test
+    fun `a new vlan on its own commits and reloads the network`() {
+        val s = swStore()
+        s.addSwVlan(2)
+        assertEquals(listOf("network"), s.packages())
+        assertEquals("$ uci commit network && /etc/init.d/network reload", s.commitLine())
+        // The review sheet prints a diff line only under a package it lists.
+        assertTrue(s.diffLines().all { (line, _) -> s.packages().any { line.substringAfter(' ').startsWith("$it.") } })
+    }
+
+    @Test
+    fun `the apply for a new vlan on its own commits network`() = runBlocking {
+        val session = RecordingSession(unusedClient)
+        // The shared reservations sit on 192.168.1.x, outside this board's subnet, and would
+        // refuse the apply before it built anything.
+        val s = swStore(dhcp = DHCP_UCI.replace("192.168.1.", "192.168.0."), session = session)
+        s.addSwVlan(2)
+        assertEquals(emptyList<String>(), s.problems())
+        assertTrue(s.apply())
+        assertEquals(
+            "uci batch <<'WRTPULSE_EOF'\n" +
+                "set network.swvlan2=switch_vlan\n" +
+                "set network.swvlan2.device='switch0'\n" +
+                "set network.swvlan2.vlan='2'\n" +
+                "set network.swvlan2.ports='0t'\n" +
+                "WRTPULSE_EOF\n" +
+                "uci commit network && /etc/init.d/network reload >/dev/null 2>&1; echo done",
+            session.execs.first(),
+        )
     }
 
     @Test
