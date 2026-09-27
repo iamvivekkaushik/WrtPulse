@@ -367,10 +367,12 @@ object LedOps {
      *
      * A section is reused when the board file already made one for this LED — the stock
      * `led_wlan2g` sections are what the router's own defaults live in — and options the new
-     * mode does not use are deleted only when they exist, since a `uci batch` stops at the
-     * first failing line. "On" is the `default-on` trigger rather than `none` plus brightness:
-     * removing a trigger clears the brightness in the kernel, and the init script writes the
-     * trigger last, so `none` + `default=1` on an LED that had a trigger ends up dark.
+     * mode does not use are deleted only when they exist, so no line of the batch fails. One
+     * that did would not stop it: `uci batch` prints `uci: Entry not found`, runs the rest and
+     * still exits 0 (OpenWrt 25.12.5). "On" is the `default-on` trigger rather than `none`
+     * plus brightness: removing a trigger clears the brightness in the kernel, and the init
+     * script writes the trigger last, so `none` + `default=1` on an LED that had a trigger ends
+     * up dark.
      */
     fun modeOps(led: RouterLed, mode: LedMode, section: LedSection?, uci: Map<String, String>, dt: LedDtDefault?): LedWrite {
         val ops = mutableListOf<String>()

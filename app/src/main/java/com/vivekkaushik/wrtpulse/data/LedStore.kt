@@ -108,13 +108,11 @@ class LedStore(private val session: RouterSession) {
     /** Every configured LED back to its board default; the watch's LEDs are left to the watch. */
     suspend fun resetAll(): Boolean {
         val watched = watchedLeds
-        val ops = mutableListOf<String>()
-        val direct = mutableListOf<String>()
-        for (led in leds) {
-            if (led.sysfs in watched) continue
-            val write = LedOps.modeOps(led, LedMode.BoardDefault, sectionOf(led.sysfs), uci, dtOf(led.sysfs))
-            ops += write.uci; direct += write.direct
-        }
+        val reset = leds.filter { it.sysfs !in watched }
+        // [LedOps.modeOps]'s board default for every LED at once — sections deleted, device-tree
+        // state written back — so the deletes can go in the order uci needs.
+        val ops = sectionDeletes(reset.map { it.sysfs })
+        val direct = reset.flatMap { LedOps.dtRestore(it, dtOf(it.sysfs)) }
         if (ops.isEmpty() && direct.isEmpty()) { notice = "Every LED is already at its board default."; return true }
         return run(Commands.ledApply(ops, direct), "LEDs back to their board defaults.")
     }
@@ -143,10 +141,9 @@ class LedStore(private val session: RouterSession) {
     suspend fun installWatch(cfg: LedwatchConfig): Boolean {
         if (cfg.leds.isEmpty()) return fail("The lens has no LEDs in it.")
         if (!cfg.leds.all { Commands.safeLedName(it) }) return fail("Unsupported LED name.")
-        val deletes = sections.filter { it.sysfs in cfg.leds }.map { "delete system.${it.section}" }
         val existed = watch?.installed == true
         return run(
-            Commands.ledwatchInstall(LedOps.watchScript(cfg), LedOps.WATCH_INIT, deletes),
+            Commands.ledwatchInstall(LedOps.watchScript(cfg), LedOps.WATCH_INIT, sectionDeletes(cfg.leds)),
             if (existed) "Connectivity watch updated." else "Connectivity watch installed and running.",
             timeoutMs = 90_000,
         )
@@ -163,6 +160,14 @@ class LedStore(private val session: RouterSession) {
         val cmd = verbs.joinToString("; ") { "${Commands.LEDWATCH_INIT} ${it.verb} >/dev/null 2>&1" } + "; sleep 1; echo done"
         return run(cmd, if (on) "Connectivity watch running." else "Connectivity watch stopped.")
     }
+
+    /**
+     * Deletes of every section that configures one of [sysfs], in the order uci needs them: an
+     * LED section made in LuCI is `@led[i]`, and each delete renumbers the ones after it, so
+     * anonymous ones go highest index first, named ones after ([Commands.uciDeleteOrder]).
+     */
+    private fun sectionDeletes(sysfs: Collection<String>): List<String> =
+        Commands.uciDeleteOrder(sections.filter { it.sysfs in sysfs }.map { it.section }).map { "delete system.$it" }
 
     private fun fail(message: String): Boolean {
         error = message
