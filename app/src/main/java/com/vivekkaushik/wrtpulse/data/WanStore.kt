@@ -1043,7 +1043,7 @@ class WanStore(private val session: RouterSession) : Refreshable {
     /**
      * `ifdown` — the uplink goes away and stays away until [restart]. The app's own session
      * rides the LAN, so it survives; everyone's internet through this uplink does not, and
-     * the hub's Stop says so before the second tap.
+     * the card's note says so before the tap.
      */
     suspend fun stop(section: String) = cycle(section, Commands.ifdown(section), "$section stopped — Start brings it back.")
 
