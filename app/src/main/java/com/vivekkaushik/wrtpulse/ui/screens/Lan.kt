@@ -114,7 +114,7 @@ fun LanScreen(
         }
         val moved = store.movedTo
         if (moved != null) {
-            MovedPanel(moved) { onMoved(moved) }
+            MovedPanel(moved, store.followedNodes.toList()) { onMoved(moved) }
             return@Column
         }
 
@@ -158,9 +158,9 @@ fun LanScreen(
     SheetHost(visible = reviewOpen, onDismiss = { reviewOpen = false }) {
         LanReviewSheet(
             store = store,
-            onApply = {
+            onApply = { leaveBehind ->
                 scope.launch {
-                    if (store!!.apply()) reviewOpen = false
+                    if (store!!.apply(leaveBehind)) reviewOpen = false
                 }
             },
             onRevertAll = { store?.revert(); reviewOpen = false },
@@ -1493,7 +1493,7 @@ private fun CreateVlanSheet(store: LanStore, onCancel: () -> Unit, onCreate: (In
 // ---------------------------------------------------------------------------
 
 @Composable
-private fun LanReviewSheet(store: LanStore?, onApply: () -> Unit, onRevertAll: () -> Unit) {
+private fun LanReviewSheet(store: LanStore?, onApply: (leaveBehind: Boolean) -> Unit, onRevertAll: () -> Unit) {
     if (store == null) return
     val problems = store.problems()
     Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 22.dp)) {
@@ -1558,7 +1558,17 @@ private fun LanReviewSheet(store: LanStore?, onApply: () -> Unit, onRevertAll: (
             else -> "Apply ${store.pendingCount} changes"
         }
         if (problems.isEmpty()) {
-            PrimaryButton(label, onClick = onApply)
+            PrimaryButton(label, onClick = { onApply(false) })
+            // A node that could not be told stops the move; this is the deliberate way past it.
+            if (store.unreachableNodes.isNotEmpty() && !store.applying) {
+                val n = store.unreachableNodes.size
+                Box(
+                    Modifier.fillMaxWidth().padding(top = 6.dp).height(42.dp).clickable { onApply(true) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("Move anyway, leaving ${if (n == 1) "that node" else "$n nodes"} behind", style = sans(13f, 600, Wrt.Red))
+                }
+            }
         } else {
             Box(
                 Modifier
@@ -1592,7 +1602,7 @@ private fun LanReviewSheet(store: LanStore?, onApply: () -> Unit, onRevertAll: (
  * stale numbers.
  */
 @Composable
-private fun MovedPanel(address: String, onDone: () -> Unit) {
+private fun MovedPanel(address: String, nodes: List<Pair<String, String>>, onDone: () -> Unit) {
     Column(
         Modifier.fillMaxSize().padding(horizontal = 18.dp),
         verticalArrangement = Arrangement.Center,
@@ -1613,6 +1623,14 @@ private fun MovedPanel(address: String, onDone: () -> Unit) {
             style = sans(12.5f, 400, Wrt.TextDim, lineHeight = 19.sp),
             modifier = Modifier.padding(top = 8.dp),
         )
+        if (nodes.isNotEmpty()) {
+            Text(
+                "Its mesh nodes follow it: " + nodes.joinToString(", ") { (name, ip) -> "$name to $ip" } +
+                    ". Their saved entries already point there.",
+                style = sans(12.5f, 400, Wrt.TextSecondary, lineHeight = 19.sp),
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
         Spacer(Modifier.height(18.dp))
         PrimaryButton("Back to routers", onClick = onDone)
     }

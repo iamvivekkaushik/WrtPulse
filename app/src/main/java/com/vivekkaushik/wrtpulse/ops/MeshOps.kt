@@ -680,10 +680,14 @@ object MeshOps {
      */
     fun freeNodeAddress(profile: MeshProfile, alsoTaken: Set<String> = emptySet()): String? {
         val router = IpMath.parse(profile.primaryIp) ?: return null
-        val network = IpMath.networkOf(router, profile.prefix)
-        val broadcast = IpMath.broadcastOf(network, profile.prefix)
         val taken = (profile.taken + alsoTaken).mapNotNull { IpMath.parse(it) }.toSet()
-        val pool = IpMath.poolRange(network, profile.prefix, profile.poolStart, profile.poolLimit)
+        return freeAddress(router, profile.prefix, profile.poolStart, profile.poolLimit, taken)
+    }
+
+    private fun freeAddress(router: Long, prefix: Int, poolStart: Int, poolLimit: Int, taken: Set<Long>): String? {
+        val network = IpMath.networkOf(router, prefix)
+        val broadcast = IpMath.broadcastOf(network, prefix)
+        val pool = IpMath.poolRange(network, prefix, poolStart, poolLimit)
         fun free(c: Long) = c != router && c !in taken && c > network && c < broadcast
         if (pool != null) {
             for (c in (network + 2)..(pool.first - 1)) if (free(c)) return IpMath.format(c)
@@ -692,6 +696,71 @@ object MeshOps {
         for (c in (network + 2)..(broadcast - 1)) if (free(c)) return IpMath.format(c)
         return null
     }
+
+    // -----------------------------------------------------------------------
+    // The primary's LAN moves: every node has to move with it
+    // -----------------------------------------------------------------------
+
+    /**
+     * Where a node lands when its primary's LAN moves to [router]/[prefix]. A node holds a
+     * static address in the primary's subnet with the primary as gateway, so a move that
+     * leaves it behind leaves it on a subnet nothing answers on any more: unreachable, and
+     * with no way out. It stays where it is when that is still inside the new subnet, else it
+     * keeps its host part — `.2` stays `.2` — when that is free there and outside the new
+     * pool; else it takes the lowest free address, the way the join picked one. [from] is the node's address now, in a /[fromPrefix]. Null when the new
+     * subnet has no room.
+     */
+    fun followAddress(
+        from: String,
+        fromPrefix: Int,
+        router: String,
+        prefix: Int,
+        poolStart: Int,
+        poolLimit: Int,
+        taken: Set<String>,
+    ): String? {
+        val r = IpMath.parse(router) ?: return null
+        val network = IpMath.networkOf(r, prefix)
+        val broadcast = IpMath.broadcastOf(network, prefix)
+        val takenAt = taken.mapNotNull { IpMath.parse(it) }.toSet()
+        val pool = IpMath.poolRange(network, prefix, poolStart, poolLimit)
+        fun usable(c: Long) = c > network && c < broadcast && c != r && c !in takenAt && pool?.contains(c) != true
+        IpMath.parse(from)?.let { old ->
+            // Still inside — a wider prefix, or a new router address in the same subnet: stay put.
+            if (IpMath.networkOf(old, prefix) == network && usable(old)) return from
+            val kept = network + (old - IpMath.networkOf(old, fromPrefix))
+            if (usable(kept)) return IpMath.format(kept)
+        }
+        return freeAddress(r, prefix, poolStart, poolLimit, takenAt)
+    }
+
+    /**
+     * The node's side of the move, in its own spelling of the address (see [lanAddressOps]):
+     * the new address, the primary's new address as gateway, and as resolver wherever the
+     * old one was. Only the `network` file changes; the wireless and the mesh point do not
+     * care what subnet rides them.
+     */
+    fun followOps(lan: LanNet?, address: String, prefix: Int, gateway: String, oldGateway: String): List<String> {
+        val ops = lanAddressOps(lan, address, prefix).toMutableList()
+        ops += "set network.lan.gateway='$gateway'"
+        val dns = lan?.dns.orEmpty()
+        if (oldGateway.isNotEmpty() && oldGateway in dns) {
+            ops += Commands.listOps("network.lan.dns", dns.map { if (it == oldGateway) gateway else it }.distinct())
+        }
+        return ops
+    }
+
+    /**
+     * The LAN address in whichever form the router keeps it: `ipaddr '192.168.1.2/24'` on a
+     * config with no netmask (netifd takes CIDR there), else the address and the netmask.
+     */
+    private fun lanAddressOps(lan: LanNet?, address: String, prefix: Int): List<String> =
+        if (lan?.cidrPrefix != null || (lan != null && lan.netmask.isEmpty())) {
+            listOf("set network.lan.ipaddr='$address/$prefix'") +
+                listOfNotNull("delete network.lan.netmask".takeIf { lan?.netmask?.isNotEmpty() == true })
+        } else {
+            listOf("set network.lan.ipaddr='$address'", "set network.lan.netmask='${IpMath.netmaskOf(prefix)}'")
+        }
 
     fun randomKey(length: Int = 24): String {
         val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
@@ -714,13 +783,7 @@ object MeshOps {
 
         // ---- the LAN: static, in the primary's subnet, the primary as gateway and resolver ----
         ops += "set network.lan.proto='static'"
-        if (lan?.cidrPrefix != null || (lan != null && lan.netmask.isEmpty())) {
-            ops += "set network.lan.ipaddr='$address/${profile.prefix}'"
-            if (lan?.netmask?.isNotEmpty() == true) ops += "delete network.lan.netmask"
-        } else {
-            ops += "set network.lan.ipaddr='$address'"
-            ops += "set network.lan.netmask='${IpMath.netmaskOf(profile.prefix)}'"
-        }
+        ops += lanAddressOps(lan, address, profile.prefix)
         ops += "set network.lan.gateway='${profile.primaryIp}'"
         ops += Commands.listOps("network.lan.dns", listOf(profile.primaryIp))
         if (net.containsKey("network.lan.ip6assign")) ops += "delete network.lan.ip6assign"

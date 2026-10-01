@@ -1618,6 +1618,74 @@ object Commands {
         "cat $MESH_DIR/last 2>/dev/null; [ -f $MESH_DIR/confirm ] && echo confirmed || echo pending"
 
     /**
+     * Arms a node to follow its primary into a new subnet. [operations] ([MeshOps.followOps])
+     * are only stored; a detached watcher applies them when the primary goes — when [gone],
+     * the gateway the node points at now, stops answering three pings in a row — or, with no
+     * [gone] (the primary's address is not changing), when [FOLLOW_GO] says the primary has
+     * applied. Either way the node has to see [arrive], the primary's new address, within
+     * about three minutes of switching or it puts its old `network` back: a node that guessed
+     * wrong is then where it was, not somewhere nobody is.
+     *
+     * It is armed before the primary moves, because afterwards the app can no longer reach
+     * it: the node sits on the old subnet, the phone ends up on the new one. Nothing is
+     * committed until the trigger, so a primary that never moves — a failed batch, a phone
+     * that died — leaves the node untouched; the watcher gives up after about five minutes.
+     * [id] tells this arming from an older one: re-arming or [FOLLOW_CANCEL] makes a watcher
+     * that is still waiting stand down. One that has already switched sees its check through.
+     */
+    fun nodeFollow(operations: List<String>, gone: String?, arrive: String, id: String): String {
+        require(IpMath.valid(arrive) && (gone == null || IpMath.valid(gone))) { "address" }
+        require(id.all { it.isLetterOrDigit() }) { "id" }
+        val d = MESH_DIR
+        val script = """
+            D=$d; ID=$id; GONE=${gone.orEmpty()}; NEW=$arrive
+            mine() { [ "${'$'}(cat ${'$'}D/follow.id 2>/dev/null)" = "${'$'}ID" ]; }
+            miss=0; n=0
+            while :; do
+              mine || exit 0
+              [ -f ${'$'}D/follow.go ] && break
+              if [ -n "${'$'}GONE" ]; then
+                if ping -c1 -W1 "${'$'}GONE" >/dev/null 2>&1; then miss=0; else miss=${'$'}((miss+1)); fi
+                [ ${'$'}miss -ge 3 ] && break
+              fi
+              n=${'$'}((n+1)); [ ${'$'}n -ge 300 ] && { rm -f ${'$'}D/follow.id; echo expired > ${'$'}D/follow; exit 0; }
+              sleep 1
+            done
+            cp /etc/config/network ${'$'}D/follow.network || exit 1
+            logger -t wrtpulse "primary moved; following it to ${'$'}NEW"
+            uci batch < ${'$'}D/follow.batch && uci commit network && /etc/init.d/network reload
+            n=0
+            while [ ${'$'}n -lt 90 ]; do
+              if ping -c1 -W1 "${'$'}NEW" >/dev/null 2>&1 || ip neigh show "${'$'}NEW" 2>/dev/null | grep -q REACHABLE; then
+                echo moved > ${'$'}D/follow; rm -f ${'$'}D/follow.id ${'$'}D/follow.go; exit 0
+              fi
+              n=${'$'}((n+1)); sleep 1
+            done
+            logger -t wrtpulse "${'$'}NEW never answered; putting the old LAN back"
+            cp ${'$'}D/follow.network /etc/config/network; /etc/init.d/network reload
+            echo restored > ${'$'}D/follow; rm -f ${'$'}D/follow.id ${'$'}D/follow.go
+        """.trimIndent()
+        return buildString {
+            // Unlinked, not overwritten: a watcher from an earlier arming may still be reading
+            // its script, and a shell reads a script as it goes.
+            append("mkdir -p $d && rm -f $d/follow $d/follow.go $d/follow.batch $d/follow.sh && cat > $d/follow.batch <<'WRTPULSE_EOF'\n")
+            operations.forEach { append(it).append('\n') }
+            append("WRTPULSE_EOF\n")
+            append("cat > $d/follow.sh <<'$FILE_EOF'\n").append(script).append("\n$FILE_EOF\n")
+            // Detached from this session: the phone that armed it is about to lose the link.
+            append("echo $id > $d/follow.id && ")
+            append("{ if command -v setsid >/dev/null 2>&1; then setsid sh $d/follow.sh; else sh $d/follow.sh; fi; } ")
+            append("</dev/null >/dev/null 2>&1 & echo armed")
+        }
+    }
+
+    /** Tells an armed node the primary has applied — the trigger when its address is not changing. */
+    const val FOLLOW_GO = "[ -f $MESH_DIR/follow.id ] && touch $MESH_DIR/follow.go && echo go"
+
+    /** Stands an armed node down: its watcher exits at its next look, having changed nothing. */
+    const val FOLLOW_CANCEL = "rm -f $MESH_DIR/follow.id $MESH_DIR/follow.go $MESH_DIR/follow.batch; echo cancelled"
+
+    /**
      * What a node stops doing: the primary serves addresses, names and the firewall for the
      * whole LAN, and a second dnsmasq on the same wire hands out a second set of answers.
      */

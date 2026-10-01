@@ -351,6 +351,16 @@ private fun WrtPulseApp() {
         }
     }
 
+    // A subnet move on a primary has to take its nodes along: they hold static addresses in
+    // its subnet and point at it as their gateway, so a node left behind is cut off.
+    LaunchedEffect(lanStore, savedRouters) {
+        val lan = lanStore ?: return@LaunchedEffect
+        val me = savedRouters?.firstOrNull { it.identity == WrtRuntime.session?.target?.identity }
+        lan.nodes = if (me == null) emptyList() else savedRouters.orEmpty().filter { it.meshPrimary == me.identity }
+        lan.openNode = { node -> sideSession(node) }
+        lan.nodeMoved = { node, host -> runCatching { WrtRuntime.db.routers().rehost(node.id, host, node.port) } }
+    }
+
     val backdrop = when {
         dest == Dest.HostKey -> Wrt.DangerBg
         dest == Dest.Main && tab == MainTab.Terminal -> Wrt.TermBarBg

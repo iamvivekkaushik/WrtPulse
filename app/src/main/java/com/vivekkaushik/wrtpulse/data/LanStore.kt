@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.vivekkaushik.wrtpulse.db.RouterEntity
 import com.vivekkaushik.wrtpulse.net.RouterSession
 import com.vivekkaushik.wrtpulse.net.SshException
 import com.vivekkaushik.wrtpulse.ops.BridgeVlan
@@ -15,6 +16,7 @@ import com.vivekkaushik.wrtpulse.ops.IpMath
 import com.vivekkaushik.wrtpulse.ops.LanLive
 import com.vivekkaushik.wrtpulse.ops.LanNet
 import com.vivekkaushik.wrtpulse.ops.Lease
+import com.vivekkaushik.wrtpulse.ops.MeshOps
 import com.vivekkaushik.wrtpulse.ops.Neigh
 import com.vivekkaushik.wrtpulse.ops.NetDev
 import com.vivekkaushik.wrtpulse.ops.Parsers
@@ -213,6 +215,7 @@ class LanStore(private val session: RouterSession) : Refreshable {
         resvDrafts.clear()
         vlanDrafts.clear()
         swVlanDrafts.clear()
+        unreachableNodes.clear()
         error = null
     }
 
@@ -253,6 +256,51 @@ class LanStore(private val session: RouterSession) : Refreshable {
     /** True once the staged address differs from the one this session is talking to. */
     val movesAddress: Boolean
         get() = net?.ipaddr?.let { it.isNotEmpty() && routerIp != it } == true
+
+    private val savedPrefix: Int get() = IpMath.prefixOf(savedNetmask) ?: 24
+
+    /** True when the subnet itself changes — the router's address or the prefix. Every mesh node has to follow either. */
+    val movesSubnet: Boolean get() = movesAddress || (net != null && prefix != savedPrefix)
+
+    // ---- the mesh nodes, which live in this subnet too ----
+
+    /** This router's mesh nodes as the app has them saved. Set by the app, like [MeshStore.nodeEntities]. */
+    var nodes by mutableStateOf<List<RouterEntity>>(emptyList())
+
+    /** A short session to one node on its own saved credentials; null when the row has none. Set by the app. */
+    var openNode: (suspend (RouterEntity) -> RouterSession?)? = null
+
+    /** Told where each node went once this router has moved — the saved row has to follow it. Set by the app. */
+    var nodeMoved: (suspend (RouterEntity, String) -> Unit)? = null
+
+    /** Nodes the last apply could not take along, with why. The subnet stayed put; [apply] with `leaveBehind` moves it anyway. */
+    val unreachableNodes = mutableStateListOf<String>()
+
+    /** name → the address each node took, for the moved panel. */
+    val followedNodes = mutableStateListOf<Pair<String, String>>()
+
+    private val oldNetwork: Long? get() = IpMath.parse(net?.ipaddr.orEmpty())?.let { IpMath.networkOf(it, savedPrefix) }
+
+    private fun onThisLan(node: RouterEntity): Boolean =
+        IpMath.parse(node.host)?.let { h -> oldNetwork?.let { IpMath.networkOf(h, savedPrefix) == it } } == true
+
+    /**
+     * Each node on this LAN and the address it takes in the new subnet — null when the new
+     * subnet has no room for it. Empty unless the subnet moves. A node whose saved address is
+     * not on this LAN at all is left out: it was cut off before, and is in [strandedNodes].
+     */
+    fun nodeMoves(): List<Pair<RouterEntity, String?>> {
+        if (!movesSubnet || IpMath.parse(routerIp) == null) return emptyList()
+        val taken = reservationRows().filterNot { it.deleting }.map { it.ip }.toMutableSet()
+        return nodes.filter(::onThisLan).map { node ->
+            val to = MeshOps.followAddress(node.host, savedPrefix, routerIp, prefix, poolStart, poolLimit, taken)
+            to?.let { taken += it }
+            node to to
+        }
+    }
+
+    /** Nodes saved at an address outside this LAN — already cut off, so nothing can tell them. */
+    fun strandedNodes(): List<RouterEntity> = if (!movesSubnet) emptyList() else nodes.filterNot(::onThisLan)
 
     // ---- the DHCP server ----
 
@@ -964,6 +1012,17 @@ class LanStore(private val session: RouterSession) : Refreshable {
         if (parsed == IpMath.broadcastOf(parsed, bits)) {
             add("$ip is the subnet's broadcast address; a host cannot hold it.")
         }
+        // A LAN with a gateway is a mesh node's, or an access point's behind another router:
+        // the gateway is its only way out, and this app's way in. Its subnet is that router's.
+        val gateway = net?.gateway.orEmpty()
+        val gw = IpMath.parse(gateway)
+        if (movesSubnet && gw != null && IpMath.networkOf(gw, bits) != network) {
+            add(
+                "This router's LAN goes out through $gateway — it is a mesh node, or an access point behind " +
+                    "that router. $ip/$bits leaves $gateway outside the subnet, and this router cut off from it " +
+                    "and from this app. Change the subnet on $gateway instead: its nodes follow it."
+            )
+        }
         dns.filterNot { IpMath.valid(it) }.forEach { add("DNS $it is not an IPv4 address.") }
     }
 
@@ -1158,6 +1217,23 @@ class LanStore(private val session: RouterSession) : Refreshable {
                     "mean a different router is answering, not a stale pin."
             )
         }
+        val moves = nodeMoves()
+        if (moves.isNotEmpty()) {
+            val plan = moves.joinToString(", ") { (node, to) -> "${node.name} ${node.host} → ${to ?: "no free address"}" }
+            add(
+                "${moves.size} mesh node${if (moves.size == 1) "" else "s"} move${if (moves.size == 1) "s" else ""} " +
+                    "with it: $plan. Each is told before this router moves and switches " +
+                    (if (movesAddress) "the moment ${net?.ipaddr} goes quiet" else "once this router has applied") +
+                    "; one that cannot see $routerIp within three minutes of switching puts its old address back."
+            )
+        }
+        strandedNodes().takeIf { it.isNotEmpty() }?.let { lost ->
+            add(
+                "${lost.joinToString(", ") { "${it.name} (${it.host})" }} " +
+                    "${if (lost.size == 1) "is" else "are"} saved at an address outside this LAN, so " +
+                    "${if (lost.size == 1) "it cannot" else "they cannot"} be told about the move."
+            )
+        }
         if (!dhcpOn && pool?.ignore == false) {
             add(
                 "With the DHCP server off, clients keep the addresses they hold until the lease " +
@@ -1268,7 +1344,11 @@ class LanStore(private val session: RouterSession) : Refreshable {
     // Applying
     // -----------------------------------------------------------------------
 
-    suspend fun apply(): Boolean {
+    /**
+     * [leaveBehind] moves the subnet even though some of [unreachableNodes] could not be told;
+     * without it, one node the app cannot reach keeps the subnet where it is.
+     */
+    suspend fun apply(leaveBehind: Boolean = false): Boolean {
         if (pendingCount == 0 || applying) return true
         problems().firstOrNull()?.let { error = it; return false }
         applying = true
@@ -1292,8 +1372,13 @@ class LanStore(private val session: RouterSession) : Refreshable {
                 movesAddress = moves,
             ),
         )
+        // The nodes first: once this router has moved they sit on a subnet nothing can reach.
+        val following = if (movesSubnet && nodes.isNotEmpty()) {
+            armNodes(leaveBehind) ?: run { applying = false; return false }
+        } else emptyList()
         return try {
             session.exec(script, timeoutMs = 60_000).requireOk("uci batch")
+            settleNodes(following)
             if (moves) {
                 // The reload is detached, so a 0 here only means the batch committed. The
                 // link goes down a second later either way.
@@ -1307,14 +1392,91 @@ class LanStore(private val session: RouterSession) : Refreshable {
             // Moving the router's own address takes the connection with it. The command
             // reached the router; only the reply could not come back.
             if (moves && (e is SshException.Disconnected || e is SshException.Timeout)) {
+                settleNodes(following)
                 movedTo = target
                 true
             } else {
+                cancelNodes(following)
                 error = e.message
                 false
             }
         } finally {
             applying = false
+        }
+    }
+
+    /** A node told to follow, where to, and whether it waits for [Commands.FOLLOW_GO] rather than for the old address to go. */
+    private data class Following(val node: RouterEntity, val address: String, val needsGo: Boolean)
+
+    /**
+     * Tells every node on this LAN where it is going ([Commands.nodeFollow]). Null when one
+     * could not be told and [leaveBehind] is off — the others are stood down again, and
+     * [unreachableNodes] says who and why.
+     */
+    private suspend fun armNodes(leaveBehind: Boolean): List<Following>? {
+        unreachableNodes.clear()
+        followedNodes.clear()
+        val oldIp = net?.ipaddr.orEmpty()
+        val id = java.lang.Long.toHexString(System.nanoTime())
+        val armed = mutableListOf<Following>()
+        for ((node, address) in nodeMoves()) {
+            if (address == null) {
+                unreachableNodes += "${node.name}: no free address in the new subnet"
+                continue
+            }
+            val s = openNode?.invoke(node)
+            if (s == null) {
+                unreachableNodes += "${node.name}: no saved key or password"
+                continue
+            }
+            try {
+                val lan = Parsers.lanNet(Parsers.uciShow(s.exec(Commands.NETWORK_CONFIG, timeoutMs = 10_000).requireOk("read node").stdout))
+                // What the node points at now — this router, unless someone pointed it elsewhere.
+                val gateway = lan?.gateway?.takeIf { IpMath.valid(it) } ?: oldIp
+                val gone = gateway.takeIf { it != routerIp && IpMath.valid(it) }
+                val ops = MeshOps.followOps(lan, address, prefix, routerIp, gateway)
+                val out = s.exec(Commands.nodeFollow(ops, gone, routerIp, id), timeoutMs = 15_000).requireOk("arm node").stdout
+                if (out.contains("armed")) armed += Following(node, address, needsGo = gone == null)
+                else unreachableNodes += "${node.name}: did not take the change"
+            } catch (e: SshException) {
+                unreachableNodes += "${node.name}: ${e.message ?: "did not answer"}"
+            } finally {
+                runCatching { s.disconnect() }
+            }
+        }
+        if (unreachableNodes.isEmpty() || leaveBehind) return armed
+        cancelNodes(armed)
+        error = "Nothing was moved. ${unreachableNodes.joinToString("; ")}. A node left behind stays on the old " +
+            "subnet, where nothing answers — no internet, and no way for this app to reach it."
+        return null
+    }
+
+    /** After this router applied: the nodes waiting for word get it, and every saved row follows its node. */
+    private suspend fun settleNodes(following: List<Following>) {
+        following.forEach { f ->
+            if (f.needsGo) {
+                val s = openNode?.invoke(f.node) ?: return@forEach
+                val went = try {
+                    s.exec(Commands.FOLLOW_GO, timeoutMs = 10_000).stdout.contains("go")
+                } catch (e: SshException) {
+                    false
+                } finally {
+                    runCatching { s.disconnect() }
+                }
+                // Not told: its watcher gives up and it stays where its row says it is.
+                if (!went) return@forEach
+            }
+            followedNodes += f.node.name to f.address
+            if (f.address != f.node.host) runCatching { nodeMoved?.invoke(f.node, f.address) }
+        }
+    }
+
+    /** This router did not move after all: the nodes stand down before they go anywhere. */
+    private suspend fun cancelNodes(following: List<Following>) {
+        following.forEach { f ->
+            val s = openNode?.invoke(f.node) ?: return@forEach
+            runCatching { s.exec(Commands.FOLLOW_CANCEL, timeoutMs = 10_000) }
+            runCatching { s.disconnect() }
         }
     }
 
