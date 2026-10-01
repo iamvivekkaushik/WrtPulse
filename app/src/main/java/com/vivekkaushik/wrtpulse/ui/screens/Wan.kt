@@ -1,7 +1,6 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
 import androidx.compose.foundation.background
-import com.vivekkaushik.wrtpulse.ui.HoldButton
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -36,6 +35,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -566,16 +566,15 @@ private fun TestCard(store: WanStore, row: WanRow, onTest: () -> Unit) {
 
 /**
  * Stop and restart, the way LuCI's interface page offers them — `ifdown` and `ifup` on this
- * one uplink. Stop takes a second tap, because on the primary uplink it is everyone's
- * internet; the app itself rides the LAN and is not at risk, which the note says outright.
+ * one uplink. Both are one tap: Stop is undone by Start, so it takes no hold. What Stop costs
+ * on the primary uplink — everyone's internet — is in the note before the tap, along with
+ * the fact that the app itself rides the LAN and is not at risk.
  */
 @Composable
 private fun CycleCard(store: WanStore, row: WanRow) {
     val scope = rememberCoroutineScope()
     val busy = store.cycling != null
     val mine = store.cycling == row.section
-    /** True while Stop is being held: the note below turns into the warning for that. */
-    var holding by remember(row.section) { mutableStateOf(false) }
     Column(
         Modifier
             .fillMaxWidth()
@@ -596,42 +595,63 @@ private fun CycleCard(store: WanStore, row: WanRow) {
                     modifier = Modifier.padding(top = 3.dp),
                 )
             }
-            Box(
-                Modifier
-                    .background(if (busy) Wrt.BgDeep else Wrt.Accent, RoundedCornerShape(9.dp))
-                    .clickable(enabled = !busy) { scope.launch { store.restart(row.section) } }
-                    .padding(horizontal = 12.dp, vertical = 7.dp)
-            ) {
-                Text(
-                    when {
-                        mine -> "Working…"
-                        row.up -> "Restart"
-                        else -> "Start"
-                    },
-                    style = sans(11.5f, 650, if (busy) Wrt.TextDim else Wrt.OnAccent),
-                )
-            }
+            CyclePill(
+                when {
+                    mine -> "Working…"
+                    row.up -> "Restart"
+                    else -> "Start"
+                },
+                enabled = !busy,
+            ) { scope.launch { store.restart(row.section) } }
             if (row.up) {
-                HoldButton(
-                    "Stop", "Hold to stop", danger = true, enabled = !busy, height = 32.dp,
-                    onHoldingChange = { holding = it },
-                ) { scope.launch { store.stop(row.section) } }
+                CyclePill("Stop", enabled = !busy, danger = true) { scope.launch { store.stop(row.section) } }
             }
         }
         Text(
             when {
-                holding && row.primary ->
-                    "This is the uplink carrying the default route: stopping it takes the " +
-                        "internet away from every device until you start it again. The app keeps " +
-                        "working — it reaches the router over the LAN."
-                holding -> "Stopped means down until Start: no address, no route, and netifd does not retry."
+                row.up && row.primary -> "Restart is ifup: the address is renewed, a PPPoE session redialled, a " +
+                    "Wi-Fi client re-associated. Stop is ifdown on the uplink carrying the default route: no " +
+                    "device has internet until Start. The app keeps working over the LAN."
                 row.up -> "Restart is ifup: the address is renewed, a PPPoE session redialled, a Wi-Fi " +
-                    "client re-associated. Clients see a short gap."
+                    "client re-associated. Stop keeps it down until Start; netifd does not retry."
                 else -> "The interface is down. Start runs ifup; a wired line answers in seconds, " +
                     "PPPoE and Wi-Fi clients can take longer."
             },
-            style = sans(10.5f, 400, if (holding) Wrt.AmberText else Wrt.TextDim, lineHeight = 16.sp),
+            style = sans(10.5f, 400, Wrt.TextDim, lineHeight = 16.sp),
             modifier = Modifier.padding(top = 9.dp),
+        )
+    }
+}
+
+/**
+ * Restart and Stop in one shape — same padding, radius and type, and no caption under
+ * either — so side by side they are the same height and centre on the same line: Restart
+ * filled, Stop outlined in red.
+ */
+@Composable
+private fun CyclePill(text: String, enabled: Boolean, danger: Boolean = false, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(9.dp)
+    val look = when {
+        danger -> Modifier.border(1.dp, if (enabled) Wrt.Red.copy(alpha = 0.5f) else Wrt.BorderCard, shape)
+        else -> Modifier.background(if (enabled) Wrt.Accent else Wrt.BgDeep, shape)
+    }
+    Box(
+        Modifier
+            .clip(shape)
+            .then(look)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 7.dp)
+    ) {
+        Text(
+            text,
+            style = sans(
+                11.5f, 650,
+                when {
+                    !enabled -> Wrt.TextDim
+                    danger -> Wrt.Red
+                    else -> Wrt.OnAccent
+                },
+            ),
         )
     }
 }
