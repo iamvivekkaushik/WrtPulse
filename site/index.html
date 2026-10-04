@@ -46,8 +46,12 @@
   .cta { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
   .btn { display: inline-flex; align-items: center; gap: 9px; padding: 13px 20px; border-radius: 12px; font-weight: 650; font-size: 14.5px; border: 1px solid var(--border); background: var(--card); color: var(--text); transition: transform .12s ease, border-color .12s ease; }
   .btn:hover { transform: translateY(-1px); border-color: #2A3B35; color: var(--text); }
-  .btn.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
-  .btn.primary:hover { color: var(--on-accent); }
+  /* Google's own badge art, unmodified. The PNG carries the required clear space (¼ of the badge's
+     height) as transparent padding — 41px around a 168px badge in a 250px image — so at 74px the
+     visible badge is ~50px, level with .btn, and the left margin pulls it flush with the text above */
+  .play-badge { display: inline-block; line-height: 0; margin-left: -12px; transition: transform .12s ease; }
+  .play-badge:hover { transform: translateY(-1px); }
+  .play-badge img { height: 74px; width: auto; display: block; }
   .hero-shot { position: relative; justify-self: end; }
   .hero-shot img { width: 100%; max-width: 380px; border-radius: 22px; border: 1px solid var(--border); box-shadow: 0 30px 80px rgba(0,0,0,.55); display: block; }
   .cmd { font-family: var(--mono); font-size: 12.5px; color: var(--dim); margin-top: 22px; }
@@ -83,6 +87,7 @@
   footer { border-top: 1px solid var(--hair); padding: 28px 0 44px; color: var(--dim); font-size: 13px; display: flex; gap: 20px; flex-wrap: wrap; align-items: center; }
   footer a { color: var(--text-2); } footer a:hover { color: var(--text); }
   footer .sp { flex: 1; }
+  footer .legal { flex-basis: 100%; font-size: 12px; }
 
   @media (max-width: 820px) {
     .hero { grid-template-columns: 1fr; padding-top: 30px; }
@@ -116,7 +121,7 @@
       <h1>Your OpenWrt router,<br><span class="thin">over SSH.</span></h1>
       <p class="lede">No agent on the router. No cloud in the middle. Nothing scraped out of LuCI. WrtPulse opens an SSH session and runs the same commands you would type yourself — then shows you the answer.</p>
       <div class="cta">
-        <a class="btn primary" href="https://play.google.com/store/apps/details?id=com.vivekkaushik.wrtpulse">Get it on Google Play</a>
+        <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.vivekkaushik.wrtpulse"><img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" width="646" height="250" alt="Get it on Google Play"></a>
         <a class="btn" href="https://github.com/iamvivekkaushik/WrtPulse/releases/latest">Download APK</a>
       </div>
       <div class="cmd"><b>$</b> ubus · uci · iwinfo · logread · apk · sysupgrade</div>
@@ -185,6 +190,7 @@
     <a href="https://github.com/iamvivekkaushik/WrtPulse/issues">Issues</a>
     <span class="sp"></span>
     <span>Not affiliated with the OpenWrt project.</span>
+    <span class="legal">Google Play and the Google Play logo are trademarks of Google LLC.</span>
   </footer>
 </div>
 </body>
