@@ -7,6 +7,7 @@ import com.vivekkaushik.wrtpulse.net.RouterSession
 import com.vivekkaushik.wrtpulse.net.SshException
 import com.vivekkaushik.wrtpulse.ops.Commands
 import com.vivekkaushik.wrtpulse.ops.IpMath
+import com.vivekkaushik.wrtpulse.ops.MeshOps
 import com.vivekkaushik.wrtpulse.ops.Parsers
 import com.vivekkaushik.wrtpulse.ops.WifiRadio
 
@@ -129,6 +130,12 @@ class GuestStore(private val session: RouterSession, val kind: NetworkKind = Net
     /** Router addresses already in use, so a new guest subnet does not collide. */
     private var takenAddresses by mutableStateOf<List<String>>(emptyList())
 
+    /** The `network` config as last read — what removal needs to find the trunks built on this network. */
+    private var networkUci: Map<String, String> = emptyMap()
+
+    /** The firewall as last read — what removal needs to find the sections that name the zone. */
+    private var firewallCfg = Parsers.FirewallConfig()
+
     var loaded by mutableStateOf(false); private set
     var loading by mutableStateOf(false); private set
     var applying by mutableStateOf(false); private set
@@ -151,13 +158,15 @@ class GuestStore(private val session: RouterSession, val kind: NetworkKind = Net
             val wireless = Parsers.uciShow(parts["wireless"].orEmpty())
             val network = Parsers.uciShow(parts["network"].orEmpty())
             val firewall = Parsers.uciShow(parts["firewall"].orEmpty())
+            networkUci = network
             val (r, nets) = Parsers.wireless(wireless)
             radios = r
             takenAddresses = network.entries
                 .filter { it.key.endsWith(".ipaddr") }
                 .map { it.value.substringBefore('/') }
                 .filter { it.isNotBlank() }
-            existing = detect(nets, Parsers.firewallConfig(firewall), kind)
+            firewallCfg = Parsers.firewallConfig(firewall)
+            existing = detect(nets, firewallCfg, kind)
             mirrored = mirrored(nets, kind)
             error = null
             loaded = true
@@ -183,8 +192,12 @@ class GuestStore(private val session: RouterSession, val kind: NetworkKind = Net
     suspend fun create(cfg: GuestConfig): Boolean = run(createOps(cfg, kind), "${sentence(kind.noun)} is up.")
 
     suspend fun remove(): Boolean {
+        // Read again first: anonymous firewall sections are addressed by index, and an index
+        // read when the sheet opened can name a different section by now.
+        load()
+        if (error != null) return false
         val net = existing ?: return true
-        return run(removeOps(net, kind), "${sentence(kind.noun)} removed.")
+        return run(removeOps(net, kind, networkUci, firewallCfg), "${sentence(kind.noun)} removed.", reload = removeReload(kind))
     }
 
     /** Enable/disable without tearing anything down — just the APs' `disabled` flag. */
@@ -289,6 +302,50 @@ class GuestStore(private val session: RouterSession, val kind: NetworkKind = Net
         fun apSection(device: String, singleBand: Boolean, kind: NetworkKind = NetworkKind.GUEST): String =
             if (singleBand) kind.ap else "${kind.ap}_${device.filter { it.isLetterOrDigit() }}"
 
+        private val ANONYMOUS = Regex("""@(\w+)\[(\d+)]""")
+
+        /**
+         * Every firewall section that names [zoneName] as its source or destination:
+         * forwardings (the firewall screen's `wrtpulse_zone_lan_guest` among them), rules and
+         * port forwards. None can do anything once the zone is gone (fw4 skips a section that
+         * refers to a zone it does not have), and LuCI's own zone delete removes the same set.
+         *
+         * Anonymous `@type[i]` sections come first, highest index first per type. Deleting one
+         * renumbers every later section of its type, named or not, so in any other order a
+         * batch deletes the wrong section, possibly the lan→wan forwarding.
+         */
+        fun zoneReferences(firewall: Parsers.FirewallConfig, zoneName: String): List<String> {
+            if (zoneName.isEmpty()) return emptyList()
+            fun names(src: String, dest: String) = src == zoneName || dest == zoneName
+            val sections = firewall.forwardings.filter { names(it.src, it.dest) }.map { it.section } +
+                firewall.rules.filter { names(it.src, it.dest) }.map { it.section } +
+                firewall.forwards.filter { names(it.src, it.dest) }.map { it.section }
+            val (anonymous, named) = sections.distinct().partition { ANONYMOUS.matches(it) }
+            val ordered = anonymous.sortedWith(
+                compareBy<String> { ANONYMOUS.matchEntire(it)!!.groupValues[1] }
+                    .thenByDescending { ANONYMOUS.matchEntire(it)!!.groupValues[2].toInt() }
+            )
+            return ordered + named
+        }
+
+        /** The `wrtpulse_trunk_<name>_*` sections the mesh built for [kind] on this primary. */
+        fun trunkSections(networkUci: Map<String, String>, kind: NetworkKind): List<String> {
+            val prefix = "network.${MeshOps.TRUNK_PREFIX}${MeshOps.extraName(kind.net)}_"
+            return networkUci.keys.filter { it.startsWith(prefix) && it.count { c -> c == '.' } == 1 }
+                .map { it.removePrefix("network.") }
+        }
+
+        /**
+         * [RELOAD], then the bridge itself. netifd drops the interface once its section is gone,
+         * but the bridge can outlive it: hostapd still had the AP enslaved when the network
+         * reload ran, so netifd keeps the device, and after the wifi reload it is an empty
+         * `br-guest` nothing owns. It is deleted only when no network section names it any more.
+         */
+        fun removeReload(kind: NetworkKind): String =
+            "$RELOAD; sleep 2; " +
+                "if [ -e /sys/class/net/${kind.bridge} ] && ! uci -q show network | grep -q \"'${kind.bridge}'\"; then " +
+                "ip link set ${kind.bridge} down; ip link del ${kind.bridge}; fi; true"
+
         /** The full recipe, as uci operations in commit order. */
         fun createOps(cfg: GuestConfig, kind: NetworkKind = NetworkKind.GUEST): List<String> = buildList {
             val mask = IpMath.netmaskOf(PREFIX)
@@ -366,14 +423,26 @@ class GuestStore(private val session: RouterSession, val kind: NetworkKind = Net
             createOps(cfg, kind).map { "+ " + it.removePrefix("set ") }
 
         /** Tears down exactly what [createOps] built, plus any stock guest bits detected. */
-        fun removeOps(net: GuestNetwork, kind: NetworkKind = NetworkKind.GUEST): List<String> = buildList {
+        fun removeOps(
+            net: GuestNetwork,
+            kind: NetworkKind = NetworkKind.GUEST,
+            networkUci: Map<String, String> = emptyMap(),
+            firewall: Parsers.FirewallConfig = Parsers.FirewallConfig(),
+        ): List<String> = buildList {
             // A guest network made in LuCI has `@wifi-iface[i]` APs, and each delete renumbers
             // the ones after it: highest index first ([Commands.uciDeleteOrder]), or the second
             // delete takes the AP after the one meant.
             Commands.uciDeleteOrder(net.apSections).forEach { add("delete wireless.$it") }
             add("delete network.${kind.net}")
             add("delete network.${kind.dev}")
+            // The mesh trunks that carried this network to the nodes: 8021q devices on the mesh
+            // point and the LAN sockets, or a tagged switch_vlan. Left behind they keep a VLAN
+            // on the switch and devices netifd keeps creating for a bridge that no longer exists.
+            trunkSections(networkUci, kind).forEach { add("delete network.$it") }
             add("delete dhcp.${kind.net}")
+            // Before the zone's own named sections: an anonymous section's index counts the
+            // named sections of its type ahead of it, so those must still be there.
+            zoneReferences(firewall, net.zoneName ?: kind.zoneName).forEach { add("delete firewall.$it") }
             net.zoneSection?.let { add("delete firewall.$it") }
             add("delete firewall.${kind.zone}_wan")
             if (kind.lanReaches) add("delete firewall.${kind.zone}_lan")
@@ -390,7 +459,7 @@ class GuestStore(private val session: RouterSession, val kind: NetworkKind = Net
          * the node's `wrtpulse_x_<name>` interface, a VLAN trunked to the primary's bridge.
          */
         fun mirrored(networks: List<WifiNetwork>, kind: NetworkKind): MirroredNetwork? {
-            val net = com.vivekkaushik.wrtpulse.ops.MeshOps.EXTRA_PREFIX + kind.net.removePrefix("wrtpulse_")
+            val net = MeshOps.EXTRA_PREFIX + kind.net.removePrefix("wrtpulse_")
             val aps = networks.filter { it.mode == "ap" && it.network == net }
             if (aps.isEmpty()) return null
             val first = aps.first()

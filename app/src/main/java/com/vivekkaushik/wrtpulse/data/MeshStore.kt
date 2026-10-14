@@ -420,7 +420,7 @@ class MeshStore(private val session: RouterSession) : Refreshable {
         return networkUci.filter { (k, v) -> v == "interface" && k.count { it == '.' } == 1 }
             .keys.map { it.removePrefix("network.") }
             .filter { it != "lan" && it != "loopback" && it != MeshOps.SETUP_IFACE && networkUci["network.$it.device"] in bridges }
-            .associateBy { it.removePrefix("wrtpulse_").filter { c -> c.isLetterOrDigit() }.lowercase().ifEmpty { it } }
+            .associateBy { MeshOps.extraName(it) }
     }
 
     /**
@@ -445,7 +445,7 @@ class MeshStore(private val session: RouterSession) : Refreshable {
             val bridge = devices.firstOrNull { it.name == networkUci["network.$iface.device"].orEmpty() } ?: return@forEach
             val wanted = mutableListOf<String>()
             fun tagged(ifname: String, suffix: String) {
-                val section = "wrtpulse_trunk_${x.name}_$suffix"
+                val section = "${MeshOps.TRUNK_PREFIX}${x.name}_$suffix"
                 if (networkUci["network.$section"] != "device") {
                     ops += "set network.$section=device"
                     ops += "set network.$section.type='8021q'"
@@ -457,7 +457,7 @@ class MeshStore(private val session: RouterSession) : Refreshable {
             }
             if (mesh != null) tagged(mesh, "mesh")
             if (swDevs.isNotEmpty() && lanVlan != null) {
-                val section = "wrtpulse_trunk_${x.name}_sw"
+                val section = "${MeshOps.TRUNK_PREFIX}${x.name}_sw"
                 if (networkUci["network.$section"] != "switch_vlan") {
                     val members = Parsers.swPorts(lanVlan.ports).map { SwPort(it.port, true) }
                     ops += "set network.$section=switch_vlan"

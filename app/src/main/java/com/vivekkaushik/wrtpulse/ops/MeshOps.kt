@@ -897,6 +897,13 @@ object MeshOps {
 
     const val EXTRA_PREFIX = "wrtpulse_x_"
 
+    /** A primary's tagged sub-devices carrying one extra network to the nodes: `wrtpulse_trunk_<name>_<port>`. */
+    const val TRUNK_PREFIX = "wrtpulse_trunk_"
+
+    /** `wrtpulse_guest` → `guest`: the short name an extra network's trunks and node sections go by. */
+    fun extraName(iface: String): String =
+        iface.removePrefix("wrtpulse_").filter { it.isLetterOrDigit() }.lowercase().ifEmpty { iface }
+
     /** `phy0-mesh0` for `radio0` — how the wifi scripts name a mesh point, absent a live reading. */
     fun meshIfnameFor(radio: String): String = "phy${radio.filter { it.isDigit() }.ifEmpty { "0" }}-mesh0"
 

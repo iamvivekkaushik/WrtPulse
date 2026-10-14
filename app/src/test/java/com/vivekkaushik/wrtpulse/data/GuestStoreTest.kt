@@ -116,6 +116,137 @@ class GuestOpsTest {
         assertTrue(ops.contains("delete firewall.wrtpulse_guest_dns"))
     }
 
+    private val guestNet = GuestNetwork(
+        ssid = "Casa-Guest", key = "x", open = false, enabled = true,
+        bands = listOf("radio0"), apSections = listOf("wrtpulse_guest"),
+        network = "wrtpulse_guest", zoneSection = "wrtpulse_guest", zoneName = "guest", address = null,
+    )
+
+    @Test
+    fun `remove also deletes the mesh trunks built on the network, and only its own`() {
+        val uci = mapOf(
+            "network.wrtpulse_trunk_guest_mesh" to "device",
+            "network.wrtpulse_trunk_guest_mesh.name" to "phy0-mesh0.3",
+            "network.wrtpulse_trunk_guest_sw" to "switch_vlan",
+            "network.wrtpulse_trunk_guest_sw.vlan" to "3",
+            "network.wrtpulse_trunk_iot_mesh" to "device",
+            "network.lan" to "interface",
+        )
+        val ops = GuestStore.removeOps(guestNet, NetworkKind.GUEST, uci)
+        assertTrue(ops.contains("delete network.wrtpulse_trunk_guest_mesh"))
+        assertTrue(ops.contains("delete network.wrtpulse_trunk_guest_sw"))
+        assertFalse(ops.any { it.contains("trunk_iot") })
+        assertFalse(ops.any { it.contains(".name") || it.contains(".vlan") })
+        // No trunks, nothing extra.
+        assertEquals(GuestStore.removeOps(guestNet), GuestStore.removeOps(guestNet, NetworkKind.GUEST, mapOf("network.lan" to "interface")))
+    }
+
+    /** A firewall section as uci holds it: [name] null for an anonymous one. */
+    private data class Sec(val id: String, val type: String, val name: String?, val opts: Map<String, String>)
+
+    /** How `uci show` spells a section: its name, or `@type[i]` counting every section of the type. */
+    private fun ref(all: List<Sec>, s: Sec): String =
+        s.name ?: "@${s.type}[${all.takeWhile { it !== s }.count { it.type == s.type }}]"
+
+    private fun show(all: List<Sec>): String = buildString {
+        all.forEach { s ->
+            val r = ref(all, s)
+            append("firewall.$r=${s.type}\n")
+            s.opts.forEach { (k, v) -> append("firewall.$r.$k='$v'\n") }
+        }
+    }
+
+    /** Runs the batch's firewall deletes the way uci does, one at a time; returns the ids deleted. */
+    private fun applyDeletes(start: List<Sec>, ops: List<String>): Set<String> {
+        val live = start.toMutableList()
+        val gone = mutableSetOf<String>()
+        val anon = Regex("""@(\w+)\[(\d+)]""")
+        ops.filter { it.startsWith("delete firewall.") }.map { it.removePrefix("delete firewall.") }.forEach { path ->
+            val m = anon.matchEntire(path)
+            val hit = if (m != null) {
+                live.filter { it.type == m.groupValues[1] }.getOrNull(m.groupValues[2].toInt())
+                    ?: error("$path is out of range when the batch reaches it")
+            } else {
+                live.firstOrNull { it.name == path }
+            }
+            if (hit != null) { live.remove(hit); gone += hit.id }
+        }
+        return gone
+    }
+
+    private val firewallWithStrays = listOf(
+        Sec("defaults", "defaults", null, emptyMap()),
+        Sec("lanZone", "zone", null, mapOf("name" to "lan")),
+        Sec("wanZone", "zone", null, mapOf("name" to "wan")),
+        Sec("lanWan", "forwarding", null, mapOf("src" to "lan", "dest" to "wan")),
+        Sec("guestZone", "zone", "wrtpulse_guest", mapOf("name" to "guest")),
+        Sec("guestWan", "forwarding", "wrtpulse_guest_wan", mapOf("src" to "guest", "dest" to "wan")),
+        Sec("luciLanGuest", "forwarding", null, mapOf("src" to "lan", "dest" to "guest")),
+        Sec("lanIot", "forwarding", null, mapOf("src" to "lan", "dest" to "iot")),
+        Sec("luciGuestLan", "forwarding", null, mapOf("src" to "guest", "dest" to "lan")),
+        Sec("screenLanGuest", "forwarding", "wrtpulse_zone_lan_guest", mapOf("src" to "lan", "dest" to "guest")),
+        Sec("wanRenew", "rule", null, mapOf("name" to "Allow-DHCP-Renew", "src" to "wan", "target" to "ACCEPT")),
+        Sec("printer", "rule", null, mapOf("name" to "Guest-Printer", "src" to "guest", "dest" to "lan", "target" to "ACCEPT")),
+        Sec("guestDhcp", "rule", "wrtpulse_guest_dhcp", mapOf("name" to "Guest-DHCP", "src" to "guest", "target" to "ACCEPT")),
+        Sec("guestPing", "rule", null, mapOf("name" to "Guest-Ping", "src" to "guest", "target" to "ACCEPT")),
+        Sec("nas", "redirect", null, mapOf("name" to "NAS", "src" to "wan", "dest" to "lan", "target" to "DNAT")),
+        Sec("guestCam", "redirect", null, mapOf("name" to "Cam", "src" to "guest", "dest" to "lan", "target" to "DNAT")),
+    )
+
+    @Test
+    fun `remove deletes every firewall section that names the zone, anonymous ones highest index first`() {
+        val fw = Parsers.firewallConfig(Parsers.uciShow(show(firewallWithStrays)))
+        val refs = GuestStore.zoneReferences(fw, "guest")
+        // Named sections count: luciLanGuest is @forwarding[2], luciGuestLan @forwarding[4]; printer @rule[1], guestPing @rule[3].
+        assertEquals(
+            listOf(
+                "@forwarding[4]", "@forwarding[2]", "@redirect[1]", "@rule[3]", "@rule[1]",
+                "wrtpulse_guest_wan", "wrtpulse_zone_lan_guest", "wrtpulse_guest_dhcp",
+            ),
+            refs,
+        )
+        val ops = GuestStore.removeOps(guestNet, NetworkKind.GUEST, emptyMap(), fw)
+        // Every anonymous delete runs before any named firewall delete.
+        val fwOps = ops.filter { it.startsWith("delete firewall.") }
+        assertTrue(fwOps.takeWhile { it.contains("@") }.size == fwOps.count { it.contains("@") })
+    }
+
+    @Test
+    fun `run as uci would, the batch deletes exactly the zone and what names it`() {
+        val fw = Parsers.firewallConfig(Parsers.uciShow(show(firewallWithStrays)))
+        val gone = applyDeletes(firewallWithStrays, GuestStore.removeOps(guestNet, NetworkKind.GUEST, emptyMap(), fw))
+        assertEquals(
+            setOf("guestZone", "guestWan", "luciLanGuest", "luciGuestLan", "screenLanGuest", "printer", "guestDhcp", "guestPing", "guestCam"),
+            gone,
+        )
+        // Spelled out: the LAN keeps its way out, and the IoT zone keeps its forwarding.
+        assertFalse("lanWan" in gone)
+        assertFalse("lanIot" in gone)
+    }
+
+    @Test
+    fun `lowest index first would delete the wrong forwarding`() {
+        // The hazard the ordering exists for, on the same config: deleting @forwarding[2] first
+        // shifts every later forwarding down one, so @forwarding[4] is then the screen's
+        // forwarding and luciGuestLan survives.
+        val fw = Parsers.firewallConfig(Parsers.uciShow(show(firewallWithStrays)))
+        val ascending = GuestStore.zoneReferences(fw, "guest").filter { it.startsWith("@forwarding") }.sorted()
+        val gone = applyDeletes(firewallWithStrays, ascending.map { "delete firewall.$it" })
+        assertEquals(setOf("luciLanGuest", "screenLanGuest"), gone)
+    }
+
+    @Test
+    fun `removal deletes the bridge only once no network section names it`() {
+        val cmd = GuestStore.removeReload(NetworkKind.IOT)
+        assertTrue(cmd.startsWith(GuestStore.RELOAD))
+        assertTrue(cmd.contains("[ -e /sys/class/net/br-iot ]"))
+        assertTrue(cmd.contains("""! uci -q show network | grep -q "'br-iot'""""))
+        assertTrue(cmd.contains("ip link del br-iot"))
+        assertFalse(cmd.contains("br-guest"))
+        // A missing bridge is not a failure.
+        assertTrue(cmd.endsWith("; true"))
+    }
+
     // ---- anonymous sections: the batch run the way uci runs it ----
 
     /**
