@@ -1,0 +1,1 @@
+• AI analysis: professional read-only router diagnostics now include CPU/load, memory, network counters, storage, firewall, routes, live Wi-Fi status and installed wireless packages. Added a Gemini provider preset through Google's OpenAI-compatible endpoint. The analysis stays redacted and nothing is sent until Analyze is pressed.
