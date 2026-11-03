@@ -14,7 +14,7 @@ import java.nio.charset.StandardCharsets
 
 /**
  * Where the analysis goes: any OpenAI-compatible /chat/completions endpoint — OpenAI itself,
- * OpenRouter, Groq, or a self-hosted gateway. The key is the operator's, kept sealed at rest
+ * OpenRouter, Groq, Gemini, or a self-hosted gateway. The key is the operator's, kept sealed at rest
  * like a router password, and sent nowhere but to this endpoint.
  */
 data class AiSettings(
@@ -31,6 +31,9 @@ data class AiSettings(
     companion object {
         const val DEFAULT_BASE_URL = "https://api.openai.com/v1"
         const val DEFAULT_MODEL = "gpt-4o-mini"
+        /** Google Gemini's official OpenAI-compatible Chat Completions endpoint. */
+        const val GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+        const val GEMINI_MODEL = "gemini-3.8-flash"
     }
 }
 

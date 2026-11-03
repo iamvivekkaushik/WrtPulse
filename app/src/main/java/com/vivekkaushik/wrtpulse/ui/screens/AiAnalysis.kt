@@ -158,11 +158,15 @@ private fun ProviderCard(
     Card {
         SectionLabel("AI PROVIDER", size = 9.5f, tracking = 0.14)
         Text(
-            "Any OpenAI-compatible chat endpoint: OpenAI, OpenRouter, Groq, or your own. " +
+            "Any OpenAI-compatible chat endpoint: OpenAI, Gemini, OpenRouter, Groq, or your own. " +
                 "The key is sealed with the phone's keystore, like a router password.",
             style = sans(11f, 450, Wrt.TextSecondary),
             modifier = Modifier.padding(top = 8.dp),
         )
+        GhostButton("Use Gemini") {
+            endpoint = AiSettings.GEMINI_BASE_URL
+            model = AiSettings.GEMINI_MODEL
+        }
         FieldLabel("BASE URL")
         FormTextField(endpoint, { endpoint = it })
         FieldLabel("MODEL")

@@ -57,7 +57,7 @@ class AiClientTest {
     }
 
     @Test
-    fun `the endpoint tolerates trailing slashes and bare hosts`() {
+    fun `endpoint tolerates trailing slashes and bare hosts`() {
         assertEquals(
             "https://api.openai.com/v1/chat/completions",
             AiSettings(baseUrl = "https://api.openai.com/v1/").endpoint,
@@ -66,6 +66,21 @@ class AiClientTest {
             "http://192.168.8.1:11434/v1/chat/completions",
             AiSettings(baseUrl = "http://192.168.8.1:11434/v1").endpoint,
         )
+    }
+
+    @Test
+    fun `Gemini preset points at Google's OpenAI compatible endpoint`() {
+        val settings = AiSettings(
+            baseUrl = AiSettings.GEMINI_BASE_URL,
+            model = AiSettings.GEMINI_MODEL,
+            apiKey = "gemini-test-key",
+        )
+        assertEquals(
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            settings.endpoint,
+        )
+        assertEquals("gemini-3.8-flash", settings.model)
+        assertTrue(settings.configured)
     }
 
     @Test
