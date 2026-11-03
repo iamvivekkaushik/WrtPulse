@@ -74,6 +74,7 @@ Keep the whole answer under 500 words. Plain text only — no markdown headers, 
     private val LABELS = mapOf(
         "board" to "BOARD (ubus call system board)",
         "info" to "SYSTEM (ubus call system info)",
+        "performance" to "PERFORMANCE (load, CPU, memory, interfaces, storage)",
         "overlay" to "STORAGE (df -k /overlay)",
         "wireless" to "WIRELESS CONFIG (uci show wireless)",
         "network" to "NETWORK CONFIG (uci show network)",

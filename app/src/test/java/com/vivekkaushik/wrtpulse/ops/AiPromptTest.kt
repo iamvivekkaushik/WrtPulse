@@ -116,6 +116,7 @@ class AiPromptTest {
         val out = AiPrompt.buildUserContent(
             mapOf(
                 "firewall" to "firewall.lan.input='ACCEPT'",
+                "performance" to "LOADAVG\n0.12 0.20 0.18\nMEMORY\nMemAvailable: 18000 kB",
                 "routes" to "default via 192.168.1.1 dev br-lan",
                 "wifi_status" to "radio0: up",
                 "packages" to "wpad-mesh-mbedtls - 2023-09-08",
@@ -123,6 +124,7 @@ class AiPromptTest {
             "",
         )
         assertTrue(out.contains("FIREWALL CONFIG"))
+        assertTrue(out.contains("PERFORMANCE (load, CPU, memory, interfaces, storage)"))
         assertTrue(out.contains("ROUTES"))
         assertTrue(out.contains("LIVE WIRELESS STATUS"))
         assertTrue(out.contains("INSTALLED WIRELESS PACKAGES"))

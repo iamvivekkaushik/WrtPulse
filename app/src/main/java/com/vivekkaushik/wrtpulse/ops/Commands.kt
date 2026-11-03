@@ -48,6 +48,12 @@ object Commands {
     val AI_SNAPSHOT = listOf(
         "echo $SECTION board" to BOARD,
         "echo $SECTION info" to "ubus call system info",
+        "echo $SECTION performance" to
+            "echo 'LOADAVG'; cat /proc/loadavg 2>/dev/null; " +
+                "echo 'MEMORY'; awk '/^(MemTotal|MemFree|MemAvailable|SwapTotal|SwapFree):/ {print}' /proc/meminfo 2>/dev/null; " +
+                "echo 'CPU'; head -n 5 /proc/stat 2>/dev/null; " +
+                "echo 'NETDEV'; cat /proc/net/dev 2>/dev/null; " +
+                "echo 'STORAGE'; df -k 2>/dev/null",
         "echo $SECTION overlay" to "df -k /overlay | tail -n1",
         "echo $SECTION wireless" to "uci show wireless 2>/dev/null",
         "echo $SECTION network" to "uci show network 2>/dev/null",
