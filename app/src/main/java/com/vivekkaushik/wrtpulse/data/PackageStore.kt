@@ -183,6 +183,19 @@ class PackageStore(private val session: RouterSession) {
     companion object {
 
         /**
+         * Common packages for LuCI wireless configuration, WDS and 802.11s on OpenWrt 23.05.x.
+         * Resolution is always delegated to the router's configured feed; hard-coding a
+         * mipsel_24kc URL would be unsafe on another target or release.
+         */
+        val WIRELESS_CONFIGURATION_PACKAGES = listOf(
+            "luci-mod-network" to "LuCI Network/Wireless configuration",
+            "wpad-mesh-mbedtls" to "802.11s Mesh and WDS-capable WPA daemon",
+            "iw" to "nl80211 wireless diagnostic/configuration tool",
+            "hostapd" to "AP/WDS authentication daemon",
+            "bridge" to "Linux bridge utilities",
+        )
+
+        /**
          * Packages this app refuses to remove.
          *
          * Neither apk nor opkg will stop you: nothing depends on dropbear, so the tool

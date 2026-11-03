@@ -94,6 +94,12 @@ fun PackagesScreen(
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
             FlashCard(store, live, onRefresh = { scope.launch { toast = store.refreshFeed() } })
             Spacer(Modifier.height(10.dp))
+            WirelessPackageCard { name ->
+                tab = PkgTab.Search
+                query = name
+                scope.launch { store.search(name) }
+            }
+            Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                 FilterChip("Installed ${store.installed.size}", tab == PkgTab.Installed, size = 11.5f) {
                     tab = PkgTab.Installed
@@ -162,6 +168,34 @@ fun PackagesScreen(
             onDismiss = { open = null },
             onResult = { toast = it; open = null },
         )
+    }
+}
+
+/** Curated shortcuts; install still uses the normal feed result and dry-run consent dialog. */
+@Composable
+private fun WirelessPackageCard(onPackage: (String) -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(1.dp, Wrt.Accent.copy(alpha = 0.32f), RoundedCornerShape(13.dp))
+            .background(Wrt.Accent.copy(alpha = 0.045f), RoundedCornerShape(13.dp))
+            .padding(horizontal = 13.dp, vertical = 11.dp),
+    ) {
+        Text("WIRELESS CONFIGURATION", style = mono(9.5f, 650, Wrt.Accent, letterSpacing = 1.1.sp))
+        Text(
+            "Search the router's configured OpenWrt feed for LuCI, WDS and Mesh packages.",
+            style = sans(11f, 400, Wrt.TextSecondary),
+            modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
+        )
+        PackageStore.WIRELESS_CONFIGURATION_PACKAGES.forEach { (name, description) ->
+            Row(
+                Modifier.fillMaxWidth().clickable { onPackage(name) }.padding(vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(name, style = mono(10.5f, 600, Wrt.TextPrimary), modifier = Modifier.weight(1f))
+                Text(description, style = sans(10f, 400, Wrt.TextDim), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
     }
 }
 

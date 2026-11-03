@@ -40,6 +40,8 @@ data class DraftIface(
     val zone: String = "",
     /** AP only: 802.11r hand-off with every other AP carrying this SSID and key. */
     val ft: Boolean = false,
+    /** Four-address WDS mode; enable it on both ends of a WDS link. */
+    val wds: Boolean = false,
 ) {
     val isClient: Boolean get() = mode == "sta"
 }
@@ -374,6 +376,7 @@ class WifiStore(private val session: RouterSession) : Refreshable {
         /** Null takes the safe default: a station with no zone is an uplink to nowhere. */
         zone: String? = null,
         ft: Boolean = false,
+        wds: Boolean = false,
     ): DraftIface {
         val trimmed = ssid.trim()
         val taken = (networks.map { it.section } + radios.map { it.section } +
@@ -399,6 +402,7 @@ class WifiStore(private val session: RouterSession) : Refreshable {
             isolate = isolate,
             zone = zone ?: if (mode == "sta") "wan" else "",
             ft = ft && mode == "ap" && com.vivekkaushik.wrtpulse.ops.MeshOps.roamingCapable(encryption),
+            wds = wds,
         )
         drafts.add(draft)
         return draft
@@ -488,6 +492,7 @@ class WifiStore(private val session: RouterSession) : Refreshable {
         if (draft.hidden) add("hidden" to "1")
         if (draft.isolate) add("isolate" to "1")
         if (draft.ft) addAll(com.vivekkaushik.wrtpulse.ops.MeshOps.roamingOptions(draft.ssid, draft.encryption))
+        if (draft.wds) add("wds" to "1")
     }
 
     /**
@@ -518,6 +523,7 @@ class WifiStore(private val session: RouterSession) : Refreshable {
                 isolate = value(n.section, "isolate", if (n.isolate) "1" else "0") == "1",
                 ieee80211r = ftValue == "1",
                 mobilityDomain = value(n.section, "mobility_domain", n.mobilityDomain),
+                wds = value(n.section, "wds", if (n.wds) "1" else "0") == "1",
             )
         }
         val drafted = drafts.filter { !it.isClient }.flatMap { d ->
@@ -526,6 +532,7 @@ class WifiStore(private val session: RouterSession) : Refreshable {
                     section = d.sections.getValue(device), device = device, ssid = d.ssid, encryption = d.encryption,
                     key = d.key, disabled = false, mode = d.mode, network = d.network, hidden = d.hidden, isolate = d.isolate,
                     ieee80211r = d.ft, mobilityDomain = if (d.ft) com.vivekkaushik.wrtpulse.ops.MeshOps.mobilityDomain(d.ssid) else "",
+                    wds = d.wds,
                 )
             }
         }
