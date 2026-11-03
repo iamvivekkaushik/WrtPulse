@@ -47,6 +47,7 @@ import com.vivekkaushik.wrtpulse.data.LanStore
 import com.vivekkaushik.wrtpulse.data.WanStore
 import com.vivekkaushik.wrtpulse.data.LiveLogs
 import com.vivekkaushik.wrtpulse.data.LiveTicker
+import com.vivekkaushik.wrtpulse.data.OfflineBundles
 import com.vivekkaushik.wrtpulse.data.PackageStore
 import com.vivekkaushik.wrtpulse.data.ResetStore
 import com.vivekkaushik.wrtpulse.data.RouterOps
@@ -174,6 +175,9 @@ private fun WrtPulseApp() {
     // Read on entry rather than on a tick — the installed list only changes when
     // somebody changes it, and reading it sweeps the whole package database.
     val packageStore = remember(session) { session?.let { PackageStore(it) } }
+    // The wireless .ipk bundles the APK itself carries, for routers with no internet. Read
+    // from assets and matched against the router only when the Packages screen is open.
+    val offlineBundles = remember(session) { session?.let { OfflineBundles(context, it) } }
     // Same bargain for the init scripts: listing them walks /etc/init.d, so it waits
     // until the Services screen is actually opened.
     val serviceStore = remember(session) { session?.let { ServiceStore(it) } }
@@ -819,6 +823,7 @@ private fun WrtPulseApp() {
                                 } else if (packagesOpen) {
                                     PackagesScreen(
                                         store = packageStore,
+                                        offline = offlineBundles,
                                         live = telemetry,
                                         latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
                                         onBack = { packagesOpen = false },
