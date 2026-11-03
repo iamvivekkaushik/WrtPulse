@@ -31,9 +31,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import com.vivekkaushik.wrtpulse.data.PackageStore
 import com.vivekkaushik.wrtpulse.data.Telemetry
 import com.vivekkaushik.wrtpulse.ops.InstallPlan
@@ -50,7 +53,9 @@ import com.vivekkaushik.wrtpulse.ui.WrtIcons
 import com.vivekkaushik.wrtpulse.ui.mono
 import com.vivekkaushik.wrtpulse.ui.sans
 import com.vivekkaushik.wrtpulse.ui.theme.Wrt
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private enum class PkgTab { Installed, Updates, Search }
 
@@ -66,11 +71,25 @@ fun PackagesScreen(
     onBack: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var tab by remember { mutableStateOf(PkgTab.Installed) }
     var query by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf("") }
     var open by remember { mutableStateOf<RouterPackage?>(null) }
     var toast by remember { mutableStateOf<String?>(null) }
+
+    val packagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null && store != null) {
+            scope.launch {
+                val picked = withContext(Dispatchers.IO) { readPackageDocument(context, uri) }
+                toast = if (picked == null) {
+                    "Failed: couldn't read the package file."
+                } else {
+                    store.uploadLocalPackage(picked.first, picked.second)
+                }
+            }
+        }
+    }
 
     LaunchedEffect(store) { if (store != null && !store.loaded) store.load() }
 
@@ -94,7 +113,14 @@ fun PackagesScreen(
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
             FlashCard(store, live, onRefresh = { scope.launch { toast = store.refreshFeed() } })
             Spacer(Modifier.height(10.dp))
-            WirelessPackageCard { name ->
+            WirelessPackageCard(
+                missingCount = store.missingWirelessPackages.size,
+                onUpload = {
+                    packagePicker.launch(
+                        arrayOf("application/octet-stream", "application/vnd.android.package-archive", "application/x-ipk"),
+                    )
+                },
+            ) { name ->
                 tab = PkgTab.Search
                 query = name
                 scope.launch { store.search(name) }
@@ -171,9 +197,13 @@ fun PackagesScreen(
     }
 }
 
-/** Curated shortcuts; install still uses the normal feed result and dry-run consent dialog. */
+/** Curated shortcuts; feed installs use the normal result/dry-run flow, local files use the router manager. */
 @Composable
-private fun WirelessPackageCard(onPackage: (String) -> Unit) {
+private fun WirelessPackageCard(
+    missingCount: Int,
+    onUpload: () -> Unit,
+    onPackage: (String) -> Unit,
+) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -183,9 +213,15 @@ private fun WirelessPackageCard(onPackage: (String) -> Unit) {
     ) {
         Text("WIRELESS CONFIGURATION", style = mono(9.5f, 650, Wrt.Accent, letterSpacing = 1.1.sp))
         Text(
-            "Search the router's configured OpenWrt feed for LuCI, WDS and Mesh packages.",
+            if (missingCount == 0) "All recommended wireless packages are installed."
+            else "$missingCount recommended wireless package${if (missingCount == 1) " is" else "s are"} missing.",
             style = sans(11f, 400, Wrt.TextSecondary),
             modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
+        )
+        Text(
+            "Tap a package to search the router feed, or upload an offline .ipk/.apk file.",
+            style = sans(10.5f, 400, Wrt.TextDim),
+            modifier = Modifier.padding(bottom = 6.dp),
         )
         PackageStore.WIRELESS_CONFIGURATION_PACKAGES.forEach { (name, description) ->
             Row(
@@ -196,8 +232,36 @@ private fun WirelessPackageCard(onPackage: (String) -> Unit) {
                 Text(description, style = sans(10f, 400, Wrt.TextDim), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
+        Text(
+            "Upload package file",
+            style = sans(11.5f, 650, Wrt.Accent),
+            modifier = Modifier.padding(top = 7.dp).clickable(onClick = onUpload),
+        )
     }
 }
+
+private fun readPackageDocument(
+    context: android.content.Context,
+    uri: android.net.Uri,
+): Pair<String, ByteArray>? = runCatching {
+    val name = context.contentResolver.query(uri, arrayOf("_display_name"), null, null, null)
+        ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+        ?: "package.ipk"
+    val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
+        val out = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(64 * 1024)
+        var total = 0
+        while (true) {
+            val n = input.read(buffer)
+            if (n < 0) break
+            total += n
+            if (total > PackageStore.MAX_LOCAL_PACKAGE_BYTES) return@use null
+            out.write(buffer, 0, n)
+        }
+        out.toByteArray()
+    } ?: return@runCatching null
+    name to bytes
+}.getOrNull()
 
 private fun emptyLine(tab: PkgTab, store: PackageStore, filter: String, query: String): String = when {
     store.loading -> "Reading the package database…"
