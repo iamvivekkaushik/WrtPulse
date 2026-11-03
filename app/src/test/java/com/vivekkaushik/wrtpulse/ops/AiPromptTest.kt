@@ -102,8 +102,29 @@ class AiPromptTest {
     @Test
     fun `the system prompt demands the shape the screen renders`() {
         assertTrue(AiPrompt.SYSTEM.contains("VERDICT:"))
+        assertTrue(AiPrompt.SYSTEM.contains("CONFIDENCE:"))
         assertTrue(AiPrompt.SYSTEM.contains("FINDINGS:"))
+        assertTrue(AiPrompt.SYSTEM.contains("ROOT CAUSE:"))
         assertTrue(AiPrompt.SYSTEM.contains("ADVICE:"))
+        assertTrue(AiPrompt.SYSTEM.contains("VALIDATION:"))
+        assertTrue(AiPrompt.SYSTEM.contains("VERIFY FIRST"))
         assertFalse(AiPrompt.SYSTEM.contains("```"))
+    }
+
+    @Test
+    fun `professional payload labels firewall routes wireless status and packages`() {
+        val out = AiPrompt.buildUserContent(
+            mapOf(
+                "firewall" to "firewall.lan.input='ACCEPT'",
+                "routes" to "default via 192.168.1.1 dev br-lan",
+                "wifi_status" to "radio0: up",
+                "packages" to "wpad-mesh-mbedtls - 2023-09-08",
+            ),
+            "",
+        )
+        assertTrue(out.contains("FIREWALL CONFIG"))
+        assertTrue(out.contains("ROUTES"))
+        assertTrue(out.contains("LIVE WIRELESS STATUS"))
+        assertTrue(out.contains("INSTALLED WIRELESS PACKAGES"))
     }
 }

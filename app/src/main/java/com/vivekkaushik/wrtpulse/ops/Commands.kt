@@ -51,6 +51,12 @@ object Commands {
         "echo $SECTION overlay" to "df -k /overlay | tail -n1",
         "echo $SECTION wireless" to "uci show wireless 2>/dev/null",
         "echo $SECTION network" to "uci show network 2>/dev/null",
+        "echo $SECTION firewall" to "uci show firewall 2>/dev/null",
+        "echo $SECTION routes" to "ip route 2>/dev/null; ip -6 route 2>/dev/null",
+        "echo $SECTION wifi_status" to "ubus call network.wireless status 2>/dev/null || true",
+        "echo $SECTION packages" to
+            "if command -v apk >/dev/null 2>&1; then apk info 2>/dev/null; " +
+                "else opkg list-installed 2>/dev/null; fi | grep -Ei 'iw|hostapd|wpad|luci-(base|mod-network)|rpcd-mod-iwinfo' || true",
         "echo $SECTION dhcp" to "cat /tmp/dhcp.leases 2>/dev/null",
         "echo $SECTION assoc" to ASSOC_COUNTS,
         "echo $SECTION log" to
