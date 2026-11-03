@@ -61,6 +61,11 @@ object WrtIcons {
 
     // Common
     val Search = stroked("search", 1.7f, "M11 4 A7 7 0 1 1 10.99 4 Z", "M20 20l-3.2-3.2")
+    val Spark = stroked(
+        "spark", 1.6f,
+        "M12 3.5l1.7 4.8 4.8 1.7-4.8 1.7L12 16.5l-1.7-4.8-4.8-1.7 4.8-1.7z",
+        "M18.5 15.5l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z",
+    )
     val Plus = stroked("plus", 2f, "M12 5v14", "M5 12h14")
     val ChevronDown = stroked("chevDown", 2.2f, "M6 9l6 6 6-6")
     val ChevronUp = stroked("chevUp", 2.2f, "M6 15l6-6 6 6")

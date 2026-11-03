@@ -38,6 +38,25 @@ object Commands {
             "iwinfo 2>/dev/null | grep ESSID || true",
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
+    /**
+     * One read-only sweep for the AI analysis screen: identity, load, storage, both configs,
+     * the client table and the recent warnings — everything a diagnosis wants in one round
+     * trip. Nothing here writes; the log is pre-filtered to error/warn lines and capped so a
+     * chatty router cannot balloon the payload. Secrets in the uci blocks are redacted on the
+     * phone before anything is sent (AiPrompt.redact).
+     */
+    val AI_SNAPSHOT = listOf(
+        "echo $SECTION board" to BOARD,
+        "echo $SECTION info" to "ubus call system info",
+        "echo $SECTION overlay" to "df -k /overlay | tail -n1",
+        "echo $SECTION wireless" to "uci show wireless 2>/dev/null",
+        "echo $SECTION network" to "uci show network 2>/dev/null",
+        "echo $SECTION dhcp" to "cat /tmp/dhcp.leases 2>/dev/null",
+        "echo $SECTION assoc" to ASSOC_COUNTS,
+        "echo $SECTION log" to
+            "logread 2>/dev/null | grep -Ei 'error|fail|warn|crit' | tail -n 40 || true",
+    ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
     /** Wireless config as UCI key=value lines. */
     const val WIRELESS_CONFIG = "uci show wireless"
 
