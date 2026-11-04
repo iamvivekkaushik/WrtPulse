@@ -208,7 +208,11 @@ class AiStore(
             ssids = ssids,
             sections = redacted,
         )
-        val expected = listOf("board", "info", "overlay", "wireless", "assoc", "dhcp", "log")
+        val expected = listOf(
+            "board", "info", "overlay", "wireless", "assoc", "dhcp", "log",
+            "release", "links", "network_status", "radio_caps", "survey", "wifi_scan",
+            "wan_diag", "dhcp_diag", "mesh",
+        )
         unavailableSections = expected.filter { redacted[it].isNullOrBlank() }
         refreshLocal()
     }

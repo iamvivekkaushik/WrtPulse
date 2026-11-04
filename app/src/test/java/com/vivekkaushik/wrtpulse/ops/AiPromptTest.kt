@@ -164,8 +164,8 @@ class AiPromptTest {
     }
 
     @Test
-    fun `the six ready-made analyses each carry a focused question`() {
-        assertEquals(6, AiPrompt.Mode.entries.size)
+    fun `the ready-made analyses each carry a focused question`() {
+        assertEquals(11, AiPrompt.Mode.entries.size)
         AiPrompt.Mode.entries.forEach { mode ->
             assertTrue(mode.question.isNotBlank())
             assertTrue(mode.label.isNotBlank())
@@ -174,6 +174,11 @@ class AiPromptTest {
         assertTrue(AiPrompt.Mode.MESH.question.contains("mesh"))
         assertTrue(AiPrompt.Mode.OUTAGE.question.contains("down"))
         assertTrue(AiPrompt.Mode.LAN.question.contains("DHCP"))
+        assertTrue(AiPrompt.Mode.RADIO.question.contains("channel"))
+        assertTrue(AiPrompt.Mode.CLIENT_LINK.question.contains("RSSI"))
+        assertTrue(AiPrompt.Mode.NETWORK.question.contains("DNS"))
+        assertTrue(AiPrompt.Mode.MESH_EXPERT.question.contains("BATMAN-ADV"))
+        assertTrue(AiPrompt.Mode.AUTOMATIC.question.contains("read-only"))
     }
 
     @Test

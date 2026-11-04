@@ -48,6 +48,36 @@ object AiPrompt {
                 "posture, VLANs, and address conflicts. Are there misconfigurations that break " +
                 "connectivity for some clients?",
         ),
+        RADIO(
+            "Radio & channels",
+            "Analyze radio capability, regulatory constraints, channel width, DFS, survey " +
+                "occupancy, visible neighbors and airtime interference. Recommend channels only " +
+                "when the country, hardware and scan evidence support them.",
+        ),
+        CLIENT_LINK(
+            "Client link quality",
+            "Analyze per-client RSSI, noise, SNR, TX/RX rates, retries, failed frames and " +
+                "roaming events. Distinguish weak coverage, interference, a sticky client and " +
+                "a client-specific fault without exposing MAC addresses.",
+        ),
+        NETWORK(
+            "WAN, DNS & DHCP",
+            "Trace the path from LAN and gateway to an external IP and DNS name. Analyze WAN " +
+                "interface state, routes, DHCP, DNS, firewall and logs, and identify the first " +
+                "failed layer without treating one failed ping as conclusive.",
+        ),
+        MESH_EXPERT(
+            "Mesh expert",
+            "Identify whether this is wired multi-AP, WDS, IEEE 802.11s, BATMAN-ADV or a mix. " +
+                "Analyze peers, mesh paths, originators, gateways, MTU, VLAN, DHCP and loops. " +
+                "Do not confuse a roaming AP system with a wireless mesh backhaul.",
+        ),
+        AUTOMATIC(
+            "Full diagnosis",
+            "Run the complete read-only OpenWrt Network Expert workflow: system, Wi-Fi, client " +
+                "links, interference, WAN, DNS, DHCP, firewall, logs and mesh. Rank findings " +
+                "by impact and confidence, then give the smallest safe next test.",
+        ),
     }
 
     /**
@@ -64,7 +94,17 @@ Engineering rules:
 - Separate OBSERVED facts from INFERENCE. Ground every claim in supplied data and quote actual
   values, interfaces, channels, addresses, or log lines. Never invent values.
 - Check the whole system: firmware/package compatibility, CPU/RAM/storage, WAN/LAN routing,
-  DHCP conflicts, firewall exposure, radio health, WDS/802.11s Mesh, bridge loops and STP.
+  DHCP conflicts, firewall exposure, radio health, channel occupancy, WDS/802.11s Mesh,
+  BATMAN-ADV, bridge loops, STP, DNS and the actual gateway-to-internet path.
+- Apply the OpenWrt Network Expert distinction: 802.11s is a wireless link layer, BATMAN-ADV
+  is a layer-2 routing protocol, WDS is implementation-dependent, and multi-AP roaming is not
+  necessarily a wireless mesh.
+- Treat RSSI alone as insufficient. Corroborate signal with noise/SNR, rates, retries, failed
+  frames, airtime/survey data, client location and repeated measurements.
+- Treat a Wi-Fi scan as a time-bound visible-neighbor snapshot, not a full RF spectrum analyzer.
+  Do not infer non-Wi-Fi interference from scan results alone.
+- For channel advice, require country/regulatory data, radio capability, actual channel width,
+  DFS implications, at least one scan/survey and a clear stability-versus-throughput tradeoff.
 - The local findings and the sample deltas were computed on the phone from raw counters —
   trust them, cite them as evidence, and build on them instead of restating them.
 - Give each local finding its own line in the diagnosis and connect the repair step directly to
@@ -140,6 +180,15 @@ Keep the whole answer under 650 words. Plain text only — no markdown headers, 
         "routes" to "ROUTES (ip route and ip -6 route)",
         "wifi_status" to "LIVE WIRELESS STATUS (ubus call network.wireless status)",
         "packages" to "INSTALLED WIRELESS PACKAGES (opkg/apk query)",
+        "release" to "OPENWRT RELEASE (/etc/openwrt_release)",
+        "links" to "LINKS AND ADDRESSES (ip -br addr/link)",
+        "network_status" to "NETWORK INTERFACE STATUS (ubus call network.interface dump)",
+        "radio_caps" to "RADIO CAPABILITIES AND REGULATORY HINTS (iw list)",
+        "survey" to "CHANNEL SURVEY (iw survey dump)",
+        "wifi_scan" to "VISIBLE WI-FI NEIGHBORS (iwinfo scan; snapshot only)",
+        "wan_diag" to "WAN PATH CHECK (gateway, external IP, DNS)",
+        "dhcp_diag" to "DHCP/LAN DIAGNOSTICS (leases, bridge, logs)",
+        "mesh" to "MESH/WDS/BATMAN STATUS (interfaces, links, paths, peers)",
         "dhcp" to "DHCP LEASES (/tmp/dhcp.leases)",
         "dhcpconf" to "DHCP CONFIG (uci show dhcp)",
         "assoc" to "WIFI CLIENTS (iw station dump / iwinfo assoclist)",

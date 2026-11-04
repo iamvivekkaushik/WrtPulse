@@ -130,6 +130,11 @@ private fun localized(value: String, arabic: Boolean): String {
         "Mesh" -> "الشبكة المتداخلة"
         "Performance" -> "الأداء"
         "Security" -> "الأمان"
+        "Radio & channels" -> "الراديو والقنوات"
+        "Client link quality" -> "جودة رابط العميل"
+        "WAN, DNS & DHCP" -> "WAN وDNS وDHCP"
+        "Mesh expert" -> "خبير Mesh"
+        "Full diagnosis" -> "تشخيص شامل"
         "60-SECOND PERFORMANCE SAMPLE" -> "عينة أداء لمدة 60 ثانية"
         "Sample for 60 seconds" -> "جمع عينة لمدة 60 ثانية"
         "Sample again" -> "جمع عينة جديدة"
@@ -459,6 +464,14 @@ private fun HowItWorksCard() {
                 "before you choose to copy them.",
             style = sans(10.5f, 500, Wrt.TextDim),
             modifier = Modifier.padding(top = 6.dp),
+        )
+        Text(
+            "OpenWrt Network Expert is enabled: radio capability, channel survey, client link " +
+                "quality, WAN/DNS/DHCP, logs, WDS/802.11s and BATMAN-ADV are collected when " +
+                "the router exposes them. Missing tools are reported as unavailable, never as " +
+                "proof that a subsystem is absent.",
+            style = sans(10f, 500, Wrt.AccentBody),
+            modifier = Modifier.padding(top = 8.dp),
         )
     }
 }
