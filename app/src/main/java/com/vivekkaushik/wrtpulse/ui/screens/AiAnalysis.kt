@@ -140,6 +140,8 @@ fun AiAnalysisScreen(
             item {
                 DataCard(
                     store = store,
+                    settings = settings,
+                    question = question,
                     showPayload = showPayload,
                     onTogglePayload = { showPayload = !showPayload },
                     onReadAgain = { scope.launch { store.collect() } },
@@ -184,7 +186,9 @@ private fun HowItWorksCard() {
             modifier = Modifier.padding(top = 8.dp),
         )
         Text(
-            "The answer is advice, not state: the router stays the source of truth.",
+            "The answer includes a diagnosis and a prioritized repair plan. Review every step: " +
+                "commands are advice only, are never run by the app, and changes must be checked " +
+                "before you choose to copy them.",
             style = sans(10.5f, 500, Wrt.TextDim),
             modifier = Modifier.padding(top = 6.dp),
         )
@@ -726,17 +730,19 @@ private fun ModesCard(question: String, onPick: (String) -> Unit) {
     }
 }
 
-/** The collected state: the facts as chips, the payload on demand. */
+/** A privacy-first summary of the exact redacted payload, with the full text on demand. */
 @Composable
 private fun DataCard(
     store: AiStore,
+    settings: AiSettings,
+    question: String,
     showPayload: Boolean,
     onTogglePayload: () -> Unit,
     onReadAgain: () -> Unit,
 ) {
     Card {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionLabel("ROUTER STATE", size = 9.5f, tracking = 0.14)
+            SectionLabel("DATA & PRIVACY REVIEW", size = 9.5f, tracking = 0.14)
             FlexSpacer()
             if (store.collecting) {
                 Box(Modifier.size(7.dp).background(Wrt.Accent, CircleShape))
@@ -769,6 +775,45 @@ private fun DataCard(
                     )
                 }
             }
+            val includedSections = snap.sections.filterValues { it.isNotBlank() }.keys
+            val redactedSecrets = snap.sections.values.sumOf {
+                Regex("<redacted>").findAll(it).count()
+            }
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp)
+                    .border(1.dp, Wrt.BorderHair, RoundedCornerShape(10.dp))
+                    .background(Wrt.BgCode, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 11.dp, vertical = 10.dp),
+            ) {
+                Text("WHAT WILL BE SENT", style = mono(9f, 650, Wrt.TextDim))
+                Text(
+                    "${includedSections.size} data groups: ${includedSections.joinToString(", ")}",
+                    style = sans(10.5f, 500, Wrt.TextSecondary),
+                    modifier = Modifier.padding(top = 5.dp),
+                )
+                Text(
+                    if (redactedSecrets > 0) {
+                        "$redactedSecrets password/key value(s) masked on this device."
+                    } else {
+                        "Password/key values are checked and masked on this device."
+                    },
+                    style = sans(10.5f, 550, Wrt.Green),
+                    modifier = Modifier.padding(top = 5.dp),
+                )
+                Text(
+                    "Network details such as IP addresses, device names, and Wi-Fi names may " +
+                        "still appear in the preview.",
+                    style = sans(10f, 450, Wrt.Amber),
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+                Text(
+                    "Destination: ${settings.baseUrl.trim().trimEnd('/')}  ·  Model: ${settings.model}",
+                    style = mono(9f, 500, Wrt.TextTertiary),
+                    modifier = Modifier.padding(top = 7.dp),
+                )
+            }
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -777,7 +822,7 @@ private fun DataCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    if (showPayload) "Hide what would be sent" else "See exactly what would be sent",
+                    if (showPayload) "Hide exact send preview" else "Review exact data before sending",
                     style = sans(11f, 600, Wrt.Accent),
                 )
                 FlexSpacer()
@@ -799,7 +844,7 @@ private fun DataCard(
                         .verticalScroll(rememberScrollState())
                         .padding(horizontal = 11.dp, vertical = 9.dp),
                 ) {
-                    Text(store.buildPayload(""), style = mono(9f, 500, Wrt.TextSecondary))
+                    Text(store.buildPayload(question), style = mono(9f, 500, Wrt.TextSecondary))
                 }
             }
         }
@@ -867,7 +912,7 @@ private fun AnswerCard(store: AiStore, text: String) {
     val clipboard = LocalClipboardManager.current
     Card {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionLabel("THE ANSWER", size = 9.5f, tracking = 0.14)
+            SectionLabel("DIAGNOSIS & REPAIR PLAN", size = 9.5f, tracking = 0.14)
             FlexSpacer()
             if (store.analyzing) {
                 Box(Modifier.size(7.dp).background(Wrt.Accent, CircleShape))

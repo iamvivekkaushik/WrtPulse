@@ -105,9 +105,12 @@ class AiPromptTest {
         assertTrue(AiPrompt.SYSTEM.contains("CONFIDENCE:"))
         assertTrue(AiPrompt.SYSTEM.contains("FINDINGS:"))
         assertTrue(AiPrompt.SYSTEM.contains("ROOT CAUSE:"))
-        assertTrue(AiPrompt.SYSTEM.contains("ADVICE:"))
+        assertTrue(AiPrompt.SYSTEM.contains("SOLUTION PLAN:"))
         assertTrue(AiPrompt.SYSTEM.contains("VALIDATION:"))
         assertTrue(AiPrompt.SYSTEM.contains("VERIFY FIRST"))
+        assertTrue(AiPrompt.SYSTEM.contains("does not execute your commands"))
+        assertTrue(AiPrompt.SYSTEM.contains("do not guess interface"))
+        assertTrue(AiPrompt.SYSTEM.contains("rollback"))
         assertFalse(AiPrompt.SYSTEM.contains("```"))
     }
 
