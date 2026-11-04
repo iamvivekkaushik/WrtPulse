@@ -198,7 +198,14 @@ private fun WrtPulseApp() {
     }
     // The AI analysis reads the router on open — same read-only bargain — and sends nothing
     // without a press on its own screen.
-    val aiStore = remember(session) { session?.let { com.vivekkaushik.wrtpulse.data.AiStore(it) } }
+    val aiStore = remember(session) {
+        session?.let {
+            com.vivekkaushik.wrtpulse.data.AiStore(
+                it,
+                historyDao = WrtRuntime.db.aiAnalysisLogs(),
+            )
+        }
+    }
     // The provider settings outlive the store: the endpoint and model sit in prefs, the API
     // key is sealed with the app's keystore like a router password, so a router switch does
     // not silently forget either.

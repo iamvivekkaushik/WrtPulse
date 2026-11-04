@@ -7,7 +7,11 @@ import com.vivekkaushik.wrtpulse.net.SshClient
 import com.vivekkaushik.wrtpulse.net.SshConnection
 import com.vivekkaushik.wrtpulse.net.SshTarget
 import com.vivekkaushik.wrtpulse.ops.HealthScore
+import com.vivekkaushik.wrtpulse.db.AiAnalysisLog
+import com.vivekkaushik.wrtpulse.db.AiAnalysisLogDao
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -29,6 +33,7 @@ class AiStoreTest {
     private fun store(
         scripted: String = "VERDICT: healthy.",
         deltas: List<String> = listOf("VERDICT:", " healthy."),
+        historyDao: AiAnalysisLogDao? = null,
     ): Scripted {
         val sent = mutableListOf<String>()
         val fake = { settings: AiSettings, system: String, user: String, onDelta: (String) -> Unit ->
@@ -37,7 +42,31 @@ class AiStoreTest {
             scripted
         }
         val session = RouterSession(SshTarget("t"), unusedClient, { error("unused") })
-        return Scripted(AiStore(session, fake), sent)
+        return Scripted(AiStore(session, fake, historyDao), sent)
+    }
+
+    private class RecordingHistoryDao : AiAnalysisLogDao {
+        val saved = mutableListOf<AiAnalysisLog>()
+        var trimmedTo: Int? = null
+        override fun forRouter(identity: String): Flow<List<AiAnalysisLog>> =
+            flowOf(saved.filter { it.routerIdentity == identity }.sortedByDescending { it.createdAtEpochMs })
+        override suspend fun insert(log: AiAnalysisLog): Long {
+            saved += log.copy(id = (saved.size + 1).toLong())
+            return saved.last().id
+        }
+        override suspend fun delete(id: Long, identity: String) {
+            saved.removeAll { it.id == id && it.routerIdentity == identity }
+        }
+        override suspend fun deleteForRouter(identity: String) {
+            saved.removeAll { it.routerIdentity == identity }
+        }
+        override suspend fun trim(identity: String, limit: Int) {
+            trimmedTo = limit
+            val keep = saved.filter { it.routerIdentity == identity }
+                .sortedByDescending { it.createdAtEpochMs }
+                .take(limit).map { it.id }.toSet()
+            saved.removeAll { it.routerIdentity == identity && it.id !in keep }
+        }
     }
 
     private fun sections(): Map<String, String> = mapOf(
@@ -114,6 +143,24 @@ class AiStoreTest {
         )
         assertNull(s.error)
         assertFalse(s.analyzing)
+    }
+
+    @Test
+    fun `completed analysis is saved locally with metadata and retention limit`() = runBlocking {
+        val dao = RecordingHistoryDao()
+        val (s, _) = store(historyDao = dao)
+        s.ingest(sections())
+        s.analyze(AiSettings(model = "test-model", apiKey = "must-not-be-saved"), "why is it slow?")
+
+        val saved = dao.saved.single()
+        assertEquals("t:22", saved.routerIdentity)
+        assertEquals("t", saved.routerHost)
+        assertEquals("why is it slow?", saved.question)
+        assertEquals("VERDICT: healthy.", saved.answer)
+        assertEquals("test-model", saved.model)
+        assertEquals(s.findings.size, saved.findingCount)
+        assertEquals(50, dao.trimmedTo)
+        assertEquals(saved, s.history.single())
     }
 
     @Test

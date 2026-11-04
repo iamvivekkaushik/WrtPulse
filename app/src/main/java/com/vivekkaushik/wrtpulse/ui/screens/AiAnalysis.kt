@@ -95,7 +95,10 @@ fun AiAnalysisScreen(
 
     // One read on arrival, like every other screen: a snapshot the user has not asked to
     // refresh is exactly as stale as the last time they looked at it.
-    LaunchedEffect(store) { if (store?.snapshot == null) store?.collect() }
+    LaunchedEffect(store) {
+        if (store?.snapshot == null) store?.collect()
+        store?.loadHistory()
+    }
 
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         FormTopBar("AI analysis", onBack)
@@ -158,6 +161,16 @@ fun AiAnalysisScreen(
             }
             store.answer?.let { text ->
                 item { AnswerCard(store, text) }
+            }
+            item {
+                AnalysisHistoryCard(
+                    store = store,
+                    onOpen = { entry ->
+                        question = entry.question
+                        store.showSavedAnswer(entry.answer)
+                    },
+                    onDelete = { id -> scope.launch { store.deleteHistory(id) } },
+                )
             }
             item {
                 ExportCard(
@@ -931,6 +944,79 @@ private fun AnswerCard(store: AiStore, text: String) {
         AnswerText(text)
         if (!store.analyzing) {
             CommandsSection(text)
+        }
+    }
+}
+
+@Composable
+private fun AnalysisHistoryCard(
+    store: AiStore,
+    onOpen: (com.vivekkaushik.wrtpulse.db.AiAnalysisLog) -> Unit,
+    onDelete: (Long) -> Unit,
+) {
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("SAVED ANALYSES", size = 9.5f, tracking = 0.14)
+            FlexSpacer()
+            MonoTag("LOCAL ROOM", color = Wrt.Green, border = Wrt.BorderHair)
+        }
+        Text(
+            "Completed answers are stored in this app's Room database for this router. The raw payload and API key are not saved.",
+            style = sans(10.5f, 450, Wrt.TextDim),
+            modifier = Modifier.padding(top = 7.dp),
+        )
+        if (store.historyError != null) {
+            Text(
+                store.historyError!!,
+                style = sans(10.5f, 500, Wrt.Red),
+                modifier = Modifier.padding(top = 7.dp),
+            )
+        }
+        if (store.history.isEmpty()) {
+            Text(
+                "No saved analyses yet. A completed AI response will appear here.",
+                style = sans(10.5f, 450, Wrt.TextSecondary),
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        } else {
+            store.history.forEach { entry ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                        .border(1.dp, Wrt.BorderHair, RoundedCornerShape(9.dp))
+                        .background(Wrt.BgCode, RoundedCornerShape(9.dp))
+                        .clickable { onOpen(entry) }
+                        .padding(horizontal = 10.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            entry.question.ifBlank { "Full router analysis" },
+                            style = sans(11f, 600, Wrt.TextSecondary),
+                            maxLines = 2,
+                        )
+                        Text(
+                            SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+                                .format(Date(entry.createdAtEpochMs)) +
+                                " · ${entry.model} · score ${entry.healthScore ?: "—"} · " +
+                                "${entry.findingCount} finding(s)",
+                            style = mono(8.5f, 500, Wrt.TextTertiary),
+                            modifier = Modifier.padding(top = 4.dp),
+                            maxLines = 2,
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Icon(
+                        WrtIcons.Trash,
+                        "Delete saved analysis",
+                        Modifier
+                            .size(17.dp)
+                            .clickable { onDelete(entry.id) },
+                        tint = Wrt.TextDim,
+                    )
+                }
+            }
         }
     }
 }

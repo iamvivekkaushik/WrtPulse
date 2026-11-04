@@ -3,6 +3,8 @@ package com.vivekkaushik.wrtpulse.data
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.vivekkaushik.wrtpulse.db.AiAnalysisLog
+import com.vivekkaushik.wrtpulse.db.AiAnalysisLogDao
 import com.vivekkaushik.wrtpulse.net.AiChat
 import com.vivekkaushik.wrtpulse.net.AiError
 import com.vivekkaushik.wrtpulse.net.AiSettings
@@ -19,6 +21,7 @@ import com.vivekkaushik.wrtpulse.ops.Parsers
 import com.vivekkaushik.wrtpulse.ops.TemporalStats
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import org.json.JSONObject
 
 /**
@@ -69,6 +72,7 @@ data class AiSnapshot(
 class AiStore(
     private val session: RouterSession,
     private val complete: suspend (AiSettings, String, String, (String) -> Unit) -> String = AiChat::complete,
+    private val historyDao: AiAnalysisLogDao? = null,
 ) {
     var snapshot by mutableStateOf<AiSnapshot?>(null); private set
     var collecting by mutableStateOf(false); private set
@@ -78,6 +82,9 @@ class AiStore(
     var answer by mutableStateOf<String?>(null); private set
 
     var error by mutableStateOf<String?>(null); private set
+    var history by mutableStateOf<List<AiAnalysisLog>>(emptyList()); private set
+    var historyError by mutableStateOf<String?>(null); private set
+    private val historyIdentity: String get() = session.target.pinScope
 
     /** The 60-second run. [sampleStatus] is the live line the card shows while it runs. */
     var sampling by mutableStateOf(false); private set
@@ -244,12 +251,69 @@ class AiStore(
         try {
             val payload = buildPayload(question)
             answer = complete(settings, AiPrompt.SYSTEM, payload) { delta -> answer += delta }
+            persistAnswer(settings, question)
         } catch (e: CancellationException) {
             throw e
         } catch (e: AiError) {
             error = e.message
         } finally {
             analyzing = false
+        }
+    }
+
+    /** Loads this router's saved analyses; provider credentials and raw payloads are never stored. */
+    suspend fun loadHistory() {
+        val dao = historyDao ?: return
+        historyError = null
+        runCatching { dao.forRouter(historyIdentity).first() }
+            .onSuccess { history = it }
+            .onFailure { historyError = "Couldn't load saved analyses: ${it.message}" }
+    }
+
+    suspend fun deleteHistory(id: Long) {
+        val dao = historyDao ?: return
+        runCatching {
+            dao.delete(id, historyIdentity)
+            loadHistory()
+        }.onFailure { historyError = "Couldn't delete this analysis: ${it.message}" }
+    }
+
+    suspend fun clearHistory() {
+        val dao = historyDao ?: return
+        runCatching {
+            dao.deleteForRouter(historyIdentity)
+            loadHistory()
+        }.onFailure { historyError = "Couldn't clear analysis history: ${it.message}" }
+    }
+
+    /** Displays an archived answer in the normal answer card without contacting the provider. */
+    fun showSavedAnswer(savedAnswer: String) {
+        answer = savedAnswer
+        error = null
+    }
+
+    private suspend fun persistAnswer(settings: AiSettings, question: String) {
+        val dao = historyDao ?: return
+        val result = answer?.takeIf { it.isNotBlank() } ?: return
+        historyError = null
+        runCatching {
+            dao.insert(
+                AiAnalysisLog(
+                    routerIdentity = historyIdentity,
+                    routerHost = session.target.host,
+                    question = question.trim(),
+                    answer = result,
+                    model = settings.model,
+                    createdAtEpochMs = System.currentTimeMillis(),
+                    healthScore = health?.overall,
+                    findingCount = findings.size,
+                ),
+            )
+            dao.trim(historyIdentity, HISTORY_LIMIT)
+            loadHistory()
+        }.onFailure {
+            // A local storage failure must not discard the completed result from the screen.
+            historyError = "Analysis completed, but couldn't save it locally: ${it.message}"
         }
     }
 
@@ -265,6 +329,7 @@ class AiStore(
             .count()
 
     private companion object {
+        const val HISTORY_LIMIT = 50
         val MAC = Regex("""\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b""")
     }
 }
