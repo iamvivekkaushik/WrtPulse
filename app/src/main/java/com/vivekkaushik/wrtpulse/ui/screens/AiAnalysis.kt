@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.vivekkaushik.wrtpulse.data.AiReport
 import com.vivekkaushik.wrtpulse.data.AiReportPdf
+import com.vivekkaushik.wrtpulse.data.AiHistoryJson
 import com.vivekkaushik.wrtpulse.data.AiStore
 import com.vivekkaushik.wrtpulse.net.AiChat
 import com.vivekkaushik.wrtpulse.net.AiError
@@ -1131,13 +1132,14 @@ private fun ExportCard(
     onHideSensitive: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
-    val snap = store.snapshot ?: return
+    val snap = store.snapshot
     Card {
         SectionLabel("REPORT", size = 9.5f, tracking = 0.14)
         Text(
             "Health, findings, the sample and the answer, in one file: Markdown for trackers, " +
-                "plain text for terminals, PDF for people. Secrets were already redacted before " +
-                "analysis; the toggle below also hides MAC and public addresses for sharing.",
+                "plain text for terminals, PDF for people. Export all saved analyses for this " +
+                "router as JSON below. The JSON omits the raw payload and API key. The toggle also " +
+                "hides MAC and public addresses for sharing.",
             style = sans(11f, 450, Wrt.TextSecondary),
             modifier = Modifier.padding(top = 8.dp),
         )
@@ -1162,16 +1164,25 @@ private fun ExportCard(
             Spacer(Modifier.width(8.dp))
             Text("Hide MAC & public addresses", style = sans(11f, 550))
         }
-        Row(Modifier.padding(top = 10.dp)) {
-            listOf(
-                "Markdown" to ReportFormat.MD,
-                "Plain text" to ReportFormat.TXT,
-                "PDF" to ReportFormat.PDF,
-            ).forEach { (label, format) ->
-                Box(Modifier.weight(1f)) {
-                    GhostButton(label) { exportReport(context, store, question, hideSensitive, format) }
+        if (snap != null) {
+            Row(Modifier.padding(top = 10.dp)) {
+                listOf(
+                    "Markdown" to ReportFormat.MD,
+                    "Plain text" to ReportFormat.TXT,
+                    "PDF" to ReportFormat.PDF,
+                ).forEach { (label, format) ->
+                    Box(Modifier.weight(1f)) {
+                        GhostButton(label) { exportReport(context, store, question, hideSensitive, format) }
+                    }
                 }
             }
+        }
+        Spacer(Modifier.height(8.dp))
+        GhostButton(
+            if (store.history.isEmpty()) "No saved analyses to export"
+            else "Export ${store.history.size} saved analysis(es) as JSON",
+        ) {
+            if (store.history.isNotEmpty()) exportAiHistory(context, store.history, hideSensitive)
         }
     }
 }
@@ -1214,6 +1225,27 @@ private fun exportReport(
         addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
     context.startActivity(android.content.Intent.createChooser(send, "Share the router analysis"))
+}
+
+/** Creates a JSON history file and offers it to Android's share sheet for saving or sharing. */
+private fun exportAiHistory(
+    context: android.content.Context,
+    entries: List<com.vivekkaushik.wrtpulse.db.AiAnalysisLog>,
+    hideSensitive: Boolean,
+) {
+    val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+    val file = File(context.filesDir, "reports/WrtPulse-ai-history-$stamp.json").apply {
+        parentFile?.mkdirs()
+        writeText(AiHistoryJson.encode(entries, hideSensitive))
+    }
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+        type = "application/json"
+        putExtra(android.content.Intent.EXTRA_STREAM, uri)
+        putExtra(android.content.Intent.EXTRA_SUBJECT, "WrtPulse AI analysis history")
+        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(android.content.Intent.createChooser(send, "Share AI history JSON"))
 }
 
 /**

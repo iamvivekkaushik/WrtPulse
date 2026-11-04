@@ -12,6 +12,7 @@ import com.vivekkaushik.wrtpulse.db.AiAnalysisLogDao
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
+import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -159,6 +160,7 @@ class AiStoreTest {
         assertEquals("VERDICT: healthy.", saved.answer)
         assertEquals("test-model", saved.model)
         assertEquals(s.findings.size, saved.findingCount)
+        assertEquals(s.findings.size, JSONArray(saved.findingsJson).length())
         assertEquals(50, dao.trimmedTo)
         assertEquals(saved, s.history.single())
     }

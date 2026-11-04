@@ -22,6 +22,7 @@ import com.vivekkaushik.wrtpulse.ops.TemporalStats
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -307,6 +308,18 @@ class AiStore(
                     createdAtEpochMs = System.currentTimeMillis(),
                     healthScore = health?.overall,
                     findingCount = findings.size,
+                    findingsJson = JSONArray().apply {
+                        findings.forEach { finding ->
+                            put(
+                                JSONObject()
+                                    .put("severity", finding.severity.name)
+                                    .put("domain", finding.domain.name)
+                                    .put("title", finding.title)
+                                    .put("evidence", finding.evidence)
+                                    .put("verifyCommand", finding.command),
+                            )
+                        }
+                    }.toString(),
                 ),
             )
             dao.trim(historyIdentity, HISTORY_LIMIT)

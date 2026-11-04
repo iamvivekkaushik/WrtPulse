@@ -1,6 +1,7 @@
 package com.vivekkaushik.wrtpulse.db
 
 import androidx.room.Dao
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Insert
 import androidx.room.Index
@@ -23,6 +24,7 @@ data class AiAnalysisLog(
     val createdAtEpochMs: Long,
     val healthScore: Int?,
     val findingCount: Int,
+    @ColumnInfo(defaultValue = "'[]'") val findingsJson: String = "[]",
 )
 
 @Dao

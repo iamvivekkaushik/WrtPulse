@@ -198,7 +198,7 @@ interface RouterDao {
     suspend fun setGroup(id: Long, group: String?)
 }
 
-@Database(entities = [RouterEntity::class, ClientName::class, AiAnalysisLog::class], version = 8, exportSchema = false)
+@Database(entities = [RouterEntity::class, ClientName::class, AiAnalysisLog::class], version = 9, exportSchema = false)
 abstract class WrtDb : RoomDatabase() {
     abstract fun routers(): RouterDao
     abstract fun clientNames(): ClientNameDao
@@ -286,6 +286,15 @@ abstract class WrtDb : RoomDatabase() {
             }
         }
 
+        /** Preserve existing saved answers; older rows simply have no captured local findings. */
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE ai_analysis_logs ADD COLUMN findingsJson TEXT NOT NULL DEFAULT '[]'"
+                )
+            }
+        }
+
         fun build(context: Context): WrtDb =
             Room.databaseBuilder(context, WrtDb::class.java, "wrtpulse.db")
                 .addMigrations(
@@ -296,6 +305,7 @@ abstract class WrtDb : RoomDatabase() {
                     MIGRATION_5_6,
                     MIGRATION_6_7,
                     MIGRATION_7_8,
+                    MIGRATION_8_9,
                 )
                 .build()
     }
