@@ -1,0 +1,1 @@
+• Smaller, faster app: the SSH and crypto stack is now fully optimized by the release compiler, trimming download size and speeding up connections.
