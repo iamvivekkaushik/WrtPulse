@@ -242,6 +242,11 @@ pinned. Where an outside authority exists it is used: key fingerprints are check
 Kotlin 2.2.10 · AGP 9.4.0 · Compose BOM 2026.02.01 · Room 2.8.4 · minSdk 28 · targetSdk 36.
 SSH is JSch with BouncyCastle, which Android needs for ed25519.
 
+`./gradlew assembleRelease -PdebugSignedRelease` builds the same minified, resource-shrunk
+release APK signed with the debug key instead — what `apk-release.yml` publishes before the
+upload keystore is configured. The property is ignored whenever the release keystore is
+present, and without either the release build is still plain unsigned.
+
 ## Releasing
 
 Builds, tests and releases go through fastlane, and GitHub Actions calls the same lanes, so
@@ -269,8 +274,14 @@ With none of these set the release build is unsigned and the lane refuses — it
 produces something that cannot ship. `VERSION_NAME` and `VERSION_CODE` in the environment
 override the Gradle defaults.
 
-**CI.** `.github/workflows/ci.yml` runs `check` and uploads a debug APK on every push and pull
-request. `.github/workflows/release.yml` fires on a `v*` tag: it restores the keystore from
+**CI.** `.github/workflows/build.yml` runs the unit tests and uploads a debug APK on every push
+and pull request. `.github/workflows/apk-release.yml` publishes an **installable APK on GitHub
+Releases with no secrets required**: on every push to master (or a manual run) it runs the tests,
+builds the real release build type, and attaches it to the rolling `latest` release at
+`releases/latest` — release-signed when the `KEYSTORE_*` secrets exist, otherwise the same
+minified build signed with the debug key (`assembleRelease -PdebugSignedRelease`), which installs
+on any device. A manual run can publish under a different tag; `v*` tags are refused there, as
+they belong to release.yml. `.github/workflows/release.yml` fires on a `v*` tag: it restores the keystore from
 `KEYSTORE_BASE64` (`base64 -i release.jks`), reads `versionName` and `versionCode` from
 `app/build.gradle.kts` — refusing a tag that disagrees with the name, or a code that did not move
 since the previous tag — builds the signed AAB and APK, and attaches both to a GitHub Release

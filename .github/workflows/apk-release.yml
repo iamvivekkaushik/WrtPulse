@@ -1,0 +1,192 @@
+name: APK Release
+
+# An installable APK on GitHub Releases with no secrets required. Every push to master (or a
+# manual run) builds the real release build type — the same minified, resource-shrunk APK the
+# store pipeline ships — after the unit tests pass, and publishes it under the rolling `latest`
+# tag: https://github.com/NassarAlshabi1/WrtPulse/releases/tag/latest. The asset is always
+# named WrtPulse-latest.apk, so the download URL is stable and the file is replaced, not
+# accumulated. When the four KEYSTORE_* secrets are configured the APK is release-signed;
+# without them `assembleRelease -PdebugSignedRelease` signs it with the debug key, which
+# installs on any device but is not the upload key. Tagged `v*` releases stay in release.yml
+# (AAB + Play); a dispatch tag starting with `v` is refused here so the two never collide.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish under (default: latest; not v* — those belong to release.yml)"
+        required: false
+        default: "latest"
+      prerelease:
+        description: "Mark the release as a pre-release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+# Two master pushes in a row would fight over the same rolling release; the newer one wins.
+concurrency:
+  group: apk-release
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: APK release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || 'latest' }}
+      PRERELEASE: ${{ github.event_name != 'workflow_dispatch' || inputs.prerelease }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Release tag guard
+        run: |
+          if [[ "$TAG" == v* ]]; then
+            echo "::error::Refusing to publish under '$TAG': v* tags are owned by release.yml."
+            exit 1
+          fi
+
+      # Same version read as release.yml: the tag does not set the version, it only has to
+      # agree with app/build.gradle.kts, and the notes come from the changelog Play gets.
+      - name: Version from build.gradle.kts
+        id: version
+        run: |
+          name=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
+          code=$(grep -oP 'versionCode\s*=\s*\K[0-9]+' app/build.gradle.kts | head -1)
+          if [[ -z "$name" || -z "$code" ]]; then
+            echo "::error::Could not read versionName/versionCode from app/build.gradle.kts."
+            exit 1
+          fi
+          notes="fastlane/metadata/android/en-US/changelogs/$code.txt"
+          [[ -f "$notes" ]] || notes="fastlane/metadata/android/en-US/changelogs/default.txt"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "notes=$notes" >> "$GITHUB_OUTPUT"
+          echo "Building APK for $name ($code), notes from $notes"
+
+      # No APK leaves this workflow from a red suite: build.yml tests every push too, but a
+      # manually dispatched run can be a single commit that never saw it.
+      - name: Unit tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace
+
+      - name: Build release APK
+        id: build
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$KEYSTORE_BASE64" && -n "$KEYSTORE_PASSWORD" && -n "$KEY_ALIAS" && -n "$KEY_PASSWORD" ]]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            export KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
+            ./gradlew :app:assembleRelease --stacktrace
+            mode="release-signed"
+          else
+            ./gradlew :app:assembleRelease -PdebugSignedRelease --stacktrace
+            mode="debug-signed"
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "APK is $mode."
+
+      # Signing is asserted rather than assumed, as in release.yml: an unsigned APK would
+      # otherwise ship to the release page and fail to install on every device that taps it.
+      - name: Verify the APK is signed, then package it
+        id: package
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/release/*.apk)
+          if (( ${#apks[@]} != 1 )); then
+            echo "::error::Expected exactly one APK; got ${#apks[@]}."
+            exit 1
+          fi
+          apk="${apks[0]}"
+          if [[ "$apk" == *unsigned* ]]; then
+            echo "::error::Unsigned artifact: $apk"
+            exit 1
+          fi
+
+          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1 || true)
+          if [[ -z "$apksigner" ]]; then
+            echo "::error::apksigner not found under $ANDROID_HOME/build-tools."
+            exit 1
+          fi
+          "$apksigner" verify --print-certs "$apk" >/dev/null
+
+          # Fixed asset name: the rolling release replaces WrtPulse-latest.apk on every run
+          # instead of accumulating one file per version.
+          asset="WrtPulse-${TAG}.apk"
+          cp "$apk" "$RUNNER_TEMP/$asset"
+          echo "asset=$RUNNER_TEMP/$asset" >> "$GITHUB_OUTPUT"
+
+          body="$RUNNER_TEMP/release_body.md"
+          {
+            echo "WrtPulse $VERSION_NAME — APK built from ${GITHUB_SHA:0:7} on ${GITHUB_REF_NAME}."
+            if [[ "${{ steps.build.outputs.mode }}" == release-signed ]]; then
+              echo
+              echo "Signed with the release keystore, like a tagged release."
+            else
+              echo
+              echo "Signed with the **debug key** — installs on any device, but it is not the"
+              echo "upload keystore; a tagged release is the store-signed build."
+            fi
+            echo
+            echo "## Release notes"
+            cat "${{ steps.version.outputs.notes }}"
+          } > "$body"
+          echo "body=$body" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wrtpulse-apk-${{ steps.version.outputs.name }}-${{ github.run_attempt }}
+          path: ${{ steps.package.outputs.asset }}
+          if-no-files-found: error
+          retention-days: 14
+
+      # The rolling tag has to follow master, or the release would point at the commit the
+      # first run happened to build. Force-moving it needs the same write permission the
+      # release below already uses; on a custom dispatch tag the release step creates it at
+      # HEAD instead, which is where the APK came from anyway.
+      - name: Move the rolling tag to this commit
+        if: env.TAG == 'latest'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f latest "$GITHUB_SHA"
+          git push --force origin refs/tags/latest
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: WrtPulse ${{ steps.version.outputs.name }} (${{ steps.version.outputs.code }}) APK
+          body_path: ${{ steps.package.outputs.body }}
+          prerelease: ${{ env.PRERELEASE }}
+          files: ${{ steps.package.outputs.asset }}
+
+      - name: Scrub the keystore from the runner
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"

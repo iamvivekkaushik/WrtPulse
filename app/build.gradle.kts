@@ -15,6 +15,13 @@ val keystoreProps = Properties().apply {
 fun secret(name: String): String? = System.getenv(name)?.takeIf { it.isNotBlank() } ?: keystoreProps.getProperty(name)
 val releaseStoreFile = secret("KEYSTORE_FILE")
 
+// `assembleRelease -PdebugSignedRelease` (what apk-release.yml runs in CI when no upload keystore
+// is configured) signs the release build with the debug key instead, so an installable APK
+// exists before signing is set up — same minified, shrunk build, debug-signed. The property is
+// ignored whenever the release keystore is present, and without either the build is still
+// plain unsigned, exactly as before.
+val debugSignedRelease = providers.gradleProperty("debugSignedRelease").isPresent
+
 android {
     namespace = "com.vivekkaushik.wrtpulse"
     compileSdk {
@@ -61,6 +68,7 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.findByName("release")
+                ?: if (debugSignedRelease) signingConfigs.getByName("debug") else null
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
