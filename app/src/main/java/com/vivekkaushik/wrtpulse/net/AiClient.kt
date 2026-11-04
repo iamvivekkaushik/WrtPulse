@@ -26,6 +26,9 @@ data class AiSettings(
     /** "{base}/chat/completions", tolerating a trailing slash on the configured base. */
     val endpoint: String get() = baseUrl.trim().trimEnd('/') + "/chat/completions"
 
+    /** "{base}/models", tolerating the same trailing slash — the list endpoint the dropdown reads. */
+    val modelsEndpoint: String get() = baseUrl.trim().trimEnd('/') + "/models"
+
     /**
      * Enough to attempt a call: base URL and model, plus a key — unless the endpoint is on
      * this network (Ollama, a self-hosted gateway), where "no key" is a valid configuration.
@@ -42,6 +45,14 @@ data class AiSettings(
         /** Google Gemini's official OpenAI-compatible Chat Completions endpoint. */
         const val GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
         const val GEMINI_MODEL = "gemini-3.8-flash"
+
+        /**
+         * OpenRouter's endpoint — one key, every provider behind it, the same OpenAI-compatible
+         * shapes. The auto model lets OpenRouter route the request; the dropdown the screen now
+         * builds from /models offers the 450+ concrete ids the same key can name instead.
+         */
+        const val OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+        const val OPENROUTER_MODEL = "openrouter/auto"
 
         /**
          * Ollama's OpenAI-compatible endpoint, on the default port. The host is a placeholder —
@@ -89,6 +100,19 @@ object AiChat {
     private const val CONNECT_TIMEOUT_MS = 15_000
     /** Local models can think for a while before their first token; remote ones stream fast. */
     private const val READ_TIMEOUT_MS = 300_000
+    /** The model list is small and answers fast; a slow one is a broken one. */
+    private const val MODELS_READ_TIMEOUT_MS = 20_000
+
+    /** The one transport rule every call shares: plain http only ever to a host on this network. */
+    private fun requireSecureTransport(url: URL) {
+        if (url.protocol.equals("http", true) && !AiSettings.isLocalHost(url.host)) {
+            throw AiError(
+                "Android blocks plain http to protect the API key in transit — and so does this " +
+                    "app, even where Android would now allow it. Use an https endpoint, or an " +
+                    "http one on your own network (Ollama).",
+            )
+        }
+    }
 
     /** The POST body for /chat/completions, streaming, low temperature — diagnostics, not prose. */
     fun buildRequestBody(settings: AiSettings, system: String, user: String): String {
@@ -132,18 +156,12 @@ object AiChat {
         system: String,
         user: String,
         onDelta: (String) -> Unit,
-    ): String {
+    ): String = withContext(Dispatchers.IO) {
         val body = buildRequestBody(settings, system, user).toByteArray(StandardCharsets.UTF_8)
         // Plain http is fine to a host on this network (Ollama's default), and nowhere else:
         // the only credential this app ever puts on the wire is the provider key.
         val url = URL(settings.endpoint)
-        if (url.protocol.equals("http", true) && !AiSettings.isLocalHost(url.host)) {
-            throw AiError(
-                "Android blocks plain http to protect the API key in transit — and so does this " +
-                    "app, even where Android would now allow it. Use an https endpoint, or an " +
-                    "http one on your own network (Ollama).",
-            )
-        }
+        requireSecureTransport(url)
         val connection = try {
             (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
@@ -157,7 +175,7 @@ object AiChat {
         } catch (e: Exception) {
             throw AiError("That endpoint is not a URL this app can open: ${settings.endpoint}", e)
         }
-        return try {
+        try {
             connection.outputStream.use { it.write(body) }
             val code = connection.responseCode
             if (code != 200) throw AiError(readError(connection, code, settings))
@@ -189,6 +207,84 @@ object AiChat {
             throw AiError(friendly(e, settings), e)
         } finally {
             connection.disconnect()
+        }
+    }
+
+    /**
+     * The ids in a GET /models answer: OpenAI, OpenRouter, Gemini's compatibility layer and
+     * Ollama all answer `{"data":[{"id":…}]}`; some self-hosted gateways answer a bare array
+     * or a `models` key instead, so all three shapes are read. Ids are de-duplicated and
+     * sorted, so the dropdown the operator sees is stable however the provider ordered it —
+     * and an unrecognised body answers empty rather than throwing, because a model id can
+     * always be typed by hand.
+     */
+    fun parseModelsBody(body: String): List<String> {
+        val trimmed = body.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        val array = when {
+            trimmed.startsWith("[") -> runCatching { JSONArray(trimmed) }.getOrNull()
+            else -> runCatching { JSONObject(trimmed) }.getOrNull()
+                ?.let { it.optJSONArray("data") ?: it.optJSONArray("models") }
+        } ?: return emptyList()
+        val ids = mutableListOf<String>()
+        for (i in 0 until array.length()) {
+            val id = array.optJSONObject(i)?.optString("id")?.trim().orEmpty()
+            if (id.isNotEmpty() && id != "null") ids += id
+        }
+        return ids.distinct().sorted()
+    }
+
+    /**
+     * The provider's own model list, fetched so the screen can offer it as a dropdown instead
+     * of asking the operator to know an id by heart. Same transport, same key rules and the
+     * same plain-http refusal as [complete]; a provider that implements no /models endpoint
+     * answers 404 and the screen falls back to the hand-typed field it always was.
+     */
+    suspend fun listModels(settings: AiSettings): List<String> = withContext(Dispatchers.IO) {
+        val url = URL(settings.modelsEndpoint)
+        requireSecureTransport(url)
+        val connection = try {
+            (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = CONNECT_TIMEOUT_MS
+                readTimeout = MODELS_READ_TIMEOUT_MS
+                AiSettings.authorization(settings.apiKey)?.let { setRequestProperty("Authorization", it) }
+                setRequestProperty("Accept", "application/json")
+            }
+        } catch (e: Exception) {
+            throw AiError("That endpoint is not a URL this app can open: ${settings.modelsEndpoint}", e)
+        }
+        try {
+            val code = connection.responseCode
+            if (code != 200) throw AiError(modelsError(connection, code, settings))
+            val body = connection.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+            parseModelsBody(body).ifEmpty {
+                throw AiError("The provider listed no models at ${settings.modelsEndpoint}.")
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: AiError) {
+            throw e
+        } catch (e: IOException) {
+            throw AiError(friendly(e, settings), e)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    /** What a failed GET /models said — same phrasing as the chat errors, minus the stream. */
+    private fun modelsError(connection: HttpURLConnection, code: Int, settings: AiSettings): String {
+        val provider = runCatching {
+            connection.errorStream?.bufferedReader()?.use { it.readText() }?.let { text ->
+                JSONObject(text).optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
+            }
+        }.getOrNull()
+        return when {
+            code == 401 || code == 403 -> "The provider rejected the API key ($code)."
+            code == 404 -> "There is no models endpoint at ${settings.modelsEndpoint} — type the model id by hand."
+            code == 429 -> "The provider is rate-limiting this key (429)."
+            provider != null -> "The provider answered $code: $provider"
+            else -> "The provider answered $code."
         }
     }
 

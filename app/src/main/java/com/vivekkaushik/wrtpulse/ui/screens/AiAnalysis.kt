@@ -21,6 +21,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -42,6 +44,8 @@ import androidx.core.content.FileProvider
 import com.vivekkaushik.wrtpulse.data.AiReport
 import com.vivekkaushik.wrtpulse.data.AiReportPdf
 import com.vivekkaushik.wrtpulse.data.AiStore
+import com.vivekkaushik.wrtpulse.net.AiChat
+import com.vivekkaushik.wrtpulse.net.AiError
 import com.vivekkaushik.wrtpulse.net.AiSettings
 import com.vivekkaushik.wrtpulse.ops.AiPrompt
 import com.vivekkaushik.wrtpulse.ops.CommandSafety
@@ -56,8 +60,11 @@ import com.vivekkaushik.wrtpulse.ui.WrtIcons
 import com.vivekkaushik.wrtpulse.ui.mono
 import com.vivekkaushik.wrtpulse.ui.sans
 import com.vivekkaushik.wrtpulse.ui.theme.Wrt
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -198,15 +205,73 @@ private fun ProviderCard(
     var key by remember(settings) { mutableStateOf(settings.apiKey) }
     var revealKey by remember { mutableStateOf(false) }
 
+    // The model list belongs to the provider, so it is remembered per endpoint+key and left
+    // behind when either changes — a list from the wrong provider would be a lie.
+    var models by remember(endpoint, key) { mutableStateOf<List<String>>(emptyList()) }
+    var modelsLoading by remember(endpoint, key) { mutableStateOf(false) }
+    var modelsNote by remember(endpoint, key) { mutableStateOf<String?>(null) }
+    var modelsError by remember(endpoint, key) { mutableStateOf<String?>(null) }
+    var modelsTick by remember(endpoint, key) { mutableStateOf(0) }
+
+    // The list loads itself: as soon as the provider can answer it — a base URL that parses,
+    // and a key unless the endpoint is on this network — the dropdown fills without a press.
+    // The 400ms pause keeps the fetch off every keystroke; a restart cancels the run before it.
+    LaunchedEffect(endpoint, key, modelsTick) {
+        val trimmed = endpoint.trim()
+        val url = runCatching { URL(trimmed) }.getOrNull()
+        val local = AiSettings.isLocalHost(url?.host.orEmpty())
+        when {
+            trimmed.isEmpty() || url == null -> modelsNote = null
+            url.protocol.equals("http", true) && !local -> modelsNote = null
+            key.isBlank() && !local ->
+                modelsNote = "Add the API key and the model list loads by itself."
+            else -> {
+                delay(400)
+                modelsLoading = true
+                modelsError = null
+                modelsNote = "loading the model list from ${url.host}…"
+                try {
+                    models = AiChat.listModels(
+                        AiSettings(baseUrl = trimmed, model = "probe", apiKey = key.trim()),
+                    )
+                    modelsNote = "${models.size} models from ${url.host} — pick one or type any id."
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: AiError) {
+                    models = emptyList()
+                    modelsError = "The list did not load: ${e.message}"
+                    modelsNote = null
+                } finally {
+                    modelsLoading = false
+                }
+            }
+        }
+    }
+
     Card {
         SectionLabel("AI PROVIDER", size = 9.5f, tracking = 0.14)
         Text(
-            "Any OpenAI-compatible chat endpoint: OpenAI, Gemini, OpenRouter, Groq, your own " +
+            "Any OpenAI-compatible chat endpoint: OpenAI, OpenRouter, Gemini, Groq, your own " +
                 "gateway, or an Ollama server on your LAN — nothing leaves the network with that " +
-                "one. The key is sealed with the phone's keystore, like a router password.",
+                "one. The model list below loads straight from the provider. The key is sealed " +
+                "with the phone's keystore, like a router password.",
             style = sans(11f, 450, Wrt.TextSecondary),
             modifier = Modifier.padding(top = 8.dp),
         )
+        Row(Modifier.padding(top = 8.dp)) {
+            Box(Modifier.weight(1f).padding(end = 4.dp)) {
+                GhostButton("Use OpenAI") {
+                    endpoint = AiSettings.DEFAULT_BASE_URL
+                    model = AiSettings.DEFAULT_MODEL
+                }
+            }
+            Box(Modifier.weight(1f).padding(start = 4.dp)) {
+                GhostButton("Use OpenRouter") {
+                    endpoint = AiSettings.OPENROUTER_BASE_URL
+                    model = AiSettings.OPENROUTER_MODEL
+                }
+            }
+        }
         Row(Modifier.padding(top = 8.dp)) {
             Box(Modifier.weight(1f).padding(end = 4.dp)) {
                 GhostButton("Use Gemini") {
@@ -233,7 +298,26 @@ private fun ProviderCard(
         FieldLabel("BASE URL")
         FormTextField(endpoint, { endpoint = it })
         FieldLabel("MODEL")
-        FormTextField(model, { model = it })
+        ModelField(
+            value = model,
+            onValue = { model = it },
+            options = models,
+            loading = modelsLoading,
+            onRefresh = { modelsTick++ },
+        )
+        if (modelsError != null) {
+            Text(
+                modelsError!!,
+                style = sans(10f, 500, Wrt.Amber),
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        } else if (modelsNote != null) {
+            Text(
+                modelsNote!!,
+                style = sans(10f, 500, if (modelsLoading) Wrt.Accent else Wrt.TextDim),
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
         FieldLabel("API KEY")
         FormTextField(
             key,
@@ -264,6 +348,67 @@ private fun ProviderCard(
                     apiKey = key.trim(),
                 ),
             )
+        }
+    }
+}
+
+/**
+ * The model field: a text field that is also its own dropdown. The options come from the
+ * provider's own /models endpoint and filter to what is typed — with hundreds of ids behind
+ * OpenRouter the filter is what keeps the menu usable. Typing stays first-class: a gateway
+ * that lists no models, or one whose list failed to load, still takes a hand-typed id.
+ */
+@Composable
+private fun ModelField(
+    value: String,
+    onValue: (String) -> Unit,
+    options: List<String>,
+    loading: Boolean,
+    onRefresh: () -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        FormTextField(
+            value,
+            onValue,
+            trailing = {
+                Icon(
+                    WrtIcons.ChevronDown,
+                    if (options.isEmpty()) "load the model list" else "pick a model",
+                    Modifier.size(16.dp).clickable {
+                        if (options.isEmpty()) onRefresh()
+                        open = !open
+                    },
+                    tint = if (options.isEmpty()) Wrt.TextDim else Wrt.Accent,
+                )
+            },
+        )
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            val needle = value.trim()
+            val matching = options.filter { id ->
+                id != value && (needle.isEmpty() || id.contains(needle, ignoreCase = true))
+            }
+            if (matching.isEmpty()) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            if (loading) "loading the model list…" else "nothing matches — type the id by hand",
+                            style = sans(11f, 450, Wrt.TextDim),
+                        )
+                    },
+                    onClick = { open = false },
+                )
+            } else {
+                matching.forEach { id ->
+                    DropdownMenuItem(
+                        text = { Text(id, style = mono(12.5f, 500)) },
+                        onClick = {
+                            open = false
+                            onValue(id)
+                        },
+                    )
+                }
+            }
         }
     }
 }

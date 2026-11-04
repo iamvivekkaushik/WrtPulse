@@ -150,4 +150,58 @@ class AiClientTest {
         assertTrue(settings.isLocal)
         assertTrue(settings.configured)
     }
+
+    @Test
+    fun `OpenRouter preset points at the compatibility endpoint`() {
+        val settings = AiSettings(
+            baseUrl = AiSettings.OPENROUTER_BASE_URL,
+            model = AiSettings.OPENROUTER_MODEL,
+            apiKey = "sk-or-v1-x",
+        )
+        assertEquals("https://openrouter.ai/api/v1/chat/completions", settings.endpoint)
+        assertEquals("openrouter/auto", settings.model)
+        assertFalse(settings.isLocal)
+        assertTrue(settings.configured)
+    }
+
+    @Test
+    fun `the models endpoint tolerates trailing slashes like the chat endpoint`() {
+        assertEquals(
+            "https://openrouter.ai/api/v1/models",
+            AiSettings(baseUrl = "https://openrouter.ai/api/v1/").modelsEndpoint,
+        )
+        assertEquals(
+            "https://generativelanguage.googleapis.com/v1beta/openai/models",
+            AiSettings(baseUrl = AiSettings.GEMINI_BASE_URL).modelsEndpoint,
+        )
+    }
+
+    @Test
+    fun `parseModelsBody reads the shape OpenAI OpenRouter Gemini and Ollama share`() {
+        val body = """{"object":"list","data":[{"id":"gpt-4o-mini","object":"model"},{"id":"gpt-4o"}]}"""
+        assertEquals(listOf("gpt-4o", "gpt-4o-mini"), AiChat.parseModelsBody(body))
+    }
+
+    @Test
+    fun `parseModelsBody reads a bare array and a models key`() {
+        assertEquals(listOf("a", "b"), AiChat.parseModelsBody("""[{"id":"b"},{"id":"a"}]"""))
+        assertEquals(listOf("m"), AiChat.parseModelsBody("""{"models":[{"id":"m"}]}"""))
+    }
+
+    @Test
+    fun `parseModelsBody sorts distinct ids and drops entries without one`() {
+        val body = """{"data":[{"id":"zeta"},{"id":null},{"id":"alpha"},{"id":"zeta"},""" +
+            """{"id":""},{"name":"no id here"},"free",{"id":"mid"}]}"""
+        assertEquals(listOf("alpha", "mid", "zeta"), AiChat.parseModelsBody(body))
+    }
+
+    @Test
+    fun `parseModelsBody yields nothing on bodies it cannot read`() {
+        assertTrue(AiChat.parseModelsBody("").isEmpty())
+        assertTrue(AiChat.parseModelsBody("   ").isEmpty())
+        assertTrue(AiChat.parseModelsBody("not json at all").isEmpty())
+        assertTrue(AiChat.parseModelsBody("""{"data":"nope"}""").isEmpty())
+        assertTrue(AiChat.parseModelsBody("""{"unrelated":true}""").isEmpty())
+        assertTrue(AiChat.parseModelsBody("""{"data":[]}""").isEmpty())
+    }
 }
