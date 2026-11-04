@@ -3,6 +3,7 @@ package com.vivekkaushik.wrtpulse.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,10 +25,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Text
+import androidx.compose.material3.Text as MaterialText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,11 +38,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
@@ -59,7 +67,7 @@ import com.vivekkaushik.wrtpulse.ui.FlexSpacer
 import com.vivekkaushik.wrtpulse.ui.GhostButton
 import com.vivekkaushik.wrtpulse.ui.MonoTag
 import com.vivekkaushik.wrtpulse.ui.PrimaryButton
-import com.vivekkaushik.wrtpulse.ui.SectionLabel
+import com.vivekkaushik.wrtpulse.ui.SectionLabel as BaseSectionLabel
 import com.vivekkaushik.wrtpulse.ui.WrtIcons
 import com.vivekkaushik.wrtpulse.ui.mono
 import com.vivekkaushik.wrtpulse.ui.sans
@@ -67,11 +75,130 @@ import com.vivekkaushik.wrtpulse.ui.theme.Wrt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import java.io.File
 import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+private val LocalArabic = compositionLocalOf { true }
+
+@Composable
+private fun Text(
+    text: String,
+    modifier: Modifier = Modifier,
+    style: TextStyle = LocalTextStyle.current,
+    maxLines: Int = Int.MAX_VALUE,
+    minLines: Int = 1,
+    softWrap: Boolean = true,
+    overflow: TextOverflow = TextOverflow.Clip,
+) {
+    MaterialText(
+        text = localized(text, LocalArabic.current),
+        modifier = modifier,
+        style = style,
+        maxLines = maxLines,
+        minLines = minLines,
+        softWrap = softWrap,
+        overflow = overflow,
+    )
+}
+
+private fun localized(value: String, arabic: Boolean): String {
+    if (!arabic) return value
+    if (value.startsWith("Export ") && value.endsWith(" saved analysis(es) as JSON")) {
+        return "تصدير ${value.removePrefix("Export ").removeSuffix(" saved analysis(es) as JSON")} تحليل محفوظ بصيغة JSON"
+    }
+    return when (value) {
+        "Connect to a router to analyze it." -> "اتصل براوتر لتحليله."
+        "HOW IT WORKS" -> "كيف يعمل التحليل"
+        "AI PROVIDER" -> "مزود الذكاء الاصطناعي"
+        "Use OpenAI" -> "استخدام OpenAI"
+        "Use OpenRouter" -> "استخدام OpenRouter"
+        "Use Gemini" -> "استخدام Gemini"
+        "Use Ollama (local)" -> "استخدام Ollama (محلي)"
+        "BASE URL" -> "عنوان الخدمة الأساسي"
+        "MODEL" -> "النموذج"
+        "API KEY" -> "مفتاح API"
+        "Save provider" -> "حفظ إعداد المزود"
+        "Save provider to enable analysis" -> "احفظ المزود لتفعيل التحليل"
+        "NETWORK HEALTH" -> "صحة الشبكة"
+        "Wi-Fi" -> "Wi-Fi"
+        "Mesh" -> "الشبكة المتداخلة"
+        "Performance" -> "الأداء"
+        "Security" -> "الأمان"
+        "60-SECOND PERFORMANCE SAMPLE" -> "عينة أداء لمدة 60 ثانية"
+        "Sample for 60 seconds" -> "جمع عينة لمدة 60 ثانية"
+        "Sample again" -> "جمع عينة جديدة"
+        "LOCAL DIAGNOSIS" -> "التشخيص المحلي"
+        "READY-MADE ANALYSES" -> "تحليلات جاهزة"
+        "WHAT WILL BE SENT" -> "ما سيتم إرساله"
+        "Review exact data before sending" -> "راجع البيانات قبل الإرسال"
+        "Hide exact send preview" -> "إخفاء معاينة الإرسال"
+        "Read the router again" -> "قراءة الراوتر مجددًا"
+        "ASK" -> "السؤال"
+        "Analyze" -> "إعادة التحليل"
+        "Analyzing…" -> "جارٍ التحليل…"
+        "DIAGNOSIS & REPAIR PLAN" -> "التشخيص وخطة الإصلاح"
+        "SAVED ANALYSES" -> "التحليلات المحفوظة"
+        "REPORT" -> "التقرير"
+        "Hide MAC & public addresses" -> "إخفاء عناوين MAC والعناوين العامة"
+        "COMMANDS IN THE ANSWER" -> "الأوامر في النتيجة"
+        "copy" -> "نسخ"
+        "tap to copy" -> "اضغط للنسخ"
+        "streaming…" -> "جارٍ استقبال النتيجة…"
+        "reading…" -> "جارٍ القراءة…"
+        "sampling…" -> "جارٍ أخذ العينة…"
+        "Sampling the router…" -> "جارٍ أخذ عينة من الراوتر…"
+        "Reading the router…" -> "جارٍ قراءة الراوتر…"
+        "Share AI history JSON" -> "مشاركة سجل التحليل JSON"
+        "Export Markdown" -> "تصدير Markdown"
+        "Export plain text" -> "تصدير نص عادي"
+        "Export PDF" -> "تصدير PDF"
+        "Markdown" -> "Markdown"
+        "Plain text" -> "نص عادي"
+        "PDF" -> "PDF"
+        "No saved analyses to export" -> "لا توجد تحليلات محفوظة لتصديرها"
+        "Read-only commands copy on one tap. Changing ones need a second tap. Destructive ones are never offered for copying." -> "تُنسخ أوامر الفحص بلمسة واحدة. أوامر التغيير تحتاج تأكيدًا ثانيًا، والأوامر الخطرة لا يمكن نسخها."
+        "Switch to English" -> "التبديل إلى العربية"
+        else -> value
+    }
+}
+
+@Composable
+private fun SectionLabel(
+    text: String,
+    color: Color = Wrt.TextDim,
+    size: Float = 10f,
+    tracking: Double = 0.12,
+    modifier: Modifier = Modifier,
+) {
+    BaseSectionLabel(localized(text, LocalArabic.current), color, size, tracking, modifier)
+}
+
+@Composable
+private fun LocalizedFieldLabel(text: String) {
+    SectionLabel(text, size = 10f, tracking = 0.12)
+}
+
+@Composable
+private fun CheckOutputField(value: String, onChange: (String) -> Unit) {
+    BasicTextField(
+        value = value,
+        onValueChange = onChange,
+        textStyle = mono(11f, 500, Wrt.TextSecondary),
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
+        cursorBrush = SolidColor(Wrt.Accent),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp)
+            .height(132.dp)
+            .border(1.dp, Wrt.BorderInput, RoundedCornerShape(10.dp))
+            .background(Wrt.BgDeep, RoundedCornerShape(10.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    )
+}
 
 /**
  * The AI analysis screen: read the router over SSH, sample its counters across a minute,
@@ -97,6 +224,8 @@ fun AiAnalysisScreen(
     var savedNote by remember { mutableStateOf<String?>(null) }
     var hideSensitive by remember { mutableStateOf(true) }
     var arabic by remember { mutableStateOf(true) }
+    var analysisJob by remember { mutableStateOf<Job?>(null) }
+    var verificationOutput by remember { mutableStateOf("") }
 
     // One read on arrival, like every other screen: a snapshot the user has not asked to
     // refresh is exactly as stale as the last time they looked at it.
@@ -105,7 +234,10 @@ fun AiAnalysisScreen(
         store?.loadHistory()
     }
 
-    CompositionLocalProvider(LocalLayoutDirection provides if (arabic) LayoutDirection.Rtl else LayoutDirection.Ltr) {
+    CompositionLocalProvider(
+        LocalLayoutDirection provides if (arabic) LayoutDirection.Rtl else LayoutDirection.Ltr,
+        LocalArabic provides arabic,
+    ) {
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         FormTopBar(if (arabic) "تحليل الراوتر" else "Router analysis", onBack)
         Row(
@@ -177,13 +309,30 @@ fun AiAnalysisScreen(
                     settings = settings,
                     question = question,
                     onQuestion = { question = it },
-                    onAnalyze = { scope.launch { store.analyze(settings, question) } },
+                    onAnalyze = { analysisJob = scope.launch { store.analyze(settings, question) } },
+                    onCancel = { analysisJob?.cancel(); analysisJob = null },
                 )
             }
             store.answer?.let { text ->
                 item { DiagnosisSummaryCard(store) }
                 item { RepairPlanCard(store, text) }
-                item { VerificationCard(store) }
+                item {
+                    VerificationCard(
+                        store = store,
+                        output = verificationOutput,
+                        onOutput = { verificationOutput = it },
+                        onReanalyze = {
+                            if (settings.configured && verificationOutput.isNotBlank()) {
+                                analysisJob = scope.launch {
+                                    store.analyze(
+                                        settings,
+                                        "${question.trim()}\n\nنتيجة فحص إضافية من المستخدم:\n${verificationOutput.trim()}",
+                                    )
+                                }
+                            }
+                        },
+                    )
+                }
                 item { AnswerCard(store, text) }
             }
             item {
@@ -381,13 +530,13 @@ private fun ProviderCard(
         )
         Row(Modifier.padding(top = 8.dp)) {
             Box(Modifier.weight(1f).padding(end = 4.dp)) {
-                GhostButton("Use OpenAI") {
+                GhostButton(localized("Use OpenAI", LocalArabic.current)) {
                     endpoint = AiSettings.DEFAULT_BASE_URL
                     model = AiSettings.DEFAULT_MODEL
                 }
             }
             Box(Modifier.weight(1f).padding(start = 4.dp)) {
-                GhostButton("Use OpenRouter") {
+                GhostButton(localized("Use OpenRouter", LocalArabic.current)) {
                     endpoint = AiSettings.OPENROUTER_BASE_URL
                     model = AiSettings.OPENROUTER_MODEL
                 }
@@ -395,13 +544,13 @@ private fun ProviderCard(
         }
         Row(Modifier.padding(top = 8.dp)) {
             Box(Modifier.weight(1f).padding(end = 4.dp)) {
-                GhostButton("Use Gemini") {
+                GhostButton(localized("Use Gemini", LocalArabic.current)) {
                     endpoint = AiSettings.GEMINI_BASE_URL
                     model = AiSettings.GEMINI_MODEL
                 }
             }
             Box(Modifier.weight(1f).padding(start = 4.dp)) {
-                GhostButton("Use Ollama (local)") {
+                GhostButton(localized("Use Ollama (local)", LocalArabic.current)) {
                     endpoint = AiSettings.OLLAMA_BASE_URL
                     model = AiSettings.OLLAMA_MODEL
                     key = ""
@@ -416,9 +565,9 @@ private fun ProviderCard(
                 modifier = Modifier.padding(top = 6.dp),
             )
         }
-        FieldLabel("BASE URL")
+        LocalizedFieldLabel("BASE URL")
         FormTextField(endpoint, { endpoint = it })
-        FieldLabel("MODEL")
+        LocalizedFieldLabel("MODEL")
         ModelField(
             value = model,
             onValue = { model = it },
@@ -439,7 +588,7 @@ private fun ProviderCard(
                 modifier = Modifier.padding(top = 6.dp),
             )
         }
-        FieldLabel("API KEY")
+        LocalizedFieldLabel("API KEY")
         FormTextField(
             key,
             { key = it },
@@ -459,7 +608,7 @@ private fun ProviderCard(
         }
         Spacer(Modifier.height(10.dp))
         PrimaryButton(
-            if (settings.configured) "Save provider" else "Save provider to enable analysis",
+            localized(if (settings.configured) "Save provider" else "Save provider to enable analysis", LocalArabic.current),
             color = if (endpoint.isBlank() || model.isBlank()) Wrt.TextDim else Wrt.Accent,
         ) {
             onSave(
@@ -666,11 +815,11 @@ private fun SampleCard(
         }
         Spacer(Modifier.height(10.dp))
         PrimaryButton(
-            when {
+            localized(when {
                 store.sampling -> "Sampling the router…"
                 t != null -> "Sample again"
                 else -> "Sample for 60 seconds"
-            },
+            }, LocalArabic.current),
             color = if (store.sampling || busy) Wrt.TextDim else Wrt.Accent,
             textColor = if (store.sampling || busy) Wrt.OnAccent else Wrt.BgScreen,
         ) {
@@ -966,7 +1115,7 @@ private fun DataCard(
             }
         }
         Spacer(Modifier.height(10.dp))
-        GhostButton(if (store.collecting) "Reading the router…" else "Read the router again") {
+        GhostButton(localized(if (store.collecting) "Reading the router…" else "Read the router again", LocalArabic.current)) {
             if (!store.collecting) onReadAgain()
         }
     }
@@ -979,6 +1128,7 @@ private fun AskCard(
     question: String,
     onQuestion: (String) -> Unit,
     onAnalyze: () -> Unit,
+    onCancel: () -> Unit,
 ) {
     val ready = store.snapshot != null && settings.configured
     Card {
@@ -1015,11 +1165,18 @@ private fun AskCard(
         }
         Spacer(Modifier.height(10.dp))
         PrimaryButton(
-            if (store.analyzing) "Analyzing…" else "Analyze",
+            if (store.analyzing) "إيقاف التحليل" else localized("Analyze", LocalArabic.current),
             color = if (ready || store.analyzing) Wrt.Accent else Wrt.TextDim,
             textColor = if (ready || store.analyzing) Wrt.OnAccent else Wrt.BgScreen,
         ) {
-            if (ready && !store.analyzing) onAnalyze()
+            if (store.analyzing) onCancel() else if (ready) onAnalyze()
+        }
+        if (store.analyzing) {
+            Text(
+                "سيتم الاحتفاظ بالنص الجزئي الذي وصل حتى الآن، ولن يُنفّذ أي أمر على الراوتر.",
+                style = sans(9.5f, 450, Wrt.TextDim),
+                modifier = Modifier.padding(top = 6.dp),
+            )
         }
     }
 }
@@ -1088,7 +1245,12 @@ private fun RepairPlanCard(store: AiStore, text: String) {
 }
 
 @Composable
-private fun VerificationCard(store: AiStore) {
+private fun VerificationCard(
+    store: AiStore,
+    output: String,
+    onOutput: (String) -> Unit,
+    onReanalyze: () -> Unit,
+) {
     Card {
         Row(verticalAlignment = Alignment.CenterVertically) {
             SectionLabel("التحقق بعد الإصلاح / VERIFY", size = 9.5f, tracking = 0.04)
@@ -1098,6 +1260,21 @@ private fun VerificationCard(store: AiStore) {
         Text("أعد قراءة الراوتر ثم شغّل عينة الأداء للمقارنة قبل/بعد. استخدم أوامر الفحص فقط للتحقق؛ لا تعتمد على نجاح أمر التغيير وحده.", style = sans(10.5f, 450, Wrt.TextSecondary), modifier = Modifier.padding(top = 8.dp))
         store.findings.take(3).forEach { finding ->
             Text("• ${finding.title} — أعد تنفيذ: ${finding.command}", style = mono(9.5f, 500, Wrt.TextTertiary), modifier = Modifier.padding(top = 6.dp))
+        }
+        LocalizedFieldLabel("نتيجة الفحص / CHECK OUTPUT")
+        CheckOutputField(output, onOutput)
+        Text(
+            "الصق هنا ناتج الأمر يدويًا. لن يُنفّذ الأمر ولن تُرسل النتيجة إلا عند اختيار إعادة التحليل.",
+            style = sans(9.5f, 450, Wrt.TextDim),
+            modifier = Modifier.padding(top = 5.dp),
+        )
+        Spacer(Modifier.height(8.dp))
+        PrimaryButton(
+            if (store.analyzing) "جارٍ إعادة التحليل…" else "إعادة التحليل بالنتيجة",
+            color = if (output.isBlank() || store.analyzing) Wrt.TextDim else Wrt.Accent,
+            textColor = if (output.isBlank() || store.analyzing) Wrt.OnAccent else Wrt.BgScreen,
+        ) {
+            if (output.isNotBlank() && !store.analyzing) onReanalyze()
         }
     }
 }
@@ -1355,15 +1532,18 @@ private fun ExportCard(
                     "PDF" to ReportFormat.PDF,
                 ).forEach { (label, format) ->
                     Box(Modifier.weight(1f)) {
-                        GhostButton(label) { exportReport(context, store, question, hideSensitive, format) }
+                        GhostButton(localized(label, LocalArabic.current)) { exportReport(context, store, question, hideSensitive, format) }
                     }
                 }
             }
         }
         Spacer(Modifier.height(8.dp))
         GhostButton(
-            if (store.history.isEmpty()) "No saved analyses to export"
-            else "Export ${store.history.size} saved analysis(es) as JSON",
+            localized(
+                if (store.history.isEmpty()) "No saved analyses to export"
+                else "Export ${store.history.size} saved analysis(es) as JSON",
+                LocalArabic.current,
+            ),
         ) {
             if (store.history.isNotEmpty()) exportAiHistory(context, store.history, hideSensitive)
         }
