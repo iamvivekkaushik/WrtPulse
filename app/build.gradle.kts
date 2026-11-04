@@ -37,6 +37,11 @@ android {
         versionCode = 13
         versionName = "1.11"
 
+        // Modern-device build: keep release/debug artifacts arm64-only as requested.
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // The About screen lists the libraries the app ships with. Their versions are read

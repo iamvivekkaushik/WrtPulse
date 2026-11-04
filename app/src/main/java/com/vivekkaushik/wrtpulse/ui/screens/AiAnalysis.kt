@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -46,7 +47,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.input.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.unit.LayoutDirection
@@ -68,6 +69,7 @@ import com.vivekkaushik.wrtpulse.ui.GhostButton
 import com.vivekkaushik.wrtpulse.ui.MonoTag
 import com.vivekkaushik.wrtpulse.ui.PrimaryButton
 import com.vivekkaushik.wrtpulse.ui.SectionLabel as BaseSectionLabel
+import com.vivekkaushik.wrtpulse.ui.StatusDot
 import com.vivekkaushik.wrtpulse.ui.WrtIcons
 import com.vivekkaushik.wrtpulse.ui.mono
 import com.vivekkaushik.wrtpulse.ui.sans
@@ -397,7 +399,7 @@ private fun AnalysisStagesCard(store: AiStore) {
 }
 
 @Composable
-private fun StageStep(label: String, active: Boolean, done: Boolean) {
+private fun RowScope.StageStep(label: String, active: Boolean, done: Boolean) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
         StatusDot(if (active) Wrt.Accent else if (done) Wrt.Green else Wrt.DotOff, 7.dp, active)
         Text(label, style = sans(8.5f, if (active) 650 else 500, if (active) Wrt.Accent else Wrt.TextDim), modifier = Modifier.padding(top = 5.dp))

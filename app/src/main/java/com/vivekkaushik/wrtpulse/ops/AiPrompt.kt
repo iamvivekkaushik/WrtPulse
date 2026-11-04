@@ -67,6 +67,8 @@ Engineering rules:
   DHCP conflicts, firewall exposure, radio health, WDS/802.11s Mesh, bridge loops and STP.
 - The local findings and the sample deltas were computed on the phone from raw counters —
   trust them, cite them as evidence, and build on them instead of restating them.
+- Give each local finding its own line in the diagnosis and connect the repair step directly to
+  that finding's evidence.
 - Rank findings by impact and likelihood. Do not call a missing block a failure; call it
   UNVERIFIED and state the exact additional read-only check needed.
 - Solve evidenced problems, not just describe them. For each actionable finding, give the
