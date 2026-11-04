@@ -26,6 +26,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,8 +38,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.vivekkaushik.wrtpulse.data.AiReport
@@ -93,6 +96,7 @@ fun AiAnalysisScreen(
     var showPayload by remember { mutableStateOf(false) }
     var savedNote by remember { mutableStateOf<String?>(null) }
     var hideSensitive by remember { mutableStateOf(true) }
+    var arabic by remember { mutableStateOf(true) }
 
     // One read on arrival, like every other screen: a snapshot the user has not asked to
     // refresh is exactly as stale as the last time they looked at it.
@@ -101,8 +105,22 @@ fun AiAnalysisScreen(
         store?.loadHistory()
     }
 
+    CompositionLocalProvider(LocalLayoutDirection provides if (arabic) LayoutDirection.Rtl else LayoutDirection.Ltr) {
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
-        FormTopBar("AI analysis", onBack)
+        FormTopBar(if (arabic) "تحليل الراوتر" else "Router analysis", onBack)
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(if (arabic) "العربية" else "English", style = sans(10f, 600, Wrt.AccentBody))
+            Spacer(Modifier.width(8.dp))
+            MonoTag(if (arabic) "EN" else "ع", color = Wrt.Accent, border = Wrt.BorderInput)
+            Spacer(Modifier.width(6.dp))
+            Box(Modifier.clickable { arabic = !arabic }) {
+                Text(if (arabic) "Switch to English" else "التبديل للعربية", style = sans(10f, 600, Wrt.Accent))
+            }
+        }
         if (store == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text("Connect to a router to analyze it.", style = sans(12f, 500, Wrt.TextDim))
@@ -115,6 +133,8 @@ fun AiAnalysisScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             contentPadding = PaddingValues(vertical = 10.dp),
         ) {
+            item { AnalysisStagesCard(store) }
+            item { DataFreshnessCard(store) }
             item { HowItWorksCard() }
             item {
                 ProviderCard(
@@ -161,6 +181,9 @@ fun AiAnalysisScreen(
                 )
             }
             store.answer?.let { text ->
+                item { DiagnosisSummaryCard(store) }
+                item { RepairPlanCard(store, text) }
+                item { VerificationCard(store) }
                 item { AnswerCard(store, text) }
             }
             item {
@@ -182,6 +205,86 @@ fun AiAnalysisScreen(
                 )
             }
         }
+    }
+    }
+}
+
+@Composable
+private fun AnalysisStagesCard(store: AiStore) {
+    val active = store.phase
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("مراحل التحليل / ANALYSIS STAGES", size = 9.5f, tracking = 0.04)
+            FlexSpacer()
+            MonoTag(
+                when (active) {
+                    "reading_router" -> "قراءة الراوتر"
+                    "sampling_performance" -> "تحليل المؤشرات"
+                    "preparing_solutions" -> "إعداد الحلول"
+                    "ready" -> "جاهز للمراجعة"
+                    else -> "بانتظار البدء"
+                },
+                color = if (active == "idle") Wrt.TextDim else Wrt.AccentBody,
+                border = Wrt.BorderInput,
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(top = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            StageStep("قراءة الراوتر", active == "reading_router", store.snapshot != null)
+            StageConnector(store.snapshot != null)
+            StageStep("تحليل المؤشرات", active == "sampling_performance", store.health != null)
+            StageConnector(store.health != null)
+            StageStep("إعداد الحلول", active == "preparing_solutions", store.answer != null)
+        }
+        Text(
+            "القراءة والتحليل للعرض فقط. لا ينفّذ التطبيق أوامر التغيير تلقائيًا، وتبقى النتيجة الجزئية محفوظة عند إيقاف الطلب.",
+            style = sans(10.5f, 450, Wrt.TextDim),
+            modifier = Modifier.padding(top = 10.dp),
+        )
+    }
+}
+
+@Composable
+private fun StageStep(label: String, active: Boolean, done: Boolean) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
+        StatusDot(if (active) Wrt.Accent else if (done) Wrt.Green else Wrt.DotOff, 7.dp, active)
+        Text(label, style = sans(8.5f, if (active) 650 else 500, if (active) Wrt.Accent else Wrt.TextDim), modifier = Modifier.padding(top = 5.dp))
+    }
+}
+
+@Composable
+private fun StageConnector(done: Boolean) {
+    Box(Modifier.width(14.dp).height(1.dp).background(if (done) Wrt.Green else Wrt.BorderInput))
+}
+
+@Composable
+private fun DataFreshnessCard(store: AiStore) {
+    val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("حالة البيانات / DATA STATUS", size = 9.5f, tracking = 0.04)
+            FlexSpacer()
+            MonoTag(if (store.snapshot == null) "لا توجد قراءة" else "بيانات محلية", color = Wrt.AccentBody, border = Wrt.BorderInput)
+        }
+        FreshnessRow("آخر قراءة للراوتر", store.lastSnapshotAtMs?.let { fmt.format(Date(it)) } ?: "لم تُقرأ بعد")
+        FreshnessRow("آخر عينة أداء", store.lastSampleAtMs?.let { fmt.format(Date(it)) } ?: "لم تُجمع بعد")
+        if (store.unavailableSections.isNotEmpty()) {
+            Text("أقسام غير متاحة: ${store.unavailableSections.joinToString("، ")}", style = sans(10f, 550, Wrt.AmberText), modifier = Modifier.padding(top = 8.dp))
+        } else if (store.snapshot != null) {
+            Text("كل أقسام القراءة الأساسية متاحة.", style = sans(10f, 500, Wrt.Green), modifier = Modifier.padding(top = 8.dp))
+        }
+    }
+}
+
+@Composable
+private fun FreshnessRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = sans(10.5f, 500, Wrt.TextSecondary))
+        FlexSpacer()
+        Text(value, style = mono(10f, 600, if (value.contains("بعد")) Wrt.TextDim else Wrt.AccentBody))
     }
 }
 
@@ -922,6 +1025,84 @@ private fun AskCard(
 }
 
 @Composable
+private fun DiagnosisSummaryCard(store: AiStore) {
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("التشخيص / DIAGNOSIS", size = 9.5f, tracking = 0.04)
+            FlexSpacer()
+            MonoTag("من الأدلة المحلية", color = Wrt.AccentBody, border = Wrt.BorderInput)
+        }
+        if (store.findings.isEmpty()) {
+            Text("لم تُرصد مشكلة واضحة في القراءة الحالية. هذا لا يغني عن إعادة الفحص بعد أي تغيير.", style = sans(11f, 450, Wrt.TextSecondary), modifier = Modifier.padding(top = 8.dp))
+        } else {
+            store.findings.forEachIndexed { index, finding ->
+                Column(Modifier.padding(top = 9.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        MonoTag("${index + 1}", color = severityColor(finding.severity), border = Wrt.BorderHair)
+                        Spacer(Modifier.width(7.dp))
+                        Text(finding.title, style = sans(11.5f, 650, Wrt.TextSecondary), modifier = Modifier.weight(1f))
+                        MonoTag(finding.severity.name, color = severityColor(finding.severity), border = Wrt.BorderHair)
+                    }
+                    Text("الدليل: ${finding.evidence}", style = mono(9.5f, 500, Wrt.TextTertiary), modifier = Modifier.padding(top = 4.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RepairPlanCard(store: AiStore, text: String) {
+    val commands = remember(text) { SafeCommandsExtract(text) }
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("خطة الإصلاح / REPAIR PLAN", size = 9.5f, tracking = 0.04)
+            FlexSpacer()
+            MonoTag("مراجعة يدوية", color = Wrt.Amber, border = Wrt.BorderHair)
+        }
+        Text("كل خطوة مستقلة؛ لا ينفّذها التطبيق. راجع الدليل والخطر قبل النسخ.", style = sans(10.5f, 450, Wrt.TextDim), modifier = Modifier.padding(top = 7.dp))
+        if (commands.isEmpty()) {
+            Text("لم يقترح النموذج أمرًا قابلًا للنسخ.", style = sans(10.5f, 500, Wrt.TextSecondary), modifier = Modifier.padding(top = 8.dp))
+        } else {
+            commands.forEachIndexed { index, cmd ->
+                val color = when (cmd.safety) {
+                    CommandSafety.SAFE -> Wrt.Green
+                    CommandSafety.CHANGE -> Wrt.Amber
+                    CommandSafety.BLOCKED -> Wrt.Red
+                }
+                Column(Modifier.padding(top = 8.dp).border(1.dp, Wrt.BorderHair, RoundedCornerShape(8.dp)).padding(9.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("${index + 1}", style = mono(10f, 700, color))
+                        Spacer(Modifier.width(7.dp))
+                        Text(if (cmd.safety == CommandSafety.SAFE) "فحص للقراءة فقط" else if (cmd.safety == CommandSafety.CHANGE) "تغيير إعداد" else "محظور", style = sans(10.5f, 650, color))
+                        FlexSpacer()
+                        MonoTag(if (cmd.safety == CommandSafety.SAFE) "ثقة أعلى" else "يتطلب تأكيدًا", color = color, border = Wrt.BorderHair)
+                    }
+                    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                        Text(cmd.text, style = mono(9.5f, 600, if (cmd.safety == CommandSafety.BLOCKED) Wrt.Red else Wrt.TextSecondary).copy(textDecoration = if (cmd.safety == CommandSafety.BLOCKED) TextDecoration.LineThrough else null), modifier = Modifier.padding(top = 6.dp))
+                    }
+                    Text("النتيجة المتوقعة: ${cmd.reason ?: "تحسين المؤشر المرتبط بالدليل."}", style = sans(9.5f, 450, Wrt.TextDim), modifier = Modifier.padding(top = 4.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VerificationCard(store: AiStore) {
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("التحقق بعد الإصلاح / VERIFY", size = 9.5f, tracking = 0.04)
+            FlexSpacer()
+            MonoTag(if (store.temporal != null) "عينة متاحة" else "تحتاج عينة", color = if (store.temporal != null) Wrt.Green else Wrt.Amber, border = Wrt.BorderHair)
+        }
+        Text("أعد قراءة الراوتر ثم شغّل عينة الأداء للمقارنة قبل/بعد. استخدم أوامر الفحص فقط للتحقق؛ لا تعتمد على نجاح أمر التغيير وحده.", style = sans(10.5f, 450, Wrt.TextSecondary), modifier = Modifier.padding(top = 8.dp))
+        store.findings.take(3).forEach { finding ->
+            Text("• ${finding.title} — أعد تنفيذ: ${finding.command}", style = mono(9.5f, 500, Wrt.TextTertiary), modifier = Modifier.padding(top = 6.dp))
+        }
+    }
+}
+
+@Composable
 private fun AnswerCard(store: AiStore, text: String) {
     val clipboard = LocalClipboardManager.current
     Card {
@@ -1076,12 +1257,14 @@ private fun CommandRow(
             .padding(horizontal = 11.dp, vertical = 8.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                cmd.text,
-                style = mono(10f, 600, if (cmd.safety == CommandSafety.BLOCKED) Wrt.Red else Wrt.TextSecondary)
-                    .copy(textDecoration = if (cmd.safety == CommandSafety.BLOCKED) TextDecoration.LineThrough else null),
-                modifier = Modifier.weight(1f),
-            )
+            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                Text(
+                    cmd.text,
+                    style = mono(10f, 600, if (cmd.safety == CommandSafety.BLOCKED) Wrt.Red else Wrt.TextSecondary)
+                        .copy(textDecoration = if (cmd.safety == CommandSafety.BLOCKED) TextDecoration.LineThrough else null),
+                    modifier = Modifier.weight(1f),
+                )
+            }
             Spacer(Modifier.width(8.dp))
             MonoTag(cmd.safety.name, color = color, border = Wrt.BorderHair)
             Spacer(Modifier.width(8.dp))

@@ -76,6 +76,10 @@ class AiStore(
     private val historyDao: AiAnalysisLogDao? = null,
 ) {
     var snapshot by mutableStateOf<AiSnapshot?>(null); private set
+    /** Phone-clock times are deliberately separate: a sweep can be fresh while a sample is old. */
+    var lastSnapshotAtMs by mutableStateOf<Long?>(null); private set
+    var lastSampleAtMs by mutableStateOf<Long?>(null); private set
+    var unavailableSections by mutableStateOf<List<String>>(emptyList()); private set
     var collecting by mutableStateOf(false); private set
     var analyzing by mutableStateOf(false); private set
 
@@ -96,6 +100,16 @@ class AiStore(
     var findings by mutableStateOf<List<Finding>>(emptyList()); private set
     var health by mutableStateOf<HealthScore?>(null); private set
 
+    /** Stable labels for the progress strip; no router command is implied by a label. */
+    val phase: String
+        get() = when {
+            collecting -> "reading_router"
+            sampling -> "sampling_performance"
+            analyzing -> "preparing_solutions"
+            snapshot != null -> "ready"
+            else -> "idle"
+        }
+
     /** Reads the router once. The data goes stale exactly like the person reading it does. */
     suspend fun collect() {
         if (collecting) return
@@ -104,6 +118,7 @@ class AiStore(
         try {
             val out = session.exec(Commands.AI_SNAPSHOT, timeoutMs = 45_000)
             ingest(Parsers.sections(out.stdout))
+            lastSnapshotAtMs = System.currentTimeMillis()
             if (snapshot == null) error = "The router returned nothing to analyze."
         } catch (e: SshException) {
             error = "Couldn't read the router: ${e.message}"
@@ -128,6 +143,7 @@ class AiStore(
                 sampleStatus = "reading sample ${i + 1} of ${AiSampling.SAMPLE_COUNT}…"
                 val out = session.exec(Commands.AI_TICK, timeoutMs = 20_000)
                 ticks += AiTick(Parsers.sections(out.stdout), System.currentTimeMillis())
+                lastSampleAtMs = ticks.last().atMs
                 ingestTicks(ticks.map { it.sections }, ticks.map { it.atMs })
                 if (i < AiSampling.SAMPLE_COUNT - 1) {
                     // A one-second heartbeat keeps the countdown honest and the cancel prompt.
@@ -192,6 +208,8 @@ class AiStore(
             ssids = ssids,
             sections = redacted,
         )
+        val expected = listOf("board", "info", "overlay", "wireless", "assoc", "dhcp", "log")
+        unavailableSections = expected.filter { redacted[it].isNullOrBlank() }
         refreshLocal()
     }
 
