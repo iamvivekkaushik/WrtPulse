@@ -6,6 +6,7 @@ import com.vivekkaushik.wrtpulse.net.SshAuth
 import com.vivekkaushik.wrtpulse.net.SshClient
 import com.vivekkaushik.wrtpulse.net.SshConnection
 import com.vivekkaushik.wrtpulse.net.SshTarget
+import com.vivekkaushik.wrtpulse.ops.HealthScore
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -82,7 +83,7 @@ class AiStoreTest {
     fun `ingest redacts every secret before anything can be sent`() {
         val s = AiStore(RouterSession(SshTarget("t"), unusedClient, { error("unused") }))
         s.ingest(sections())
-        val payload = s.snapshot!!.payloadFor("")
+        val payload = s.buildPayload("")
         assertFalse(payload.contains("top-secret-passphrase"))
         assertFalse(payload.contains("pppoe-secret"))
         assertTrue(payload.contains("key='<redacted>'"))
@@ -121,7 +122,7 @@ class AiStoreTest {
         s.ingest(sections())
         s.analyze(AiSettings(apiKey = "k"), "")
         val sentUser = sent.single().split("\u0000")[1]
-        assertEquals(s.snapshot!!.payloadFor(""), sentUser)
+        assertEquals(s.buildPayload(""), sentUser)
     }
 
     @Test
@@ -144,4 +145,76 @@ class AiStoreTest {
         again.analyze(AiSettings(apiKey = "k"), "")
         assertEquals("VERDICT: at risk.", again.answer)
     }
+
+    @Test
+    fun `ingest computes local findings and a health score without any provider`() {
+        val s = AiStore(RouterSession(SshTarget("t"), unusedClient, { error("unused") }))
+        s.ingest(sections())
+        // The fixture has no DHCP config and no firewall ACCEPT, but its second client sits
+        // at -67 dBm — not marginal — so the local rules find nothing here.
+        assertNotNull(s.health)
+        assertEquals(HealthScore.Grade.HEALTHY, s.health!!.grade)
+        assertEquals(100, s.health!!.wifi)
+        // The mesh score exists only when mesh/WDS is configured; this fixture has none.
+        assertNull(s.health!!.mesh)
+    }
+
+    @Test
+    fun `ingestTicks computes temporal deltas and feeds them into findings and payload`() {
+        val s = AiStore(RouterSession(SshTarget("t"), unusedClient, { error("unused") }))
+        s.ingest(sections())
+        s.ingestTicks(
+            listOf(
+                tick(retries = 500, failed = 3, uptime = "1000"),
+                tick(retries = 2375, failed = 24, uptime = "1060"),
+            ),
+        )
+        val t = s.temporal
+        assertNotNull(t)
+        assertEquals(60.0, t!!.windowSeconds, 1e-9)
+        assertEquals(1875L, t.retryDelta)
+        assertEquals(21L, t.failedDelta)
+        // The retransmission finding now exists, with the numbers as evidence.
+        assertTrue(s.findings.any { it.evidence.contains("+1,875") && it.evidence.contains("+21") })
+        // And the payload carries the same numbers to the provider.
+        val payload = s.buildPayload("")
+        assertTrue(payload.contains("LOCAL DIAGNOSTIC FINDINGS"))
+        assertTrue(payload.contains("60-SECOND PERFORMANCE SAMPLE"))
+        assertTrue(payload.contains("+1,875"))
+        assertTrue(payload.contains("Network health"))
+    }
+
+    @Test
+    fun `one tick alone yields no temporal claims`() {
+        val s = AiStore(RouterSession(SshTarget("t"), unusedClient, { error("unused") }))
+        s.ingest(sections())
+        s.ingestTicks(listOf(tick(retries = 500, failed = 3)))
+        assertNull(s.temporal)
+        val payload = s.buildPayload("")
+        assertFalse(payload.contains("60-SECOND PERFORMANCE SAMPLE"))
+    }
+
+    /** One parsed AI_TICK, as the router would answer it. Counters are controllable. */
+    private fun tick(retries: Long, failed: Long, uptime: String = "1000"): Map<String, String> = mapOf(
+        "uptime" to uptime,
+        "loadavg" to "0.40 0.30 0.25 1/60 1200",
+        "cpu" to "cpu  100 0 100 7800 0 0 0 0",
+        "mem" to "MemTotal:       61440 kB\nMemAvailable:   24576 kB",
+        "netdev" to NETDEV,
+        "assoc" to
+            "Station aa:bb:cc:dd:ee:ff (on wlan1)\n\tsignal:\t-67 dBm\n\ttx bitrate:\t6.0 MBit/s\n" +
+                "\ttx retries:\t$retries\n\ttx failed:\t$failed",
+        "ping" to PING_OK,
+        "inet" to PING_OK,
+    )
+
+    private val NETDEV =
+        "Inter-|   Receive                                                |  Transmit\n" +
+            " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n" +
+            "  wlan1: 1000000    2000    0    0    0     0          0         0  500000    1000    0    0    0     0       0          0"
+
+    private val PING_OK =
+        "PING 1.1.1.1 (1.1.1.1): 56 data bytes\n\n--- 1.1.1.1 ping statistics ---\n" +
+            "3 packets transmitted, 3 packets received, 0% packet loss\n" +
+            "round-trip min/avg/max = 12.1/14.7/18.2 ms"
 }

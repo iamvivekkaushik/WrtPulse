@@ -64,9 +64,36 @@ object Commands {
             "if command -v apk >/dev/null 2>&1; then apk info 2>/dev/null; " +
                 "else opkg list-installed 2>/dev/null; fi | grep -Ei 'iw|hostapd|wpad|luci-(base|mod-network)|rpcd-mod-iwinfo' || true",
         "echo $SECTION dhcp" to "cat /tmp/dhcp.leases 2>/dev/null",
+        "echo $SECTION dhcpconf" to "uci show dhcp 2>/dev/null",
         "echo $SECTION assoc" to ASSOC_COUNTS,
         "echo $SECTION log" to
             "logread 2>/dev/null | grep -Ei 'error|fail|warn|crit' | tail -n 40 || true",
+    ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    /**
+     * One point-in-time performance sample for the AI screen's temporal run. The phone drives
+     * the cadence — [com.vivekkaushik.wrtpulse.data.AiStore] runs this three times, thirty
+     * seconds apart — so the countdown is visible on screen and a dead SSH link shows up as a
+     * failed sample instead of a sixty-second silence inside one exec.
+     *
+     * Counters only mean something against a second sample: uptime gives the honest elapsed
+     * time on the router's clock, /proc/stat the CPU jiffies, /proc/net/dev the byte and error
+     * counters, and the station dump the per-client `tx retries` and `tx failed` numbers that
+     * make a weak mesh link provable. Two pings bracket the path: the first hop out (the WAN
+     * gateway when there is one) and the internet, because "lost after the gateway" and "lost
+     * before it" are different problems.
+     */
+    val AI_TICK = listOf(
+        "echo $SECTION uptime" to "cut -d. -f1 /proc/uptime",
+        "echo $SECTION loadavg" to "cat /proc/loadavg",
+        "echo $SECTION cpu" to "head -n 1 /proc/stat",
+        "echo $SECTION mem" to "awk '/^(MemTotal|MemAvailable):/ {print}' /proc/meminfo",
+        "echo $SECTION netdev" to "cat /proc/net/dev",
+        "echo $SECTION assoc" to ASSOC_COUNTS,
+        "echo $SECTION ping" to
+            "gw=\$(ip route show default 2>/dev/null | awk '{print \$3; exit}'); " +
+                "ping -c 3 -W 2 -q \${gw:-1.1.1.1} 2>&1 || true",
+        "echo $SECTION inet" to "ping -c 3 -W 2 -q 1.1.1.1 2>&1 || true",
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
     /** Wireless config as UCI key=value lines. */

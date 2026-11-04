@@ -10,18 +10,63 @@ package com.vivekkaushik.wrtpulse.ops
 object AiPrompt {
 
     /**
+     * The ready-made analyses: one tap writes the question for the operator, phrased to aim
+     * the provider at one subsystem without hiding the rest of the snapshot from it.
+     */
+    enum class Mode(val label: String, val question: String) {
+        WIFI(
+            "Wi-Fi",
+            "Analyze the Wi-Fi side: radio health, channel and width, per-client signal and " +
+                "retransmissions, encryption, and coverage. Which clients are suffering and why?",
+        ),
+        MESH(
+            "Mesh & WDS",
+            "Analyze the mesh/WDS backhaul: link quality between nodes, signal, retries and " +
+                "failures on sta/mesh interfaces, package fitness (wpad), and roaming. " +
+                "Is the backhaul the bottleneck?",
+        ),
+        PERFORMANCE(
+            "Performance",
+            "Analyze performance: CPU load over the sample window, memory pressure, storage, " +
+                "per-interface throughput, and latency/loss to the gateway and the internet. " +
+                "What is slow and what is it costing?",
+        ),
+        SECURITY(
+            "Security",
+            "Analyze security: wireless encryption, firewall zones and input policy, " +
+                "exposure of services to the WAN, DHCP scope placement. What is exposed that should not be?",
+        ),
+        OUTAGE(
+            "Internet outage",
+            "The internet seems down or flaky. Use the gateway and internet pings to decide " +
+                "whether the fault is before or after the first hop, check the WAN interface, " +
+                "routes, DNS and the log. Where is the path broken?",
+        ),
+        LAN(
+            "DHCP, bridge & STP",
+            "Analyze the LAN plumbing: DHCP scopes and leases, bridges and their STP/loop " +
+                "posture, VLANs, and address conflicts. Are there misconfigurations that break " +
+                "connectivity for some clients?",
+        ),
+    }
+
+    /**
      * The persona and the shape of the answer. Plain text on purpose: the answer renders in
      * a Compose column, not a browser, and asking for markdown only buys stray asterisks.
      */
     const val SYSTEM = """
 You are a senior OpenWrt/Linux network engineer performing a professional read-only review.
-You receive one router snapshot collected over SSH and sometimes a question from its operator.
+You receive one router snapshot collected over SSH, the deltas of a 60-second performance
+sample when it ran, and the findings of the app's local rules; sometimes a question from
+its operator.
 
 Engineering rules:
 - Separate OBSERVED facts from INFERENCE. Ground every claim in supplied data and quote actual
   values, interfaces, channels, addresses, or log lines. Never invent values.
 - Check the whole system: firmware/package compatibility, CPU/RAM/storage, WAN/LAN routing,
   DHCP conflicts, firewall exposure, radio health, WDS/802.11s Mesh, bridge loops and STP.
+- The local findings and the sample deltas were computed on the phone from raw counters —
+  trust them, cite them as evidence, and build on them instead of restating them.
 - Rank findings by impact and likelihood. Do not call a missing block a failure; call it
   UNVERIFIED and state the exact additional read-only check needed.
 - Do not recommend destructive actions, factory reset, firmware flashing, or blind reboot.
@@ -39,8 +84,8 @@ Up to six bullets. Start each with HIGH, MED, or LOW; include OBSERVED evidence 
 ROOT CAUSE:
 The most likely cause, or "UNVERIFIED — ..." when evidence is insufficient.
 ADVICE:
-Up to five prioritized actions. For changes include VERIFY FIRST, an exact UCI/shell command,
-expected result, risk, and rollback. Read-only commands are preferred.
+Up to five prioritized actions. For changes include VERIFY FIRST, an exact UCI/shell command on
+its own line, expected result, risk, and rollback. Read-only commands are preferred.
 VALIDATION:
 Two or three read-only commands/checks that prove whether the advice worked.
 ANSWER:
@@ -83,24 +128,44 @@ Keep the whole answer under 500 words. Plain text only — no markdown headers, 
         "wifi_status" to "LIVE WIRELESS STATUS (ubus call network.wireless status)",
         "packages" to "INSTALLED WIRELESS PACKAGES (opkg/apk query)",
         "dhcp" to "DHCP LEASES (/tmp/dhcp.leases)",
+        "dhcpconf" to "DHCP CONFIG (uci show dhcp)",
         "assoc" to "WIFI CLIENTS (iw station dump / iwinfo assoclist)",
         "log" to "RECENT LOG WARNINGS (logread | grep -Ei 'error|fail|warn|crit' | tail -40)",
     )
 
     /**
-     * The user message: what was asked, then the router state as labeled blocks. Sections the
-     * router did not answer are left out rather than sent empty — a missing block should read
-     * as "not available", not as "config absent".
+     * The user message: what was asked, the local findings and sample deltas, then the router
+     * state as labeled blocks. Sections the router did not answer are left out rather than
+     * sent empty — a missing block should read as "not available", not as "config absent".
      */
-    fun buildUserContent(sections: Map<String, String>, question: String): String {
+    fun buildUserContent(
+        sections: Map<String, String>,
+        question: String,
+        findings: List<String> = emptyList(),
+        temporal: List<String> = emptyList(),
+        health: String? = null,
+    ): String {
         val blocks = sections.entries
             .filter { it.value.isNotBlank() }
             .joinToString("\n\n") { (name, body) -> block(LABELS[name] ?: name.uppercase(), body) }
         val ask = question.trim().ifEmpty { "none" }
+        val context = buildString {
+            if (health != null) append("NETWORK HEALTH: $health\n\n")
+            if (temporal.isNotEmpty()) {
+                append("60-SECOND PERFORMANCE SAMPLE (deltas between three samples)\n")
+                temporal.forEach { append(it).append('\n') }
+                append("\n\n")
+            }
+            if (findings.isNotEmpty()) {
+                append("LOCAL DIAGNOSTIC FINDINGS (computed on the phone from raw counters)\n")
+                findings.forEach { append("- ").append(it).append('\n') }
+                append("\n\n")
+            }
+        }
         return "Analyze this OpenWrt router state and tell me what is wrong or worth improving.\n" +
             "\nOperator question: $ask\n" +
             "\nRouter state follows. Secrets were redacted before this text left the phone.\n" +
-            "\n$blocks"
+            "\n$context\n$blocks"
     }
 
     private fun block(label: String, body: String): String {

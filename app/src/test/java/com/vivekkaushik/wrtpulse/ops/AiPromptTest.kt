@@ -129,4 +129,54 @@ class AiPromptTest {
         assertTrue(out.contains("LIVE WIRELESS STATUS"))
         assertTrue(out.contains("INSTALLED WIRELESS PACKAGES"))
     }
+
+    @Test
+    fun `dhcp config has its own labeled block`() {
+        val out = AiPrompt.buildUserContent(mapOf("dhcpconf" to "dhcp.lan.interface='lan'"), "")
+        assertTrue(out.contains("DHCP CONFIG (uci show dhcp)"))
+    }
+
+    @Test
+    fun `local findings and sample deltas ride along when they exist`() {
+        val out = AiPrompt.buildUserContent(
+            mapOf("info" to "x"),
+            "",
+            findings = listOf("HIGH — Mesh backhaul is weak (tx retries +1,875 in 60 s)"),
+            temporal = listOf("window: 60 s over 3 samples", "tx retries +1,875, tx failed +21"),
+            health = "Network health 78/100 (Wi-Fi 82, Mesh 64, Performance 91, Security 76)",
+        )
+        assertTrue(out.contains("NETWORK HEALTH: Network health 78/100"))
+        assertTrue(out.contains("60-SECOND PERFORMANCE SAMPLE (deltas between three samples)"))
+        assertTrue(out.contains("window: 60 s over 3 samples"))
+        assertTrue(out.contains("LOCAL DIAGNOSTIC FINDINGS (computed on the phone from raw counters)"))
+        assertTrue(out.contains("- HIGH — Mesh backhaul is weak"))
+    }
+
+    @Test
+    fun `no findings or sample leaves the payload as it was`() {
+        val out = AiPrompt.buildUserContent(mapOf("info" to "x"), "")
+        assertFalse(out.contains("LOCAL DIAGNOSTIC FINDINGS"))
+        assertFalse(out.contains("60-SECOND PERFORMANCE SAMPLE"))
+        assertFalse(out.contains("NETWORK HEALTH"))
+    }
+
+    @Test
+    fun `the six ready-made analyses each carry a focused question`() {
+        assertEquals(6, AiPrompt.Mode.entries.size)
+        AiPrompt.Mode.entries.forEach { mode ->
+            assertTrue(mode.question.isNotBlank())
+            assertTrue(mode.label.isNotBlank())
+        }
+        assertTrue(AiPrompt.Mode.WIFI.question.contains("Wi-Fi"))
+        assertTrue(AiPrompt.Mode.MESH.question.contains("mesh"))
+        assertTrue(AiPrompt.Mode.OUTAGE.question.contains("down"))
+        assertTrue(AiPrompt.Mode.LAN.question.contains("DHCP"))
+    }
+
+    @Test
+    fun `the system prompt tells the provider to build on the phone-side findings`() {
+        assertTrue(AiPrompt.SYSTEM.contains("local findings"))
+        assertTrue(AiPrompt.SYSTEM.contains("sample deltas"))
+        assertTrue(AiPrompt.SYSTEM.contains("its own line"))
+    }
 }

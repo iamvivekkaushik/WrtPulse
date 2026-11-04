@@ -94,4 +94,60 @@ class AiClientTest {
         assertTrue(AiSettings(baseUrl = "https://x", model = "m", apiKey = "k").configured)
         assertTrue(AiSettings(apiKey = "k").configured)
     }
+
+    @Test
+    fun `a local endpoint is configured without a key`() {
+        val ollama = AiSettings(
+            baseUrl = "http://192.168.1.100:11434/v1",
+            model = "llama3.2",
+            apiKey = "",
+        )
+        assertTrue(ollama.isLocal)
+        assertTrue(ollama.configured)
+        // The public endpoint still demands a key with the same field blank.
+        assertFalse(AiSettings(baseUrl = "https://api.openai.com/v1", model = "m", apiKey = "").configured)
+        assertFalse(AiSettings(baseUrl = "http://example.com:8080/v1", model = "m", apiKey = "").isLocal)
+    }
+
+    @Test
+    fun `isLocalHost recognises the private ranges and home names`() {
+        assertTrue(AiSettings.isLocalHost("127.0.0.1"))
+        assertTrue(AiSettings.isLocalHost("localhost"))
+        assertTrue(AiSettings.isLocalHost("::1"))
+        assertTrue(AiSettings.isLocalHost("10.1.2.3"))
+        assertTrue(AiSettings.isLocalHost("172.16.0.1"))
+        assertTrue(AiSettings.isLocalHost("172.31.255.255"))
+        assertTrue(AiSettings.isLocalHost("192.168.8.1"))
+        assertTrue(AiSettings.isLocalHost("169.254.3.4"))
+        assertTrue(AiSettings.isLocalHost("mybox.lan"))
+        assertTrue(AiSettings.isLocalHost("nas.local"))
+        assertFalse(AiSettings.isLocalHost("api.openai.com"))
+        assertFalse(AiSettings.isLocalHost("8.8.8.8"))
+        assertFalse(AiSettings.isLocalHost("172.32.0.1"))
+        assertFalse(AiSettings.isLocalHost("192.169.1.1"))
+        assertFalse(AiSettings.isLocalHost(""))
+    }
+
+    @Test
+    fun `hostOf pulls the host out of a base url`() {
+        assertEquals("192.168.1.100", AiSettings.hostOf("http://192.168.1.100:11434/v1"))
+        assertEquals("api.openai.com", AiSettings.hostOf("https://api.openai.com/v1"))
+        assertEquals("", AiSettings.hostOf("not a url"))
+    }
+
+    @Test
+    fun `authorization is built only when a key exists`() {
+        assertEquals("Bearer sk-x", AiSettings.authorization("sk-x"))
+        assertEquals("Bearer sk-x", AiSettings.authorization("  sk-x  "))
+        assertNull(AiSettings.authorization(""))
+        assertNull(AiSettings.authorization("   "))
+    }
+
+    @Test
+    fun `Ollama preset points at the local OpenAI compatible endpoint`() {
+        val settings = AiSettings(baseUrl = AiSettings.OLLAMA_BASE_URL, model = AiSettings.OLLAMA_MODEL)
+        assertEquals("http://192.168.1.100:11434/v1/chat/completions", settings.endpoint)
+        assertTrue(settings.isLocal)
+        assertTrue(settings.configured)
+    }
 }
