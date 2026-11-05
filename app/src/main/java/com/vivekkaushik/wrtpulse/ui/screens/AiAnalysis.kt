@@ -516,10 +516,17 @@ private fun ProviderCard(
                 modelsError = null
                 modelsNote = "loading the model list from ${url.host}…"
                 try {
+                    val openRouter = url.host.equals("openrouter.ai", ignoreCase = true) ||
+                        url.host.endsWith(".openrouter.ai", ignoreCase = true)
                     models = AiChat.listModels(
                         AiSettings(baseUrl = trimmed, model = "probe", apiKey = key.trim()),
+                        freeOnly = openRouter,
                     )
-                    modelsNote = "${models.size} models from ${url.host} — pick one or type any id."
+                    modelsNote = if (openRouter) {
+                        "${models.size} free OpenRouter models available — pick one or type any id."
+                    } else {
+                        "${models.size} models from ${url.host} — pick one or type any id."
+                    }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: AiError) {
@@ -582,7 +589,9 @@ private fun ProviderCard(
         }
         LocalizedFieldLabel("BASE URL")
         FormTextField(endpoint, { endpoint = it })
-        LocalizedFieldLabel("MODEL")
+        val openRouter = runCatching { URL(endpoint.trim()).host }
+            .getOrNull()?.equals("openrouter.ai", ignoreCase = true) == true
+        LocalizedFieldLabel(if (openRouter) "MODEL (FREE OPENROUTER)" else "MODEL")
         ModelField(
             value = model,
             onValue = { model = it },

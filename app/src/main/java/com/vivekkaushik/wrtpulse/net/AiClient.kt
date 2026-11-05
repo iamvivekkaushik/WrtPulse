@@ -218,7 +218,7 @@ object AiChat {
      * and an unrecognised body answers empty rather than throwing, because a model id can
      * always be typed by hand.
      */
-    fun parseModelsBody(body: String): List<String> {
+    fun parseModelsBody(body: String, freeOnly: Boolean = false): List<String> {
         val trimmed = body.trim()
         if (trimmed.isEmpty()) return emptyList()
         val array = when {
@@ -228,10 +228,21 @@ object AiChat {
         } ?: return emptyList()
         val ids = mutableListOf<String>()
         for (i in 0 until array.length()) {
-            val id = array.optJSONObject(i)?.optString("id")?.trim().orEmpty()
-            if (id.isNotEmpty() && id != "null") ids += id
+            val model = array.optJSONObject(i) ?: continue
+            val id = model.optString("id").trim()
+            if (id.isNotEmpty() && id != "null" && (!freeOnly || isFreeModel(model, id))) ids += id
         }
         return ids.distinct().sorted()
+    }
+
+    /** OpenRouter marks free models with a :free id suffix and/or zero prompt/completion pricing. */
+    private fun isFreeModel(model: JSONObject, id: String): Boolean {
+        if (id.endsWith(":free", ignoreCase = true)) return true
+        val pricing = model.optJSONObject("pricing") ?: return false
+        val prompt = pricing.optString("prompt").trim()
+        val completion = pricing.optString("completion").trim()
+        return prompt.toBigDecimalOrNull() == java.math.BigDecimal.ZERO &&
+            completion.toBigDecimalOrNull() == java.math.BigDecimal.ZERO
     }
 
     /**
@@ -240,7 +251,7 @@ object AiChat {
      * same plain-http refusal as [complete]; a provider that implements no /models endpoint
      * answers 404 and the screen falls back to the hand-typed field it always was.
      */
-    suspend fun listModels(settings: AiSettings): List<String> = withContext(Dispatchers.IO) {
+    suspend fun listModels(settings: AiSettings, freeOnly: Boolean = false): List<String> = withContext(Dispatchers.IO) {
         val url = URL(settings.modelsEndpoint)
         requireSecureTransport(url)
         val connection = try {
@@ -258,7 +269,7 @@ object AiChat {
             val code = connection.responseCode
             if (code != 200) throw AiError(modelsError(connection, code, settings))
             val body = connection.inputStream.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
-            parseModelsBody(body).ifEmpty {
+            parseModelsBody(body, freeOnly = freeOnly).ifEmpty {
                 throw AiError("The provider listed no models at ${settings.modelsEndpoint}.")
             }
         } catch (e: CancellationException) {

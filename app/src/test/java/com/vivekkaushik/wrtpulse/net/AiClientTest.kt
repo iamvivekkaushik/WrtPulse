@@ -196,6 +196,22 @@ class AiClientTest {
     }
 
     @Test
+    fun `parseModelsBody filters OpenRouter free models by suffix and pricing`() {
+        val body = """
+            {"data":[
+              {"id":"paid/model","pricing":{"prompt":"0.000001","completion":"0.000002"}},
+              {"id":"provider/model:free","pricing":{"prompt":"0.1","completion":"0.1"}},
+              {"id":"zero-priced/model","pricing":{"prompt":"0","completion":"0"}}
+            ]}
+        """.trimIndent()
+        assertEquals(
+            listOf("provider/model:free", "zero-priced/model"),
+            AiChat.parseModelsBody(body, freeOnly = true),
+        )
+        assertEquals(3, AiChat.parseModelsBody(body).size)
+    }
+
+    @Test
     fun `parseModelsBody yields nothing on bodies it cannot read`() {
         assertTrue(AiChat.parseModelsBody("").isEmpty())
         assertTrue(AiChat.parseModelsBody("   ").isEmpty())
