@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Only the backup directory is shared. A config archive carries the router's whole
-    configuration, so nothing else in the app's storage is reachable through the provider.
+    Only these two directories are shared. A config archive carries the router's whole
+    configuration, so nothing else in the app's storage is reachable through the provider;
+    the AI reports are diagnostics the operator chose to export, and live beside them.
 -->
 <paths>
     <files-path name="backups" path="backups/" />
+    <files-path name="reports" path="reports/" />
 </paths>

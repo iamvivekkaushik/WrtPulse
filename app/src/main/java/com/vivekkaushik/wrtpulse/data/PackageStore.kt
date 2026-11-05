@@ -44,6 +44,10 @@ class PackageStore(private val session: RouterSession) {
 
     val installedNames: Set<String> get() = installed.mapTo(mutableSetOf()) { it.name }
 
+    /** Wireless packages from the curated list that are not installed on this router. */
+    val missingWirelessPackages: List<Pair<String, String>>
+        get() = WIRELESS_CONFIGURATION_PACKAGES.filter { it.first !in installedNames }
+
     suspend fun load() {
         loading = true
         try {
@@ -135,6 +139,48 @@ class PackageStore(private val session: RouterSession) {
     suspend fun install(name: String): String =
         run(Commands.installPackage(name), "Installed $name", name)
 
+    /**
+     * Streams a user-selected .ipk/.apk to /tmp and lets the router's own package manager
+     * validate and install it. The file is removed afterwards, including on an install error.
+     * This is intentionally separate from feed installation: an offline package has no feed
+     * metadata, so the router is the only safe authority for dependency/signature handling.
+     */
+    suspend fun uploadLocalPackage(fileName: String, bytes: ByteArray): String {
+        val safeName = fileName.substringAfterLast('/').substringAfterLast('\\')
+        val validName = safeName.matches(Regex("[A-Za-z0-9._+-]+\\.(ipk|apk)", RegexOption.IGNORE_CASE))
+        if (!validName) return "Failed: choose an .ipk or .apk package file."
+        if (bytes.isEmpty()) return "Failed: the package file is empty."
+        if (bytes.size > MAX_LOCAL_PACKAGE_BYTES) {
+            return "Failed: package is over ${MAX_LOCAL_PACKAGE_BYTES / 1024 / 1024} MB."
+        }
+        val remote = "/tmp/wrtpulse-package-${safeName.replace(Regex("[^A-Za-z0-9._+-]"), "_")}"
+        busy = true
+        return try {
+            val install = if (manager == "apk") {
+                "apk add --allow-untrusted '$remote'"
+            } else {
+                "opkg install '$remote'"
+            }
+            val out = session.execWithInput(
+                "cat > '$remote' && chmod 600 '$remote' && ($install); rc=\$?; rm -f '$remote'; exit \$rc",
+                bytes,
+                timeoutMs = 300_000,
+            )
+            if (out.ok) {
+                load()
+                "Installed $safeName"
+            } else {
+                val why = (out.stderr.trim().ifEmpty { out.stdout.trim() })
+                    .lines().lastOrNull { it.isNotBlank() } ?: "exit ${out.exitCode}"
+                "Failed: $why"
+            }
+        } catch (e: SshException) {
+            "Failed: ${e.message}"
+        } finally {
+            busy = false
+        }
+    }
+
     suspend fun remove(name: String): String = when (val block = removalBlock(name)) {
         null -> run(Commands.removePackage(name), "Removed $name", name)
         else -> "Failed: $block"
@@ -181,6 +227,21 @@ class PackageStore(private val session: RouterSession) {
     }
 
     companion object {
+
+        const val MAX_LOCAL_PACKAGE_BYTES = 32 * 1024 * 1024
+
+        /**
+         * Common packages for LuCI wireless configuration, WDS and 802.11s on OpenWrt 23.05.x.
+         * Resolution is always delegated to the router's configured feed; hard-coding a
+         * mipsel_24kc URL would be unsafe on another target or release.
+         */
+        val WIRELESS_CONFIGURATION_PACKAGES = listOf(
+            "luci-mod-network" to "LuCI Network/Wireless configuration",
+            "wpad-mesh-mbedtls" to "802.11s Mesh and WDS-capable WPA daemon",
+            "iw" to "nl80211 wireless diagnostic/configuration tool",
+            "hostapd" to "AP/WDS authentication daemon",
+            "bridge" to "Linux bridge utilities",
+        )
 
         /**
          * Packages this app refuses to remove.

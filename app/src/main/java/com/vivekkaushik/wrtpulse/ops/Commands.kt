@@ -38,6 +38,102 @@ object Commands {
             "iwinfo 2>/dev/null | grep ESSID || true",
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
+    /**
+     * One read-only sweep for the AI analysis screen: identity, load, storage, both configs,
+     * the client table and the recent warnings — everything a diagnosis wants in one round
+     * trip. Nothing here writes; the log is pre-filtered to error/warn lines and capped so a
+     * chatty router cannot balloon the payload. Secrets in the uci blocks are redacted on the
+     * phone before anything is sent (AiPrompt.redact).
+     */
+    val AI_SNAPSHOT = listOf(
+        "echo $SECTION board" to BOARD,
+        "echo $SECTION info" to "ubus call system info",
+        "echo $SECTION performance" to
+            "echo 'LOADAVG'; cat /proc/loadavg 2>/dev/null; " +
+                "echo 'MEMORY'; awk '/^(MemTotal|MemFree|MemAvailable|SwapTotal|SwapFree):/ {print}' /proc/meminfo 2>/dev/null; " +
+                "echo 'CPU'; head -n 5 /proc/stat 2>/dev/null; " +
+                "echo 'NETDEV'; cat /proc/net/dev 2>/dev/null; " +
+                "echo 'STORAGE'; df -k 2>/dev/null",
+        "echo $SECTION overlay" to "df -k /overlay | tail -n1",
+        "echo $SECTION wireless" to "uci show wireless 2>/dev/null",
+        "echo $SECTION network" to "uci show network 2>/dev/null",
+        "echo $SECTION firewall" to "uci show firewall 2>/dev/null",
+        "echo $SECTION routes" to "ip route 2>/dev/null; ip -6 route 2>/dev/null",
+        "echo $SECTION wifi_status" to "ubus call network.wireless status 2>/dev/null || true",
+        "echo $SECTION packages" to
+            "if command -v apk >/dev/null 2>&1; then apk info 2>/dev/null; " +
+                "else opkg list-installed 2>/dev/null; fi | grep -Ei 'iw|hostapd|wpad|luci-(base|mod-network)|rpcd-mod-iwinfo' || true",
+        // OpenWrt Network Expert pack: bounded, read-only evidence for WAN/DNS/DHCP,
+        // regulatory/radio capability, interference, and mesh transports. These blocks are
+        // deliberately separate so the preview can tell an unavailable tool from an empty state.
+        "echo $SECTION release" to "cat /etc/openwrt_release 2>/dev/null || true",
+        "echo $SECTION links" to "ip -br addr 2>/dev/null; ip -br link 2>/dev/null",
+        "echo $SECTION network_status" to "ubus call network.interface dump 2>/dev/null || true",
+        "echo $SECTION radio_caps" to
+            "if command -v iw >/dev/null 2>&1; then iw list 2>/dev/null | " +
+                "grep -E -A4 -B2 'Supported interface modes|mesh point|4addr|Supported Channel Width|DFS' | head -n 180; " +
+                "else echo 'iw unavailable'; fi",
+        "echo $SECTION survey" to
+            "if command -v iw >/dev/null 2>&1; then " +
+                "for i in \$(for d in /sys/class/net/*; do [ -d \"\$d/phy80211\" ] && echo \"\${d##*/}\"; done); do " +
+                "echo \"# \$i\"; iw dev \"\$i\" survey dump 2>/dev/null | head -n 100; done; " +
+                "else echo 'iw unavailable'; fi",
+        "echo $SECTION wifi_scan" to
+            "if command -v iwinfo >/dev/null 2>&1; then " +
+                "for i in \$(for d in /sys/class/net/*; do [ -d \"\$d/phy80211\" ] && echo \"\${d##*/}\"; done); do " +
+                "echo \"# \$i\"; iwinfo \"\$i\" info 2>/dev/null; iwinfo \"\$i\" scan 2>/dev/null | head -n 80; done; " +
+                "else echo 'iwinfo unavailable'; fi",
+        "echo $SECTION wan_diag" to
+            "gw=\$(ip route show default 2>/dev/null | awk '{print \$3; exit}'); " +
+                "echo DEFAULT_GW=\${gw:-none}; [ -n \"\$gw\" ] && ping -c 3 -W 2 \"\$gw\" 2>&1 || true; " +
+                "ping -c 3 -W 2 1.1.1.1 2>&1 || true; " +
+                "command -v nslookup >/dev/null 2>&1 && nslookup openwrt.org 2>&1 || true",
+        "echo $SECTION dhcp_diag" to
+            "ubus call dhcp ipv4leases 2>/dev/null || true; " +
+                "command -v bridge >/dev/null 2>&1 && (bridge link 2>/dev/null; bridge vlan show 2>/dev/null) || true; " +
+                "logread 2>/dev/null | grep -Ei 'dnsmasq|odhcpd|DHCPDISCOVER|DHCPOFFER|DHCPREQUEST|DHCPACK|DHCPNAK|lease' | tail -n 80 || true",
+        "echo $SECTION mesh" to
+            "echo '--- wireless mesh/WDS ---'; " +
+                "iw dev 2>/dev/null; " +
+                "for i in \$(for d in /sys/class/net/*; do [ -d \"\$d/phy80211\" ] && echo \"\${d##*/}\"; done); do " +
+                "echo \"# \$i link\"; iw dev \"\$i\" link 2>/dev/null; " +
+                "echo \"# \$i mpath\"; iw dev \"\$i\" mpath dump 2>/dev/null; done; " +
+                "if command -v batctl >/dev/null 2>&1; then batctl meshif bat0 interface 2>/dev/null; " +
+                "batctl meshif bat0 originators 2>/dev/null; batctl meshif bat0 neighbors 2>/dev/null; " +
+                "batctl meshif bat0 gateways 2>/dev/null; else echo 'batctl unavailable'; fi",
+        "echo $SECTION dhcp" to "cat /tmp/dhcp.leases 2>/dev/null",
+        "echo $SECTION dhcpconf" to "uci show dhcp 2>/dev/null",
+        "echo $SECTION assoc" to ASSOC_COUNTS,
+        "echo $SECTION log" to
+            "logread 2>/dev/null | grep -Ei 'error|fail|warn|crit' | tail -n 40 || true",
+    ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
+    /**
+     * One point-in-time performance sample for the AI screen's temporal run. The phone drives
+     * the cadence — [com.vivekkaushik.wrtpulse.data.AiStore] runs this three times, thirty
+     * seconds apart — so the countdown is visible on screen and a dead SSH link shows up as a
+     * failed sample instead of a sixty-second silence inside one exec.
+     *
+     * Counters only mean something against a second sample: uptime gives the honest elapsed
+     * time on the router's clock, /proc/stat the CPU jiffies, /proc/net/dev the byte and error
+     * counters, and the station dump the per-client `tx retries` and `tx failed` numbers that
+     * make a weak mesh link provable. Two pings bracket the path: the first hop out (the WAN
+     * gateway when there is one) and the internet, because "lost after the gateway" and "lost
+     * before it" are different problems.
+     */
+    val AI_TICK = listOf(
+        "echo $SECTION uptime" to "cut -d. -f1 /proc/uptime",
+        "echo $SECTION loadavg" to "cat /proc/loadavg",
+        "echo $SECTION cpu" to "head -n 1 /proc/stat",
+        "echo $SECTION mem" to "awk '/^(MemTotal|MemAvailable):/ {print}' /proc/meminfo",
+        "echo $SECTION netdev" to "cat /proc/net/dev",
+        "echo $SECTION assoc" to ASSOC_COUNTS,
+        "echo $SECTION ping" to
+            "gw=\$(ip route show default 2>/dev/null | awk '{print \$3; exit}'); " +
+                "ping -c 3 -W 2 -q \${gw:-1.1.1.1} 2>&1 || true",
+        "echo $SECTION inet" to "ping -c 3 -W 2 -q 1.1.1.1 2>&1 || true",
+    ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
+
     /** Wireless config as UCI key=value lines. */
     const val WIRELESS_CONFIG = "uci show wireless"
 

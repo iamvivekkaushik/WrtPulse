@@ -198,10 +198,11 @@ interface RouterDao {
     suspend fun setGroup(id: Long, group: String?)
 }
 
-@Database(entities = [RouterEntity::class, ClientName::class], version = 7, exportSchema = false)
+@Database(entities = [RouterEntity::class, ClientName::class, AiAnalysisLog::class], version = 9, exportSchema = false)
 abstract class WrtDb : RoomDatabase() {
     abstract fun routers(): RouterDao
     abstract fun clientNames(): ClientNameDao
+    abstract fun aiAnalysisLogs(): AiAnalysisLogDao
 
     companion object {
         private val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -268,9 +269,44 @@ abstract class WrtDb : RoomDatabase() {
             }
         }
 
+        /** Local AI results only; no provider key or raw router payload is stored. */
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS ai_analysis_logs (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "routerIdentity TEXT NOT NULL, routerHost TEXT NOT NULL, " +
+                        "question TEXT NOT NULL, answer TEXT NOT NULL, model TEXT NOT NULL, " +
+                        "createdAtEpochMs INTEGER NOT NULL, healthScore INTEGER, findingCount INTEGER NOT NULL)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_ai_analysis_logs_routerIdentity_createdAtEpochMs " +
+                        "ON ai_analysis_logs(routerIdentity, createdAtEpochMs)"
+                )
+            }
+        }
+
+        /** Preserve existing saved answers; older rows simply have no captured local findings. */
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE ai_analysis_logs ADD COLUMN findingsJson TEXT NOT NULL DEFAULT '[]'"
+                )
+            }
+        }
+
         fun build(context: Context): WrtDb =
             Room.databaseBuilder(context, WrtDb::class.java, "wrtpulse.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(
+                    MIGRATION_1_2,
+                    MIGRATION_2_3,
+                    MIGRATION_3_4,
+                    MIGRATION_4_5,
+                    MIGRATION_5_6,
+                    MIGRATION_6_7,
+                    MIGRATION_7_8,
+                    MIGRATION_8_9,
+                )
                 .build()
     }
 }

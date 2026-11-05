@@ -19,7 +19,7 @@ cannot, the app does not pretend otherwise.
 | **Clients** | Every device on the router, wireless and wired, with signal, lease, and per-client usage when `nlbwmon` is installed. Rename, block, wake-on-LAN, and DHCP reservations. |
 | **Network** | **LAN & local network** — the subnet, the DHCP server on it, static leases, and the switch VLANs behind it. **Internet & WAN gateways** — the uplinks, their port and VLAN tag, the IPv4 protocol, IPv6 and prefix delegation, and a connection test. Radios and wireless interfaces. Add or edit APs and station (client) links, change channel, width, encryption and SSID. Every change is staged, shown as a diff, and applied in one `uci batch`. Neighbour scans suggest the least busy channel. **Mesh** — seamless hand-off across your SSIDs and your other OpenWrt routers as nodes, wired or over 802.11s. |
 | **Terminal** | A real SSH shell with a VT screen model — cursor addressing, scrollback, selection and paste — and multiple tabs on one connection. |
-| **System** | Live logs (`logread -f`), packages, services, **LEDs** — every LED the router exposes with the modes its triggers allow, the colours the LEDs behind one lens can make together, and a connectivity watch (white / yellow / red, or whatever the lens can show) installed as a procd service — firmware, backup & restore, regulatory domain, and SSH keys. |
+| **System** | Live logs (`logread -f`), packages, services, **LEDs** — every LED the router exposes with the modes its triggers allow, the colours the LEDs behind one lens can make together, and a connectivity watch (white / yellow / red, or whatever the lens can show) installed as a procd service — firmware, backup & restore, regulatory domain, and SSH keys. **AI analysis** — three layers, all read-only: local rules diagnose the obvious on the phone (weak signal, climbing `tx failed`, a full `/overlay`, rogue DHCP, bridge without STP, wrong `wpad`) with the evidence and the command behind each finding; a 60-second, three-sample performance window differences retries, failed frames, loss, latency, CPU, RAM and per-interface throughput; and a redacted payload — previewed in full — streams to any OpenAI-compatible endpoint you configure (OpenAI, Gemini, OpenRouter, Groq, your own, or an Ollama server on your LAN that needs no key and keeps everything inside the network). Commands in the answer copy in one tap when read-only, ask twice when they change the router, and destructive ones (`reboot`, `firstboot`, `sysupgrade`) are never offered. The whole analysis exports to Markdown, plain text or PDF, optionally masking MAC and public addresses for sharing. |
 
 ### LAN & local network, in more detail
 
@@ -129,6 +129,47 @@ does not configure.
 - **SSH keys** — the router's `authorized_keys` with SHA256 fingerprints, marking the entry the
   app itself is signed in with.
 
+### AI analysis, in more detail
+
+- **Local diagnosis first** — the obvious problems are found on the phone, in milliseconds,
+  offline, before any provider is asked: a client beyond -80 dBm, `tx failed` climbing, a
+  `/overlay` past 90%, more than one DHCP scope (or one on an uplink), a bridge with several
+  ports and no STP, `wpad-basic` under a configured 802.11s mesh, an internet path that dies
+  after the first hop or before it. Every finding carries its evidence (the numbers), the
+  exact read-only command that reproduces it, and the raw lines it was read from — a claim
+  without proof never reaches the screen.
+- **Network health score** — one number out of a hundred with four subscores (Wi-Fi, Mesh,
+  Performance, Security), recomputed from the sweep and the 60-second sample. Every point it
+  takes away is tied to a measurement, at the same thresholds the local findings flag, and a
+  router with no mesh shows "—" instead of a fake 100.
+- **The 60-second sample** — three ticks, thirty seconds apart, each its own round trip so
+  the countdown is live and a dead link is a failed tick, not a minute of silence. The phone
+  differences them: `tx retries` and `tx failed` per link, packet loss and worst latency to
+  the gateway and to the internet, CPU and RAM drift, and per-interface traffic rates. This
+  is what turns "tx failed is 21" into "tx failed grew by 21 this minute, on that link" — the
+  Floor1 mesh question answered with numbers instead of suspicion. A station that
+  reconnected mid-window resets its counters; the difference is clamped at zero, never
+  reported as a cure.
+- **Ready-made analyses** — six one-tap questions aimed at one subsystem (Wi-Fi, Mesh & WDS,
+  Performance, Security, Internet outage, DHCP/bridge/STP) without hiding the rest of the
+  snapshot from the provider.
+- **The provider step** — the payload carries the sweep, the sample deltas and the local
+  findings, redacted and previewed in full before it leaves. Any OpenAI-compatible endpoint
+  works; a local one (Ollama on `http://192.168.x.x:11434/v1`) needs no key, sends no
+  Authorization header, and keeps the router's data inside the network. Plain http is
+  permitted to private addresses only — a public http endpoint is refused with the same
+  message Android used to give, because the API key must never ride cleartext.
+- **Safe command copying** — every command line in the answer is classified before a
+  clipboard sees it: read-only commands copy in one tap, changing ones (`uci set`, `wifi`,
+  service restarts, installs) need a second confirming tap, and destructive ones — `reboot`,
+  `firstboot`, `sysupgrade`, `mtd write`, `rm -rf`, `dd of=/dev/…` — are shown struck through
+  and never offered, whatever spelling the model used.
+- **The report** — health, findings, sample and answer export to Markdown, plain text or a
+  paginated PDF (the platform's own `PdfDocument`, no new dependency), each handed to the
+  share sheet. Secrets were redacted before analysis ever ran; one toggle additionally masks
+  MAC addresses and public IPs for the copy that leaves your hands, keeping private and
+  link-local addresses because a LAN report that cannot mention the LAN is useless.
+
 ## How it decides what to do
 
 Four rules run through the codebase, and most of the odd-looking decisions follow from them.
@@ -201,6 +242,11 @@ pinned. Where an outside authority exists it is used: key fingerprints are check
 Kotlin 2.2.10 · AGP 9.4.0 · Compose BOM 2026.02.01 · Room 2.8.4 · minSdk 28 · targetSdk 36.
 SSH is JSch with BouncyCastle, which Android needs for ed25519.
 
+`./gradlew assembleRelease -PdebugSignedRelease` builds the same minified, resource-shrunk
+release APK signed with the debug key instead — what `apk-release.yml` publishes before the
+upload keystore is configured. The property is ignored whenever the release keystore is
+present, and without either the release build is still plain unsigned.
+
 ## Releasing
 
 Builds, tests and releases go through fastlane, and GitHub Actions calls the same lanes, so
@@ -228,8 +274,14 @@ With none of these set the release build is unsigned and the lane refuses — it
 produces something that cannot ship. `VERSION_NAME` and `VERSION_CODE` in the environment
 override the Gradle defaults.
 
-**CI.** `.github/workflows/ci.yml` runs `check` and uploads a debug APK on every push and pull
-request. `.github/workflows/release.yml` fires on a `v*` tag: it restores the keystore from
+**CI.** `.github/workflows/build.yml` runs the unit tests and uploads a debug APK on every push
+and pull request. `.github/workflows/apk-release.yml` publishes an **installable APK on GitHub
+Releases with no secrets required**: on every push to master (or a manual run) it runs the tests,
+builds the real release build type, and attaches it to the rolling `latest` release at
+`releases/latest` — release-signed when the `KEYSTORE_*` secrets exist, otherwise the same
+minified build signed with the debug key (`assembleRelease -PdebugSignedRelease`), which installs
+on any device. A manual run can publish under a different tag; `v*` tags are refused there, as
+they belong to release.yml. `.github/workflows/release.yml` fires on a `v*` tag: it restores the keystore from
 `KEYSTORE_BASE64` (`base64 -i release.jks`), reads `versionName` and `versionCode` from
 `app/build.gradle.kts` — refusing a tag that disagrees with the name, or a code that did not move
 since the previous tag — builds the signed AAB and APK, and attaches both to a GitHub Release

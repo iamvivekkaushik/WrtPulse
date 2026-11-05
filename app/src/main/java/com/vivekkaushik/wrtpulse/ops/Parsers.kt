@@ -392,6 +392,8 @@ data class WifiNetwork(
     val mobilityDomain: String = "",
     /** An 802.11s point's mesh id; the SSID field is empty on such a section. */
     val meshId: String = "",
+    /** 802.11 WDS four-address mode, supported by AP and station interfaces. */
+    val wds: Boolean = false,
 ) {
     val isClient: Boolean get() = mode == "sta"
     val isMesh: Boolean get() = mode == "mesh"
@@ -1890,6 +1892,7 @@ object Parsers {
                         ieee80211r = opt(section, "ieee80211r") == "1",
                         mobilityDomain = opt(section, "mobility_domain").orEmpty(),
                         meshId = opt(section, "mesh_id").orEmpty(),
+                        wds = opt(section, "wds") == "1",
                     )
                 }
             }

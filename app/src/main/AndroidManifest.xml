@@ -15,6 +15,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.WrtPulse">
         <!-- Rotation, fold/unfold, split-screen and night-mode flips recompose in place instead
              of recreating the Activity. The whole app state (destination, open sheets, typed
@@ -40,7 +41,9 @@
         </activity>
 
         <!-- Lets the config backup leave the app through a share sheet. A backup that only
-             exists on the router being reflashed is not a backup. -->
+             exists on the router being reflashed is not a backup. The reports path carries the
+             AI analysis exports — diagnostics, not config, but the same rule applies: only
+             these two directories are reachable through the provider. -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"

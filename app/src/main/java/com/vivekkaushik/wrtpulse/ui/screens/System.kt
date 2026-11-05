@@ -78,6 +78,7 @@ fun SystemScreen(
     onOpenSshKeys: () -> Unit = {},
     onOpenBackup: () -> Unit = {},
     onOpenAbout: () -> Unit = {},
+    onOpenAi: () -> Unit = {},
     /** Renames the router itself; returns what went wrong, or null once it took. */
     onSetHostname: (suspend (String) -> String?)? = null,
 ) {
@@ -110,6 +111,13 @@ fun SystemScreen(
                         else -> "No backup on this phone yet"
                     },
                     onClick = if (isLive) onOpenBackup else null,
+                )
+                // Reads on open like its neighbours, and sends nothing without a press: the
+                // provider, key and payload all live behind this row.
+                SystemRow(
+                    WrtIcons.Spark, "AI analysis",
+                    "router state → findings → advice",
+                    onClick = if (isLive) onOpenAi else null,
                 )
                 if (isLive) {
                     SystemRow(

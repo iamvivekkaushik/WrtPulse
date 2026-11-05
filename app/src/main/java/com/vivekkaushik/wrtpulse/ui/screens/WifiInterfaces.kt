@@ -792,6 +792,7 @@ fun ApFormScreen(
     var hidden by remember { mutableStateOf(existing?.hidden ?: draft?.hidden ?: false) }
     var isolate by remember { mutableStateOf(existing?.isolate ?: draft?.isolate ?: false) }
     var ft by remember { mutableStateOf(existing?.ieee80211r ?: draft?.ft ?: false) }
+    var wds by remember { mutableStateOf(existing?.wds ?: draft?.wds ?: false) }
     var reveal by remember { mutableStateOf(false) }
     // Creating a network on a dead radio is almost never what anyone means, so the fix is
     // pre-selected — but it is staged like everything else and shows up in the diff.
@@ -967,6 +968,12 @@ fun ApFormScreen(
                     ft && ftPossible,
                     divider = false,
                 ) { if (ftPossible) ft = !ft }
+                ToggleRow(
+                    "WDS four-address bridge",
+                    "Enable this on both the local AP and the remote WDS client to extend the same Layer-2 network.",
+                    wds,
+                    divider = false,
+                ) { wds = !wds }
                 if (ft && ftPossible) {
                     // The domain follows the name: every AP and node carrying this SSID derives
                     // the same one, so it is shown rather than asked for. A saved AP whose
@@ -1029,6 +1036,7 @@ fun ApFormScreen(
                         store.stage(existing.section, "network", existing.network, network)
                         store.stage(existing.section, "hidden", if (existing.hidden) "1" else "0", if (hidden) "1" else "0")
                         store.stage(existing.section, "isolate", if (existing.isolate) "1" else "0", if (isolate) "1" else "0")
+                        store.stage(existing.section, "wds", if (existing.wds) "1" else "0", if (wds) "1" else "0")
                         // Only touched when it changes, or when a renamed SSID moves its domain.
                         if (ft != existing.ieee80211r || (ft && ssid != existing.ssid)) {
                             store.stageFastTransition(existing, ft, ssid)
@@ -1046,6 +1054,7 @@ fun ApFormScreen(
                             isolate = isolate,
                             network = network,
                             ft = ft,
+                            wds = wds,
                         )
                     }
                 }
@@ -1242,6 +1251,7 @@ fun ClientJoinScreen(
     }
     var uplink by remember { mutableStateOf(draft?.zone?.isNotEmpty() ?: true) }
     var repeater by remember { mutableStateOf(false) }
+    var wds by remember { mutableStateOf(existing?.wds ?: draft?.wds ?: false) }
     var reveal by remember { mutableStateOf(false) }
     var enableRadio by remember { mutableStateOf(existing == null) }
 
@@ -1252,13 +1262,14 @@ fun ClientJoinScreen(
         ifaceName.isBlank() -> "The uplink needs an interface name."
         else -> null
     }
-    val previewOps = remember(ssid, security, password, ifaceName, uplink, zone) {
+    val previewOps = remember(ssid, security, password, ifaceName, uplink, zone, wds) {
         buildList {
             add("+ wireless.$ifaceName=wifi-iface")
             add("+ wireless.$ifaceName.mode='sta'")
             add("+ wireless.$ifaceName.ssid='$ssid'")
             add("+ wireless.$ifaceName.encryption='$security'")
             if (!open) add("+ wireless.$ifaceName.key='••••'")
+            if (wds) add("+ wireless.$ifaceName.wds='1'")
             add("+ network.$ifaceName.proto='dhcp'")
             if (uplink) add("+ firewall.@zone[$zone].network += '$ifaceName'")
         }
@@ -1362,6 +1373,12 @@ fun ClientJoinScreen(
                         repeater,
                         divider = false,
                     ) { repeater = !repeater }
+                    ToggleRow(
+                        "Client-WDS (four-address)",
+                        "Bridge the remote LAN transparently. The remote AP must have WDS enabled too; this is not a routed WAN link.",
+                        wds,
+                        divider = false,
+                    ) { wds = !wds }
                 }
                 Column(
                     Modifier
@@ -1422,6 +1439,7 @@ fun ClientJoinScreen(
                     store.stage(existing.section, "ssid", existing.ssid, ssid)
                     store.stage(existing.section, "encryption", existing.encryption, security)
                     store.stage(existing.section, "key", existing.key, if (open) "" else password)
+                    store.stage(existing.section, "wds", if (existing.wds) "1" else "0", if (wds) "1" else "0")
                 } else {
                     draft?.let { store.removeDraft(it.id) }
                     store.addDraft(
@@ -1432,6 +1450,7 @@ fun ClientJoinScreen(
                         key = password,
                         network = ifaceName,
                         zone = if (uplink) zone else "",   // opting out is explicit
+                        wds = wds,
                     )
                     if (repeater) {
                         store.addDraft(

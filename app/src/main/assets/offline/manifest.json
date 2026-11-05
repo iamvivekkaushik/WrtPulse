@@ -1,0 +1,564 @@
+{
+  "bundles": [
+    {
+      "release": "23.05.5",
+      "target": "ramips/mt7620",
+      "arch": "mipsel_24kc",
+      "totalBytes": 2012006,
+      "packages": [
+        {
+          "name": "libubox20230523",
+          "version": "2023-05-23-75a3b870-1",
+          "file": "libubox20230523.ipk",
+          "bytes": 20012,
+          "description": "Basic utility library",
+          "root": false
+        },
+        {
+          "name": "libubus20230605",
+          "version": "2023-06-05-f787c97b-1",
+          "file": "libubus20230605.ipk",
+          "bytes": 10006,
+          "description": "OpenWrt RPC client library",
+          "root": false
+        },
+        {
+          "name": "libuci20130104",
+          "version": "2023-08-10-5781664d-1",
+          "file": "libuci20130104.ipk",
+          "bytes": 15822,
+          "description": "C library for the Unified Configuration Interface (UCI)",
+          "root": false
+        },
+        {
+          "name": "libjson-c5",
+          "version": "0.16-3",
+          "file": "libjson-c5.ipk",
+          "bytes": 23309,
+          "description": "This package contains a library for javascript object notation backends.",
+          "root": false
+        },
+        {
+          "name": "libblobmsg-json20230523",
+          "version": "2023-05-23-75a3b870-1",
+          "file": "libblobmsg-json20230523.ipk",
+          "bytes": 4665,
+          "description": "blobmsg <-> json conversion library",
+          "root": false
+        },
+        {
+          "name": "rpcd",
+          "version": "2023-07-01-c07ab2f9-1",
+          "file": "rpcd.ipk",
+          "bytes": 23722,
+          "description": "This package provides the UBUS RPC backend server to expose various",
+          "root": false
+        },
+        {
+          "name": "rpcd-mod-file",
+          "version": "2023-07-01-c07ab2f9-1",
+          "file": "rpcd-mod-file.ipk",
+          "bytes": 7354,
+          "description": "Provides ubus calls for file and directory operations.",
+          "root": false
+        },
+        {
+          "name": "libnl-tiny1",
+          "version": "2023-07-27-bc92a280-1",
+          "file": "libnl-tiny1.ipk",
+          "bytes": 12993,
+          "description": "This package contains a stripped down version of libnl",
+          "root": false
+        },
+        {
+          "name": "rpcd-mod-luci",
+          "version": "20240305-1",
+          "file": "rpcd-mod-luci.ipk",
+          "bytes": 13341,
+          "description": "Provides LuCI backend ubus RPC operations.",
+          "root": false
+        },
+        {
+          "name": "libucode20230711",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "libucode20230711.ipk",
+          "bytes": 68894,
+          "description": "The libucode package provides the shared runtime library for the ucode interpreter.",
+          "root": false
+        },
+        {
+          "name": "rpcd-mod-ucode",
+          "version": "2023-07-01-c07ab2f9-1",
+          "file": "rpcd-mod-ucode.ipk",
+          "bytes": 8647,
+          "description": "Allows implementing plugins using ucode scripts.",
+          "root": false
+        },
+        {
+          "name": "cgi-io",
+          "version": "2022-08-10-901b0f04-21",
+          "file": "cgi-io.ipk",
+          "bytes": 8304,
+          "description": "This package contains an cgi utility that is useful for up/downloading files",
+          "root": false
+        },
+        {
+          "name": "ucode",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode.ipk",
+          "bytes": 6556,
+          "description": "ucode is a tiny script interpreter featuring an ECMAScript oriented",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-fs",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-fs.ipk",
+          "bytes": 9148,
+          "description": "The filesystem plugin module allows interaction with the local file system.",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-uci",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-uci.ipk",
+          "bytes": 6712,
+          "description": "The uci module allows templates to read and modify uci configuration.",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-ubus",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-ubus.ipk",
+          "bytes": 13609,
+          "description": "The ubus module allows ucode template scripts to enumerate and invoke ubus procedures.",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-math",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-math.ipk",
+          "bytes": 3233,
+          "description": "The math plugin provides access to various <math.h> procedures.",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-html",
+          "version": "1",
+          "file": "ucode-mod-html.ipk",
+          "bytes": 23270,
+          "description": "ucode HTML utility library",
+          "root": false
+        },
+        {
+          "name": "liblucihttp0",
+          "version": "2023-03-15-9b5b683f-1",
+          "file": "liblucihttp0.ipk",
+          "bytes": 7531,
+          "description": "LuCI HTTP utility library",
+          "root": false
+        },
+        {
+          "name": "liblucihttp-ucode",
+          "version": "2023-03-15-9b5b683f-1",
+          "file": "liblucihttp-ucode.ipk",
+          "bytes": 4212,
+          "description": "ucode binding for the LuCI HTTP utility library",
+          "root": false
+        },
+        {
+          "name": "luci-base",
+          "version": "git-25.222.75657-7ce34fe",
+          "file": "luci-base.ipk",
+          "bytes": 125331,
+          "description": "LuCI core runtime",
+          "root": false
+        },
+        {
+          "name": "libiwinfo-data",
+          "version": "2023-07-01-ca79f641-1",
+          "file": "libiwinfo-data.ipk",
+          "bytes": 3777,
+          "description": "libiwinfo Lua binding",
+          "root": false
+        },
+        {
+          "name": "libiwinfo20230701",
+          "version": "2023-07-01-ca79f641-1",
+          "file": "libiwinfo20230701.ipk",
+          "bytes": 23333,
+          "description": "Wireless information library with simplified API for nl80211",
+          "root": false
+        },
+        {
+          "name": "rpcd-mod-iwinfo",
+          "version": "2023-07-01-c07ab2f9-1",
+          "file": "rpcd-mod-iwinfo.ipk",
+          "bytes": 7814,
+          "description": "Provides ubus calls for accessing iwinfo data.",
+          "root": false
+        },
+        {
+          "name": "luci-mod-network",
+          "version": "git-25.222.75657-7ce34fe",
+          "file": "luci-mod-network.ipk",
+          "bytes": 56027,
+          "description": "LuCI Network Administration",
+          "root": true
+        },
+        {
+          "name": "hostapd-common",
+          "version": "2023-09-08-e5ccbfc6-8",
+          "file": "hostapd-common.ipk",
+          "bytes": 17010,
+          "description": "hostapd/wpa_supplicant common support files",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-nl80211",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-nl80211.ipk",
+          "bytes": 18876,
+          "description": "The nl80211 plugin provides access to the Linux wireless 802.11 netlink API.",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-rtnl",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-rtnl.ipk",
+          "bytes": 24617,
+          "description": "The rtnl plugin provides access to the Linux routing netlink API.",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-uloop",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-uloop.ipk",
+          "bytes": 7646,
+          "description": "The uloop module allows ucode scripts to interact with OpenWrt uloop event loop implementation.",
+          "root": false
+        },
+        {
+          "name": "libmbedtls12",
+          "version": "2.28.10-1",
+          "file": "libmbedtls12.ipk",
+          "bytes": 233109,
+          "description": "The aim of the mbedtls project is to provide a quality, open-source",
+          "root": false
+        },
+        {
+          "name": "wpad-mesh-mbedtls",
+          "version": "2023-09-08-e5ccbfc6-8",
+          "file": "wpad-mesh-mbedtls.ipk",
+          "bytes": 712675,
+          "description": "This package contains a minimal IEEE 802.1x/WPA Authenticator and Supplicant (with 802.11s mesh and SAE support).",
+          "root": true
+        },
+        {
+          "name": "iw",
+          "version": "5.19-1",
+          "file": "iw.ipk",
+          "bytes": 43760,
+          "description": "cfg80211 interface configuration utility",
+          "root": true
+        },
+        {
+          "name": "hostapd",
+          "version": "2023-09-08-e5ccbfc6-8",
+          "file": "hostapd.ipk",
+          "bytes": 437802,
+          "description": "This package contains a full featured IEEE 802.1x/WPA/EAP/RADIUS",
+          "root": true
+        },
+        {
+          "name": "bridge",
+          "version": "1.7.1-1",
+          "file": "bridge.ipk",
+          "bytes": 8889,
+          "description": "Manage ethernet bridging: a way to connect networks together to",
+          "root": true
+        }
+      ]
+    },
+    {
+      "release": "23.05.0",
+      "target": "ramips/mt7620",
+      "arch": "mipsel_24kc",
+      "totalBytes": 2012006,
+      "packages": [
+        {
+          "name": "libubox20230523",
+          "version": "2023-05-23-75a3b870-1",
+          "file": "libubox20230523.ipk",
+          "bytes": 20012,
+          "description": "Basic utility library",
+          "root": false
+        },
+        {
+          "name": "libubus20230605",
+          "version": "2023-06-05-f787c97b-1",
+          "file": "libubus20230605.ipk",
+          "bytes": 10006,
+          "description": "OpenWrt RPC client library",
+          "root": false
+        },
+        {
+          "name": "libuci20130104",
+          "version": "2023-08-10-5781664d-1",
+          "file": "libuci20130104.ipk",
+          "bytes": 15822,
+          "description": "C library for the Unified Configuration Interface (UCI)",
+          "root": false
+        },
+        {
+          "name": "libjson-c5",
+          "version": "0.16-3",
+          "file": "libjson-c5.ipk",
+          "bytes": 23309,
+          "description": "This package contains a library for javascript object notation backends.",
+          "root": false
+        },
+        {
+          "name": "libblobmsg-json20230523",
+          "version": "2023-05-23-75a3b870-1",
+          "file": "libblobmsg-json20230523.ipk",
+          "bytes": 4665,
+          "description": "blobmsg <-> json conversion library",
+          "root": false
+        },
+        {
+          "name": "rpcd",
+          "version": "2023-07-01-c07ab2f9-1",
+          "file": "rpcd.ipk",
+          "bytes": 23722,
+          "description": "This package provides the UBUS RPC backend server to expose various",
+          "root": false
+        },
+        {
+          "name": "rpcd-mod-file",
+          "version": "2023-07-01-c07ab2f9-1",
+          "file": "rpcd-mod-file.ipk",
+          "bytes": 7354,
+          "description": "Provides ubus calls for file and directory operations.",
+          "root": false
+        },
+        {
+          "name": "libnl-tiny1",
+          "version": "2023-07-27-bc92a280-1",
+          "file": "libnl-tiny1.ipk",
+          "bytes": 12993,
+          "description": "This package contains a stripped down version of libnl",
+          "root": false
+        },
+        {
+          "name": "rpcd-mod-luci",
+          "version": "20240305-1",
+          "file": "rpcd-mod-luci.ipk",
+          "bytes": 13341,
+          "description": "Provides LuCI backend ubus RPC operations.",
+          "root": false
+        },
+        {
+          "name": "libucode20230711",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "libucode20230711.ipk",
+          "bytes": 68894,
+          "description": "The libucode package provides the shared runtime library for the ucode interpreter.",
+          "root": false
+        },
+        {
+          "name": "rpcd-mod-ucode",
+          "version": "2023-07-01-c07ab2f9-1",
+          "file": "rpcd-mod-ucode.ipk",
+          "bytes": 8647,
+          "description": "Allows implementing plugins using ucode scripts.",
+          "root": false
+        },
+        {
+          "name": "cgi-io",
+          "version": "2022-08-10-901b0f04-21",
+          "file": "cgi-io.ipk",
+          "bytes": 8304,
+          "description": "This package contains an cgi utility that is useful for up/downloading files",
+          "root": false
+        },
+        {
+          "name": "ucode",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode.ipk",
+          "bytes": 6556,
+          "description": "ucode is a tiny script interpreter featuring an ECMAScript oriented",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-fs",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-fs.ipk",
+          "bytes": 9148,
+          "description": "The filesystem plugin module allows interaction with the local file system.",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-uci",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-uci.ipk",
+          "bytes": 6712,
+          "description": "The uci module allows templates to read and modify uci configuration.",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-ubus",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-ubus.ipk",
+          "bytes": 13609,
+          "description": "The ubus module allows ucode template scripts to enumerate and invoke ubus procedures.",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-math",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-math.ipk",
+          "bytes": 3233,
+          "description": "The math plugin provides access to various <math.h> procedures.",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-html",
+          "version": "1",
+          "file": "ucode-mod-html.ipk",
+          "bytes": 23270,
+          "description": "ucode HTML utility library",
+          "root": false
+        },
+        {
+          "name": "liblucihttp0",
+          "version": "2023-03-15-9b5b683f-1",
+          "file": "liblucihttp0.ipk",
+          "bytes": 7531,
+          "description": "LuCI HTTP utility library",
+          "root": false
+        },
+        {
+          "name": "liblucihttp-ucode",
+          "version": "2023-03-15-9b5b683f-1",
+          "file": "liblucihttp-ucode.ipk",
+          "bytes": 4212,
+          "description": "ucode binding for the LuCI HTTP utility library",
+          "root": false
+        },
+        {
+          "name": "luci-base",
+          "version": "git-25.222.75657-7ce34fe",
+          "file": "luci-base.ipk",
+          "bytes": 125331,
+          "description": "LuCI core runtime",
+          "root": false
+        },
+        {
+          "name": "libiwinfo-data",
+          "version": "2023-07-01-ca79f641-1",
+          "file": "libiwinfo-data.ipk",
+          "bytes": 3777,
+          "description": "libiwinfo Lua binding",
+          "root": false
+        },
+        {
+          "name": "libiwinfo20230701",
+          "version": "2023-07-01-ca79f641-1",
+          "file": "libiwinfo20230701.ipk",
+          "bytes": 23333,
+          "description": "Wireless information library with simplified API for nl80211",
+          "root": false
+        },
+        {
+          "name": "rpcd-mod-iwinfo",
+          "version": "2023-07-01-c07ab2f9-1",
+          "file": "rpcd-mod-iwinfo.ipk",
+          "bytes": 7814,
+          "description": "Provides ubus calls for accessing iwinfo data.",
+          "root": false
+        },
+        {
+          "name": "luci-mod-network",
+          "version": "git-25.222.75657-7ce34fe",
+          "file": "luci-mod-network.ipk",
+          "bytes": 56027,
+          "description": "LuCI Network Administration",
+          "root": true
+        },
+        {
+          "name": "hostapd-common",
+          "version": "2023-09-08-e5ccbfc6-8",
+          "file": "hostapd-common.ipk",
+          "bytes": 17010,
+          "description": "hostapd/wpa_supplicant common support files",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-nl80211",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-nl80211.ipk",
+          "bytes": 18876,
+          "description": "The nl80211 plugin provides access to the Linux wireless 802.11 netlink API.",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-rtnl",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-rtnl.ipk",
+          "bytes": 24617,
+          "description": "The rtnl plugin provides access to the Linux routing netlink API.",
+          "root": false
+        },
+        {
+          "name": "ucode-mod-uloop",
+          "version": "2024-07-11-1a8a0bcf-3",
+          "file": "ucode-mod-uloop.ipk",
+          "bytes": 7646,
+          "description": "The uloop module allows ucode scripts to interact with OpenWrt uloop event loop implementation.",
+          "root": false
+        },
+        {
+          "name": "libmbedtls12",
+          "version": "2.28.10-1",
+          "file": "libmbedtls12.ipk",
+          "bytes": 233109,
+          "description": "The aim of the mbedtls project is to provide a quality, open-source",
+          "root": false
+        },
+        {
+          "name": "wpad-mesh-mbedtls",
+          "version": "2023-09-08-e5ccbfc6-8",
+          "file": "wpad-mesh-mbedtls.ipk",
+          "bytes": 712675,
+          "description": "This package contains a minimal IEEE 802.1x/WPA Authenticator and Supplicant (with 802.11s mesh and SAE support).",
+          "root": true
+        },
+        {
+          "name": "iw",
+          "version": "5.19-1",
+          "file": "iw.ipk",
+          "bytes": 43760,
+          "description": "cfg80211 interface configuration utility",
+          "root": true
+        },
+        {
+          "name": "hostapd",
+          "version": "2023-09-08-e5ccbfc6-8",
+          "file": "hostapd.ipk",
+          "bytes": 437802,
+          "description": "This package contains a full featured IEEE 802.1x/WPA/EAP/RADIUS",
+          "root": true
+        },
+        {
+          "name": "bridge",
+          "version": "1.7.1-1",
+          "file": "bridge.ipk",
+          "bytes": 8889,
+          "description": "Manage ethernet bridging: a way to connect networks together to",
+          "root": true
+        }
+      ]
+    }
+  ]
+}

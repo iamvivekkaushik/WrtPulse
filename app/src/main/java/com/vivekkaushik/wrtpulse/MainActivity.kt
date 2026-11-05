@@ -47,6 +47,7 @@ import com.vivekkaushik.wrtpulse.data.LanStore
 import com.vivekkaushik.wrtpulse.data.WanStore
 import com.vivekkaushik.wrtpulse.data.LiveLogs
 import com.vivekkaushik.wrtpulse.data.LiveTicker
+import com.vivekkaushik.wrtpulse.data.OfflineBundles
 import com.vivekkaushik.wrtpulse.data.PackageStore
 import com.vivekkaushik.wrtpulse.data.ResetStore
 import com.vivekkaushik.wrtpulse.data.RouterOps
@@ -174,6 +175,9 @@ private fun WrtPulseApp() {
     // Read on entry rather than on a tick — the installed list only changes when
     // somebody changes it, and reading it sweeps the whole package database.
     val packageStore = remember(session) { session?.let { PackageStore(it) } }
+    // The wireless .ipk bundles the APK itself carries, for routers with no internet. Read
+    // from assets and matched against the router only when the Packages screen is open.
+    val offlineBundles = remember(session) { session?.let { OfflineBundles(context, it) } }
     // Same bargain for the init scripts: listing them walks /etc/init.d, so it waits
     // until the Services screen is actually opened.
     val serviceStore = remember(session) { session?.let { ServiceStore(it) } }
@@ -191,6 +195,51 @@ private fun WrtPulseApp() {
     // a reset erases is not worth doing until someone is looking at the red zone.
     val resetStore = remember(session) {
         session?.let { ResetStore(it, File(context.filesDir, "backups")) }
+    }
+    // The AI analysis reads the router on open — same read-only bargain — and sends nothing
+    // without a press on its own screen.
+    val aiStore = remember(session) {
+        session?.let {
+            com.vivekkaushik.wrtpulse.data.AiStore(
+                it,
+                historyDao = WrtRuntime.db.aiAnalysisLogs(),
+            )
+        }
+    }
+    // The provider settings outlive the store: the endpoint and model sit in prefs, the API
+    // key is sealed with the app's keystore like a router password, so a router switch does
+    // not silently forget either.
+    var aiSettings by remember {
+        mutableStateOf(
+            com.vivekkaushik.wrtpulse.net.AiSettings(
+                baseUrl = prefs.getString("ai_endpoint", null) ?: com.vivekkaushik.wrtpulse.net.AiSettings.DEFAULT_BASE_URL,
+                model = prefs.getString("ai_model", null) ?: com.vivekkaushik.wrtpulse.net.AiSettings.DEFAULT_MODEL,
+                apiKey = prefs.getString("ai_key_sealed", null)?.let { sealed ->
+                    runCatching {
+                        String(
+                            WrtRuntime.vault.open(android.util.Base64.decode(sealed, android.util.Base64.NO_WRAP)),
+                            Charsets.UTF_8,
+                        )
+                    }.getOrNull().orEmpty()
+                }.orEmpty(),
+            ),
+        )
+    }
+    fun saveAiSettings(next: com.vivekkaushik.wrtpulse.net.AiSettings) {
+        val clean = next.copy(baseUrl = next.baseUrl.trim(), model = next.model.trim(), apiKey = next.apiKey.trim())
+        val editor = prefs.edit()
+            .putString("ai_endpoint", clean.baseUrl)
+            .putString("ai_model", clean.model)
+        if (clean.apiKey.isEmpty()) editor.remove("ai_key_sealed")
+        else editor.putString(
+            "ai_key_sealed",
+            android.util.Base64.encodeToString(
+                WrtRuntime.vault.seal(clean.apiKey.toByteArray(Charsets.UTF_8)),
+                android.util.Base64.NO_WRAP,
+            ),
+        )
+        editor.apply()
+        aiSettings = clean
     }
     // The mesh page reads the router like the wireless screen does, plus a ping per node. Read
     // when the page opens; its profile is sealed into the saved row after every read.
@@ -281,6 +330,7 @@ private fun WrtPulseApp() {
     var sshKeysOpen by remember { mutableStateOf(false) }
     var backupOpen by remember { mutableStateOf(false) }
     var aboutOpen by remember { mutableStateOf(false) }
+    var aiOpen by remember { mutableStateOf(false) }
     // About opened from the router list, before any connection. Kept apart from aboutOpen so
     // closing one never touches what the System tab is showing.
     var aboutFromList by remember { mutableStateOf(false) }
@@ -770,7 +820,14 @@ private fun WrtPulseApp() {
                                         },
                                     )
                                 }
-                                MainTab.System -> if (aboutOpen) {
+                                MainTab.System -> if (aiOpen) {
+                                    com.vivekkaushik.wrtpulse.ui.screens.AiAnalysisScreen(
+                                        store = aiStore,
+                                        settings = aiSettings,
+                                        onBack = { aiOpen = false },
+                                        onSaveSettings = { saveAiSettings(it) },
+                                    )
+                                } else if (aboutOpen) {
                                     AboutScreen(onBack = { aboutOpen = false })
                                 } else if (sshKeysOpen) {
                                     SshKeysScreen(
@@ -819,6 +876,7 @@ private fun WrtPulseApp() {
                                 } else if (packagesOpen) {
                                     PackagesScreen(
                                         store = packageStore,
+                                        offline = offlineBundles,
                                         live = telemetry,
                                         latencyMs = telemetry?.latencyMs ?: ticker.latencyMs,
                                         onBack = { packagesOpen = false },
@@ -863,6 +921,7 @@ private fun WrtPulseApp() {
                                         onOpenSshKeys = { sshKeysOpen = true },
                                         onOpenBackup = { backupOpen = true },
                                         onOpenAbout = { aboutOpen = true },
+                                        onOpenAi = { aiOpen = true },
                                         onSetHostname = { hostname ->
                                             val session = WrtRuntime.session
                                             if (session == null) "Not connected." else {
@@ -895,7 +954,7 @@ private fun WrtPulseApp() {
                                     logsOpen = false; packagesOpen = false
                                     servicesOpen = false; ledsOpen = false; firmwareOpen = false; resetOpen = false
                                     countryOpen = false; sshKeysOpen = false; backupOpen = false
-                                    aboutOpen = false
+                                    aboutOpen = false; aiOpen = false
                                 }
                                 tab = picked
                             }
@@ -1009,6 +1068,7 @@ private fun WrtPulseApp() {
             dest == Dest.Main && showDiff -> showDiff = false
             dest == Dest.Main && showSwitcher -> showSwitcher = false
             dest == Dest.Main && snippetsOpen -> snippetsOpen = false
+            dest == Dest.Main && tab == MainTab.System && aiOpen -> aiOpen = false
             dest == Dest.Main && tab == MainTab.System && aboutOpen -> aboutOpen = false
             dest == Dest.Main && tab == MainTab.System && sshKeysOpen -> sshKeysOpen = false
             dest == Dest.Main && tab == MainTab.System && backupOpen -> backupOpen = false

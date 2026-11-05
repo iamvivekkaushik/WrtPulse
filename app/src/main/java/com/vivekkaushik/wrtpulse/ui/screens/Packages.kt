@@ -31,9 +31,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import com.vivekkaushik.wrtpulse.data.OfflineBundle
+import com.vivekkaushik.wrtpulse.data.OfflineBundles
 import com.vivekkaushik.wrtpulse.data.PackageStore
 import com.vivekkaushik.wrtpulse.data.Telemetry
 import com.vivekkaushik.wrtpulse.ops.InstallPlan
@@ -50,7 +56,9 @@ import com.vivekkaushik.wrtpulse.ui.WrtIcons
 import com.vivekkaushik.wrtpulse.ui.mono
 import com.vivekkaushik.wrtpulse.ui.sans
 import com.vivekkaushik.wrtpulse.ui.theme.Wrt
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private enum class PkgTab { Installed, Updates, Search }
 
@@ -61,18 +69,40 @@ private enum class PkgTab { Installed, Updates, Search }
 @Composable
 fun PackagesScreen(
     store: PackageStore?,
+    offline: OfflineBundles?,
     live: Telemetry?,
     latencyMs: Int,
     onBack: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var tab by remember { mutableStateOf(PkgTab.Installed) }
     var query by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf("") }
     var open by remember { mutableStateOf<RouterPackage?>(null) }
     var toast by remember { mutableStateOf<String?>(null) }
+    var confirmOffline by remember { mutableStateOf<OfflineBundle?>(null) }
+
+    val packagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null && store != null) {
+            scope.launch {
+                val picked = withContext(Dispatchers.IO) { readPackageDocument(context, uri) }
+                toast = if (picked == null) {
+                    "Failed: couldn't read the package file."
+                } else {
+                    store.uploadLocalPackage(picked.first, picked.second)
+                }
+            }
+        }
+    }
 
     LaunchedEffect(store) { if (store != null && !store.loaded) store.load() }
+    LaunchedEffect(offline) {
+        if (offline != null) {
+            offline.load()
+            offline.probe()
+        }
+    }
 
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         FormTopBar("Packages", onBack) {
@@ -93,6 +123,21 @@ fun PackagesScreen(
 
         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
             FlashCard(store, live, onRefresh = { scope.launch { toast = store.refreshFeed() } })
+            Spacer(Modifier.height(10.dp))
+            WirelessPackageCard(
+                missingCount = store.missingWirelessPackages.size,
+                offline = offline,
+                onUpload = {
+                    packagePicker.launch(
+                        arrayOf("application/octet-stream", "application/vnd.android.package-archive", "application/x-ipk"),
+                    )
+                },
+                onInstallOffline = { confirmOffline = offline?.exactMatch ?: offline?.nearMatch },
+            ) { name ->
+                tab = PkgTab.Search
+                query = name
+                scope.launch { store.search(name) }
+            }
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                 FilterChip("Installed ${store.installed.size}", tab == PkgTab.Installed, size = 11.5f) {
@@ -163,7 +208,200 @@ fun PackagesScreen(
             onResult = { toast = it; open = null },
         )
     }
+
+    confirmOffline?.let { bundle ->
+        val s = store
+        if (s != null) {
+            OfflineBundleDialog(
+                bundle = bundle,
+                store = s,
+                near = offline?.exactMatch == null,
+                onDismiss = { confirmOffline = null },
+                onInstall = {
+                    confirmOffline = null
+                    scope.launch { toast = offline?.installBundle(s) ?: "Failed: no offline bundle." }
+                },
+            )
+        }
+    }
 }
+
+/** Curated shortcuts; feed installs use the normal result/dry-run flow, local files use the router manager. */
+@Composable
+private fun WirelessPackageCard(
+    missingCount: Int,
+    offline: OfflineBundles?,
+    onUpload: () -> Unit,
+    onInstallOffline: () -> Unit,
+    onPackage: (String) -> Unit,
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(1.dp, Wrt.Accent.copy(alpha = 0.32f), RoundedCornerShape(13.dp))
+            .background(Wrt.Accent.copy(alpha = 0.045f), RoundedCornerShape(13.dp))
+            .padding(horizontal = 13.dp, vertical = 11.dp),
+    ) {
+        Text("WIRELESS CONFIGURATION", style = mono(9.5f, 650, Wrt.Accent, letterSpacing = 1.1.sp))
+        Text(
+            if (missingCount == 0) "All recommended wireless packages are installed."
+            else "$missingCount recommended wireless package${if (missingCount == 1) " is" else "s are"} missing.",
+            style = sans(11f, 400, Wrt.TextSecondary),
+            modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
+        )
+        Text(
+            "Tap a package to search the router feed, or upload an offline .ipk/.apk file.",
+            style = sans(10.5f, 400, Wrt.TextDim),
+            modifier = Modifier.padding(bottom = 6.dp),
+        )
+        offline?.let { bundles ->
+            val match = bundles.exactMatch ?: bundles.nearMatch
+            when {
+                bundles.progress != null -> {
+                    val p = bundles.progress!!
+                    Text(
+                        "Offline: ${p.phase.label} — ${p.done}/${p.total}" +
+                            (if (p.current.isNotBlank()) " · ${p.current}" else ""),
+                        style = mono(10.5f, 600, Wrt.Accent),
+                        modifier = Modifier.padding(vertical = 5.dp),
+                    )
+                }
+                match != null -> {
+                    val exact = bundles.exactMatch != null
+                    Text(
+                        "Offline bundle ready: ${match.packages.size} packages for " +
+                            "OpenWrt ${match.release} · ${match.target} · ${match.arch} " +
+                            "(${java.text.DecimalFormat("0.0").format(match.totalBytes / 1024.0 / 1024.0)} MiB)." +
+                            if (exact) " No router internet needed."
+                            else " Built for a newer point release — opkg will refuse anything that does not fit.",
+                        style = sans(10.5f, 400, if (exact) Wrt.TextSecondary else Wrt.Amber),
+                        modifier = Modifier.padding(vertical = 5.dp),
+                    )
+                    Text(
+                        "Install offline from this phone",
+                        style = sans(11.5f, 650, Wrt.Accent),
+                        modifier = Modifier.padding(bottom = 6.dp).clickable(onClick = onInstallOffline),
+                    )
+                }
+                else -> if (bundles.probed) {
+                    Text(
+                        "No offline bundle for this router — the APK carries mipsel_24kc sets for " +
+                            "OpenWrt 23.05.5 and 23.05.0 only.",
+                        style = sans(10f, 400, Wrt.TextDim),
+                        modifier = Modifier.padding(vertical = 5.dp),
+                    )
+                }
+            }
+        }
+        PackageStore.WIRELESS_CONFIGURATION_PACKAGES.forEach { (name, description) ->
+            Row(
+                Modifier.fillMaxWidth().clickable { onPackage(name) }.padding(vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(name, style = mono(10.5f, 600, Wrt.TextPrimary), modifier = Modifier.weight(1f))
+                Text(description, style = sans(10f, 400, Wrt.TextDim), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        Text(
+            "Upload package file",
+            style = sans(11.5f, 650, Wrt.Accent),
+            modifier = Modifier.padding(top = 7.dp).clickable(onClick = onUpload),
+        )
+    }
+}
+
+/**
+ * The offline bundle's consent dialog: what is about to be uploaded, what gets skipped as
+ * already present, and the one destructive step — an old wpad/hostapd variant coming out
+ * before the new one goes in — said before it happens, the same as every other write here.
+ */
+@Composable
+private fun OfflineBundleDialog(
+    bundle: OfflineBundle,
+    store: PackageStore?,
+    near: Boolean,
+    onDismiss: () -> Unit,
+    onInstall: () -> Unit,
+) {
+    val installed = store?.installedNames ?: emptySet()
+    val toInstall = OfflineBundles.resolveInstallSet(bundle, installed)
+    val removing = if (toInstall.any { it.name == "wpad-mesh-mbedtls" }) {
+        OfflineBundles.conflictingWpad(installed)
+    } else {
+        emptyList()
+    }
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .border(1.dp, Wrt.BorderCard, RoundedCornerShape(16.dp))
+                .background(Wrt.BgBar, RoundedCornerShape(16.dp))
+                .padding(18.dp)
+        ) {
+            Text("Offline wireless bundle", style = sans(15f, 650))
+            Text(
+                "OpenWrt ${bundle.release} · ${bundle.target} · ${bundle.arch}",
+                style = mono(10.5f, 500, Wrt.TextDim),
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            Text(
+                if (toInstall.isEmpty()) "Everything in this bundle is already installed."
+                else "${toInstall.size} of ${bundle.packages.size} packages will be uploaded " +
+                    "(${java.text.DecimalFormat("0.0").format(toInstall.sumOf { it.bytes } / 1024.0 / 1024.0)} MiB) " +
+                    "and installed with the router's own opkg — the router needs no internet.",
+                style = sans(11f, 400, Wrt.TextSecondary),
+                modifier = Modifier.padding(top = 10.dp),
+            )
+            if (toInstall.any { it.name == "wpad-mesh-mbedtls" } && bundle.packages.any { it.name == "hostapd" }) {
+                Note("hostapd itself is not installed: wpad-mesh-mbedtls provides and conflicts with it.", Wrt.TextDim)
+            }
+            if (removing.isNotEmpty()) {
+                Note(
+                    "${removing.joinToString(", ")} is removed first — Wi-Fi blinks for a few seconds " +
+                        "during the swap and drops if the install then fails. Reachable by cable, " +
+                        "the terminal can reinstall the old variant.",
+                    Wrt.Amber,
+                )
+            }
+            if (near) {
+                Note(
+                    "This bundle was built for ${bundle.release} and the router runs another point " +
+                        "release. opkg will still refuse any dependency that does not fit.",
+                    Wrt.Amber,
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            if (toInstall.isNotEmpty()) {
+                PrimaryButton("Install ${toInstall.size} offline packages", onClick = onInstall)
+                Spacer(Modifier.height(6.dp))
+            }
+            GhostButton("Cancel", onClick = onDismiss)
+        }
+    }
+}
+
+private fun readPackageDocument(
+    context: android.content.Context,
+    uri: android.net.Uri,
+): Pair<String, ByteArray>? = runCatching {
+    val name = context.contentResolver.query(uri, arrayOf("_display_name"), null, null, null)
+        ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+        ?: "package.ipk"
+    val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
+        val out = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(64 * 1024)
+        var total = 0
+        while (true) {
+            val n = input.read(buffer)
+            if (n < 0) break
+            total += n
+            if (total > PackageStore.MAX_LOCAL_PACKAGE_BYTES) return@use null
+            out.write(buffer, 0, n)
+        }
+        out.toByteArray()
+    } ?: return@runCatching null
+    name to bytes
+}.getOrNull()
 
 private fun emptyLine(tab: PkgTab, store: PackageStore, filter: String, query: String): String = when {
     store.loading -> "Reading the package database…"
