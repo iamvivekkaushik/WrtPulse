@@ -34,13 +34,8 @@ android {
         applicationId = "com.vivekkaushik.wrtpulse"
         minSdk = 28
         targetSdk = 36
-        versionCode = 13
-        versionName = "1.11"
-
-        // Modern-device build: keep release/debug artifacts arm64-only as requested.
-        ndk {
-            abiFilters += "arm64-v8a"
-        }
+        versionCode = 11
+        versionName = "1.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

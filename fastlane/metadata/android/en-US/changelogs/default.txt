@@ -1,3 +1,1 @@
-• Mesh: changing the primary's LAN subnet now takes its nodes along. Each node moves to the new subnet with its gateway and DNS rewritten, and goes back to its old network if the new gateway never answers. A node the app can't reach stops the move unless you choose to leave it behind.
-• LAN: a mesh node can no longer move its own subnet away from its primary.
-• Internet & WAN: Restart and Stop sit level, and Stop is one tap; Start brings the uplink back.
+• Smaller, faster app: the SSH and crypto stack is now fully optimized by the release compiler, trimming download size and speeding up connections.
