@@ -1,0 +1,3 @@
+• Clients: the list no longer reshuffles every few seconds as signal strength changes, so renaming a device isn't interrupted. Pull down to re-sort.
+• Wake-on-LAN: if the router has no etherwake, WoL offers to install it, showing the size and free space first, then wakes the device.
+• About: Report a problem opens a GitHub issue with the app and Android versions filled in, and you can rate WrtPulse on Google Play from About or System.
