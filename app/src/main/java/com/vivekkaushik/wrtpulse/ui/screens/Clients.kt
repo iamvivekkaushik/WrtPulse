@@ -314,34 +314,42 @@ private fun PackageInstallDialog(
             )
             Spacer(Modifier.height(14.dp))
             val p = plan
-            when {
-                p == null -> Text("Checking package feed and free space…", style = mono(11f, 500, Wrt.TextDim))
-                p.problem != null -> Text(p.problem!!, style = sans(12f, 500, Wrt.Red))
-                else -> Column(
+            if (p?.problem != null) {
+                Text(p.problem!!, style = sans(12f, 500, Wrt.Red))
+            } else {
+                // Drawn while the plan is still being fetched too, its figures pending, so the
+                // dialog keeps one height instead of growing under the user's thumb.
+                Column(
                     Modifier
                         .fillMaxWidth()
                         .border(1.dp, Wrt.BorderHair, RoundedCornerShape(11.dp))
                         .background(Wrt.BgDeep, RoundedCornerShape(11.dp))
                         .padding(horizontal = 13.dp, vertical = 11.dp)
                 ) {
-                    val total = p.totalBytes
-                    val freeBytes = p.availKb?.let { it * 1024 }
+                    val total = p?.totalBytes
+                    val freeBytes = p?.availKb?.let { it * 1024 }
                     PlanRow(
                         "Install size",
-                        total?.let {
-                            preciseBytes(it) +
-                                if (p.packages.size > 1) " · ${p.packages.size} packages" else ""
-                        } ?: "unknown (${p.packageManager})",
+                        when {
+                            p == null -> "…"
+                            total != null ->
+                                preciseBytes(total) + if (p.packages.size > 1) " · ${p.packages.size} packages" else ""
+                            else -> "unknown (${p.packageManager})"
+                        },
                     )
-                    PlanRow("Free space now", freeBytes?.let { preciseBytes(it) } ?: "—")
+                    PlanRow("Free space now", if (p == null) "…" else freeBytes?.let { preciseBytes(it) } ?: "—")
                     PlanRow(
                         "After install",
-                        if (total != null && freeBytes != null) "≈ ${preciseBytes(freeBytes - total)}"
-                        else "—",
+                        when {
+                            p == null -> "…"
+                            total != null && freeBytes != null -> "≈ ${preciseBytes(freeBytes - total)}"
+                            else -> "—"
+                        },
                         highlight = true,
                     )
                     Text(
-                        "Sizes come from ${p.packageManager}; free space from df /overlay.",
+                        if (p == null) "Checking the package feed and free space…"
+                        else "Sizes come from ${p.packageManager}; free space from df /overlay.",
                         style = sans(9.5f, 400, Wrt.TextDim),
                         modifier = Modifier.padding(top = 6.dp),
                     )
@@ -363,22 +371,23 @@ private fun PackageInstallDialog(
                 } else {
                     PrimaryButton("Done", onClick = onDismiss)
                 }
-            } else if (p != null && p.problem == null) {
+            } else if (p?.problem == null) {
+                // Install waits for the plan; once running, the install cannot be called back,
+                // so Cancel goes quiet instead of looking like it would stop it.
                 PrimaryButton(
                     if (installing) "Installing…" else "Install",
+                    enabled = p != null && !installing,
                     onClick = {
-                        if (!installing) {
-                            installing = true
-                            result = null
-                            scope.launch {
-                                result = install()
-                                installing = false
-                            }
+                        installing = true
+                        result = null
+                        scope.launch {
+                            result = install()
+                            installing = false
                         }
                     },
                 )
                 Spacer(Modifier.height(6.dp))
-                GhostButton("Cancel", onClick = { if (!installing) onDismiss() })
+                GhostButton("Cancel", enabled = !installing, onClick = onDismiss)
             } else {
                 GhostButton("Close", onClick = onDismiss)
             }

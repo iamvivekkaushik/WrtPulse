@@ -88,6 +88,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
@@ -416,17 +417,33 @@ private fun ThroughputChartScaled(down: List<Float>, up: List<Float>, modifier: 
 
 // ---------- buttons ----------
 
+/** Disabled buttons keep their place and shape, dimmed, so nothing shifts when they come back. */
+private const val DISABLED_ALPHA = 0.45f
+
+/**
+ * One line, cut off with an ellipsis: a label carrying a device or router name ("Join
+ * home-gw", "Wake <hostname>") would otherwise wrap and lose its second line to the height.
+ */
 @Composable
-fun PrimaryButton(text: String, modifier: Modifier = Modifier, color: Color = Wrt.Accent, textColor: Color = Wrt.OnAccent, onClick: () -> Unit) {
+fun PrimaryButton(
+    text: String,
+    modifier: Modifier = Modifier,
+    color: Color = Wrt.Accent,
+    textColor: Color = Wrt.OnAccent,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
     Box(
         modifier
             .fillMaxWidth()
             .height(48.dp)
+            .alpha(if (enabled) 1f else DISABLED_ALPHA)
             .background(color, RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick),
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 16.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, style = sans(14.5f, 650, textColor))
+        Text(text, style = sans(14.5f, 650, textColor), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -436,17 +453,20 @@ fun GhostButton(
     modifier: Modifier = Modifier,
     border: Color = Wrt.BorderCard,
     textColor: Color = Wrt.TextSecondary,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     Box(
         modifier
             .fillMaxWidth()
             .height(44.dp)
+            .alpha(if (enabled) 1f else DISABLED_ALPHA)
             .border(1.dp, border, RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick),
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 16.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, style = sans(13.5f, 600, textColor))
+        Text(text, style = sans(13.5f, 600, textColor), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
