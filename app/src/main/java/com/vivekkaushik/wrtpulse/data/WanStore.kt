@@ -173,6 +173,9 @@ class WanStore(private val session: RouterSession) : Refreshable {
      */
     var beforeApply: (suspend () -> Unit)? = null
 
+    /** Told how each apply ended: true when the router kept it, false when it failed or rolled back. */
+    var afterApply: ((kept: Boolean) -> Unit)? = null
+
     // -----------------------------------------------------------------------
     // Reading
     // -----------------------------------------------------------------------
@@ -1438,10 +1441,12 @@ class WanStore(private val session: RouterSession) : Refreshable {
             revert()
             load()
             notice = "Applied — rollback disarmed"
+            afterApply?.invoke(true)
             true
         } catch (e: SshException) {
             error = e.message
             checkRollback()
+            afterApply?.invoke(false)
             false
         } finally {
             applying = false

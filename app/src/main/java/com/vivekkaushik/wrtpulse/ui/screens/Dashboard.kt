@@ -1,6 +1,11 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import com.vivekkaushik.wrtpulse.ui.rememberHoldHaptics
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
@@ -23,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,6 +68,33 @@ import com.vivekkaushik.wrtpulse.ui.mono
 import com.vivekkaushik.wrtpulse.ui.sans
 import com.vivekkaushik.wrtpulse.ui.theme.Wrt
 import kotlinx.coroutines.launch
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+
+/**
+ * The one-time ask for a Play rating, as the Dashboard draws it; [com.vivekkaushik.wrtpulse.data.RatePrompt]
+ * decides when. Passed even while not due, so the card can animate out after an answer.
+ */
+class RateAsk(
+    val due: Boolean,
+    /** Small print under the copy, e.g. "In use since 12 Sep · 2 routers". */
+    val meta: String?,
+    /** The card was on screen today. */
+    val onShown: () -> Unit,
+    val onRate: () -> Unit,
+    val onReport: () -> Unit,
+    val onDecline: () -> Unit,
+) {
+    companion object {
+        /** "In use since 12 Sep · 2 routers"; the year only once it is not this one. */
+        fun meta(since: LocalDate, routers: Int, today: LocalDate = LocalDate.now()): String {
+            val pattern = if (since.year == today.year) "d MMM" else "d MMM yyyy"
+            val date = since.format(DateTimeFormatter.ofPattern(pattern, Locale.getDefault()))
+            return "In use since $date" + if (routers > 0) " · $routers router${if (routers == 1) "" else "s"}" else ""
+        }
+    }
+}
 
 private val cpuSpark = listOf(13f, 11f, 14f, 9f, 12f, 7f, 11f, 5f, 10f, 8f, 12f, 9f)
 private val ramSpark = listOf(10f, 9f, 10f, 8f, 9f, 8f, 7f, 8f, 7f, 8f, 7f, 7f)
@@ -80,6 +113,8 @@ fun DashboardScreen(
     nodeOf: NodeOf? = null,
     routerName: String,
     onRouterTap: () -> Unit,
+    /** Null on a build that has no Play listing to send anyone to. */
+    rateAsk: RateAsk? = null,
 ) {
     var rebootOpen by remember { mutableStateOf(false) }
     var speedOpen by remember { mutableStateOf(false) }
@@ -143,6 +178,30 @@ fun DashboardScreen(
                     }
                 }
             }
+            // Above the upstream card rather than at the top: within reach of a thumb, and the
+            // stats the user opened the Dashboard for stay where the eye lands first.
+            rateAsk?.let { ask ->
+                // Only in front of a router that is answering with its upstream up. Once it is
+                // up it stays for the visit, so one slow tick does not make it blink.
+                val healthy = live != null && live.everLoaded && !live.stale &&
+                    live.lostAtMillis == null && live.upstream != null
+                var settled by remember { mutableStateOf(healthy) }
+                LaunchedEffect(healthy) { if (healthy) settled = true }
+                // Every answer is final. "No thanks" leaves a line saying where the rows are,
+                // for the rest of this visit; the other two leave the app, so nothing is left.
+                var declined by remember { mutableStateOf(false) }
+                AnimatedVisibility(
+                    ask.due && settled,
+                    enter = fadeIn(tween(200)) + expandVertically(tween(200)),
+                    exit = fadeOut(tween(180)) + shrinkVertically(tween(180)),
+                ) {
+                    LaunchedEffect(Unit) { ask.onShown() }
+                    RateCard(ask.meta, ask.onRate, ask.onReport, onDecline = { declined = true; ask.onDecline() })
+                }
+                AnimatedVisibility(declined, enter = fadeIn(tween(200)) + expandVertically(tween(200))) {
+                    RateDeclinedNote()
+                }
+            }
             WanCard(ticker, live)
             SsidCard(if (inventory != null) inventory.ssids.toList() else null)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -172,6 +231,89 @@ fun DashboardScreen(
         GuestSheet(iot, board?.hostname, onDismiss = { iotOpen = false }, node = nodeOf)
     }
   }
+}
+
+/**
+ * The one-time rating ask, in the idiom of the nlbwmon offer on Clients. No question about
+ * how the user feels first: Play treats sorting people by mood before the store as review
+ * gating, so "Report a problem" sits beside "Rate" as an equal choice instead.
+ */
+@Composable
+private fun RateCard(meta: String?, onRate: () -> Unit, onReport: () -> Unit, onDecline: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .border(1.dp, Wrt.Accent.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+            .background(Wrt.Accent.copy(alpha = 0.06f), RoundedCornerShape(12.dp))
+            .padding(start = 13.dp, end = 13.dp, top = 12.dp, bottom = 10.dp)
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(11.dp)) {
+            Box(
+                Modifier.size(30.dp).border(1.dp, Wrt.Accent.copy(alpha = 0.35f), RoundedCornerShape(8.dp)),
+                contentAlignment = Alignment.Center,
+            ) { Icon(WrtIcons.Star, null, Modifier.size(15.dp), tint = Wrt.Accent) }
+            Column(Modifier.weight(1f)) {
+                Text("Rate WrtPulse on Google Play", style = sans(12.5f, 600))
+                Text(
+                    "No ads, no tracking, no account. Ratings are how other OpenWrt users find the app.",
+                    style = sans(10.5f, 400, Wrt.TextSecondary, lineHeight = 15.sp),
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+                if (meta != null) {
+                    Text(meta, style = mono(9.5f, 500, Wrt.TextDim), modifier = Modifier.padding(top = 5.dp))
+                }
+            }
+        }
+        Box(
+            Modifier
+                .padding(top = 11.dp, bottom = 10.dp)
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(Wrt.Accent.copy(alpha = 0.16f))
+        )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(Wrt.Accent)
+                    .clickable(onClick = onRate)
+                    .padding(horizontal = 11.dp, vertical = 6.dp)
+            ) { Text("Rate on Play", style = sans(11.5f, 600, Wrt.OnAccent), maxLines = 1, softWrap = false) }
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(7.dp))
+                    .border(1.dp, Wrt.BorderInput, RoundedCornerShape(7.dp))
+                    .clickable(onClick = onReport)
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            ) { Text("Report a problem", style = sans(11.5f, 600, Wrt.TextSecondary), maxLines = 1, softWrap = false) }
+            FlexSpacer()
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(7.dp))
+                    .clickable(onClick = onDecline)
+                    .padding(horizontal = 6.dp, vertical = 6.dp)
+            ) { Text("No thanks", style = sans(11.5f, 600, Wrt.TextDim), maxLines = 1, softWrap = false) }
+        }
+    }
+}
+
+/** What is left of the card after "No thanks": that it is over, and where the rows live. */
+@Composable
+private fun RateDeclinedNote() {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .border(1.dp, Wrt.Accent.copy(alpha = 0.35f), RoundedCornerShape(11.dp))
+            .background(Wrt.Accent.copy(alpha = 0.05f), RoundedCornerShape(11.dp))
+            .padding(horizontal = 13.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(WrtIcons.Check, null, Modifier.padding(top = 1.dp).size(15.dp), tint = Wrt.Accent)
+        Text(
+            "Won't ask again. Rating and problem reports are under System whenever you want them.",
+            style = sans(11.5f, 400, Wrt.AccentBody, lineHeight = 17.sp),
+        )
+    }
 }
 
 @Composable

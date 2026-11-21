@@ -1,5 +1,7 @@
 package com.vivekkaushik.wrtpulse.ui.screens
 
+import android.net.Uri
+import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -97,11 +99,25 @@ object AppLinks {
     const val SOURCE = "https://github.com/iamvivekkaushik/WrtPulse"
     const val WEBSITE = "https://iamvivekkaushik.github.io/WrtPulse/"
     const val PRIVACY = "https://iamvivekkaushik.github.io/WrtPulse/privacy.html"
+    const val PLAY = "https://play.google.com/store/apps/details?id=${BuildConfig.APPLICATION_ID}"
+    const val ISSUES = "https://github.com/iamvivekkaushik/WrtPulse/issues"
+
+    /**
+     * A new issue with the build and the Android version already in its body. It is a URL,
+     * so the reporter sees both, and can delete them, before anything is sent.
+     */
+    fun newIssue(): String {
+        val body = "\n\n---\nWrtPulse ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE}) · Android ${Build.VERSION.RELEASE}"
+        return "$ISSUES/new?body=" + Uri.encode(body)
+    }
 }
 
-/** What the app is, which build this is, and what it is built from. Works with no router connected. */
+/**
+ * What the app is, which build this is, and what it is built from. Works with no router connected.
+ * [onRate] opens the Play listing; null on a build not installed from Play, which hides the row.
+ */
 @Composable
-fun AboutScreen(onBack: () -> Unit) {
+fun AboutScreen(onBack: () -> Unit, onRate: (() -> Unit)? = null) {
     val uri = LocalUriHandler.current
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         FormTopBar("About", onBack)
@@ -135,6 +151,8 @@ fun AboutScreen(onBack: () -> Unit) {
             AboutCard {
                 LinkRow("Source code", AppLinks.SOURCE) { uri.openUri(AppLinks.SOURCE) }
                 LinkRow("Website", AppLinks.WEBSITE) { uri.openUri(AppLinks.WEBSITE) }
+                if (onRate != null) LinkRow("Rate on Google Play", AppLinks.PLAY) { onRate() }
+                LinkRow("Report a problem", AppLinks.ISSUES) { uri.openUri(AppLinks.newIssue()) }
                 LinkRow("Privacy policy", AppLinks.PRIVACY, last = true) { uri.openUri(AppLinks.PRIVACY) }
             }
 

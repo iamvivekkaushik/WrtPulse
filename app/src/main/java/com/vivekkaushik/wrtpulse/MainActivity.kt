@@ -31,10 +31,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.activity.compose.LocalActivity
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import com.vivekkaushik.wrtpulse.data.BackupStore
@@ -48,6 +50,7 @@ import com.vivekkaushik.wrtpulse.data.WanStore
 import com.vivekkaushik.wrtpulse.data.LiveLogs
 import com.vivekkaushik.wrtpulse.data.LiveTicker
 import com.vivekkaushik.wrtpulse.data.PackageStore
+import com.vivekkaushik.wrtpulse.data.RatePrompt
 import com.vivekkaushik.wrtpulse.data.ResetStore
 import com.vivekkaushik.wrtpulse.data.RouterOps
 import com.vivekkaushik.wrtpulse.data.RouterStatus
@@ -73,6 +76,8 @@ import com.vivekkaushik.wrtpulse.ui.screens.FactoryResetScreen
 import com.vivekkaushik.wrtpulse.ui.screens.FirmwareScreen
 import com.vivekkaushik.wrtpulse.ui.screens.HostKeyScreen
 import com.vivekkaushik.wrtpulse.ui.screens.AboutScreen
+import com.vivekkaushik.wrtpulse.ui.screens.AppLinks
+import com.vivekkaushik.wrtpulse.ui.screens.RateAsk
 import com.vivekkaushik.wrtpulse.ui.screens.LogsScreen
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingConnectScreen
 import com.vivekkaushik.wrtpulse.ui.screens.OnboardingFingerprintScreen
@@ -158,6 +163,11 @@ private fun WrtPulseApp() {
     var biometricEnabled by remember { mutableStateOf(prefs.getBoolean("biometric_gate", true)) }
     /** Groups kept at the top of the router list. A set of names; a group is not a row of its own. */
     var pinnedGroups by remember { mutableStateOf(prefs.getStringSet("pinned_groups", emptySet()).orEmpty().toSet()) }
+    /** The one-time Play rating ask, and what it has counted on this phone so far. */
+    val rate = remember { RatePrompt.of(context, prefs) }
+    val uriHandler = LocalUriHandler.current
+    /** The System and About rows. Rating from either is an answer too, so the card retires. */
+    val rateOnPlay: (() -> Unit)? = if (rate.fromPlay) ({ rate.retire(); RatePrompt.openListing(context) }) else null
 
     // Live feeds exist only while the main scaffold is on screen and a session is live.
     val session = if (dest == Dest.Main) WrtRuntime.session else null
@@ -245,6 +255,27 @@ private fun WrtPulseApp() {
     var logsStarted by remember(session) { mutableStateOf(false) }
     // Polling pauses while the app is in the background; the terminal shell stays attached.
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    // An open is the app coming back after a real absence; a rotation or a glance at another
+    // app is the same visit. The rating ask waits for several.
+    DisposableEffect(lifecycle) {
+        val watch = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) rate.foreground()
+            if (event == Lifecycle.Event.ON_STOP) rate.background()
+        }
+        lifecycle.addObserver(watch)
+        onDispose { lifecycle.removeObserver(watch) }
+    }
+    // A day spent on a router counts toward the ask, once per calendar day.
+    LaunchedEffect(session) { if (session?.isConnected == true) rate.connected() }
+    // A change the router kept arms the ask; one that failed or was rolled back disarms it.
+    LaunchedEffect(wifiStore, lanStore, wanStore, routeStore, firewallStore) {
+        val hook: (Boolean) -> Unit = { kept -> rate.applied(kept) }
+        wifiStore?.afterApply = hook
+        lanStore?.afterApply = hook
+        wanStore?.afterApply = hook
+        routeStore?.afterApply = hook
+        firewallStore?.afterApply = hook
+    }
     LaunchedEffect(telemetry) { telemetry?.let { t -> lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { t.run() } } }
     LaunchedEffect(inventory) { inventory?.let { inv -> lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { inv.run() } } }
     // User renames flow into the merge as overrides.
@@ -407,7 +438,7 @@ private fun WrtPulseApp() {
                 )
                 Dest.Boot -> Box(Modifier.fillMaxSize().background(Wrt.BgScreen))
                 Dest.RouterList -> if (aboutFromList) {
-                    AboutScreen(onBack = { aboutFromList = false })
+                    AboutScreen(onBack = { aboutFromList = false }, onRate = rateOnPlay)
                 } else RouterListScreen(
                     onAbout = { aboutFromList = true },
                     pinned = pinnedGroups,
@@ -512,6 +543,14 @@ private fun WrtPulseApp() {
                                     },
                                     routerName = currentRouter,
                                     onRouterTap = { showSwitcher = true },
+                                    rateAsk = if (!rate.fromPlay) null else RateAsk(
+                                        due = rate.due(),
+                                        meta = RateAsk.meta(rate.installedDate, savedRouters?.size ?: 0),
+                                        onShown = { rate.shown() },
+                                        onRate = { rate.retire(); RatePrompt.openListing(context) },
+                                        onReport = { rate.retire(); uriHandler.openUri(AppLinks.newIssue()) },
+                                        onDecline = { rate.retire() },
+                                    ),
                                 )
                                 MainTab.Network -> WifiSection(
                                     ticker = ticker,
@@ -771,7 +810,7 @@ private fun WrtPulseApp() {
                                     )
                                 }
                                 MainTab.System -> if (aboutOpen) {
-                                    AboutScreen(onBack = { aboutOpen = false })
+                                    AboutScreen(onBack = { aboutOpen = false }, onRate = rateOnPlay)
                                 } else if (sshKeysOpen) {
                                     SshKeysScreen(
                                         store = sshKeyStore,
@@ -863,6 +902,7 @@ private fun WrtPulseApp() {
                                         onOpenSshKeys = { sshKeysOpen = true },
                                         onOpenBackup = { backupOpen = true },
                                         onOpenAbout = { aboutOpen = true },
+                                        onRate = rateOnPlay,
                                         onSetHostname = { hostname ->
                                             val session = WrtRuntime.session
                                             if (session == null) "Not connected." else {

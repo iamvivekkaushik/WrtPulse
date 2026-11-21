@@ -78,6 +78,8 @@ fun SystemScreen(
     onOpenSshKeys: () -> Unit = {},
     onOpenBackup: () -> Unit = {},
     onOpenAbout: () -> Unit = {},
+    /** Opens the Play listing. Null on a build not installed from Play, which hides the row. */
+    onRate: (() -> Unit)? = null,
     /** Renames the router itself; returns what went wrong, or null once it took. */
     onSetHostname: (suspend (String) -> String?)? = null,
 ) {
@@ -248,6 +250,11 @@ fun SystemScreen(
                     },
                     onClick = if (isLive) onOpenSshKeys else null,
                 )
+                // For anyone who wants to rate on their own time, not just when the one-time
+                // card on the Dashboard comes round. Needs no router either.
+                if (onRate != null) {
+                    ValueRow("Rate WrtPulse", "Opens the Google Play listing", "Google Play", onClick = onRate)
+                }
                 // The app's own version and what it is built from. Needs no router, so it is
                 // never gated on isLive.
                 ValueRow(

@@ -162,6 +162,9 @@ class WifiStore(private val session: RouterSession) : Refreshable {
      */
     var beforeApply: (suspend () -> Unit)? = null
 
+    /** Told how each apply ended: true when the router kept it, false when it failed or rolled back. */
+    var afterApply: ((kept: Boolean) -> Unit)? = null
+
     /** Every uci op an apply would run — what the review sheet counts. */
     val opCount: Int get() = ops().size + networkOps().size
 
@@ -799,9 +802,11 @@ class WifiStore(private val session: RouterSession) : Refreshable {
             drafts.clear()
             deletions.clear()
             load()
+            afterApply?.invoke(true)
             true
         } catch (e: SshException) {
             error = e.message
+            afterApply?.invoke(false)
             false
         } finally {
             applying = false

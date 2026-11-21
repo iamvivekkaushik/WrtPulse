@@ -84,6 +84,9 @@ class FirewallStore(private val session: RouterSession) {
     /** The watcher fired on the last apply: the router put the old rules back. */
     var rolledBack by mutableStateOf(false); private set
 
+    /** Told how each apply ended: true when the router kept it, false when it failed or rolled back. */
+    var afterApply: ((kept: Boolean) -> Unit)? = null
+
     // ---- staging ----
 
     /** Scalar edits: uci path → (saved, staged). */
@@ -645,10 +648,12 @@ class FirewallStore(private val session: RouterSession) {
             session.exec(Commands.FIREWALL_CONFIRM, timeoutMs = 15_000)
             revert()
             notice = "Applied — rollback disarmed"
+            afterApply?.invoke(true)
             true
         } catch (e: SshException) {
             error = e.message
             checkRollback()
+            afterApply?.invoke(false)
             false
         } finally {
             applying = false

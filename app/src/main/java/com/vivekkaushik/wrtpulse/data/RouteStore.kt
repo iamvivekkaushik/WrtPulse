@@ -84,6 +84,9 @@ class RouteStore(private val session: RouterSession) : Refreshable {
     /** The auto-snapshot hook; a failure here aborts the apply. */
     var beforeApply: (suspend () -> Unit)? = null
 
+    /** Told how each apply ended: true when the router kept it, false when it failed or rolled back. */
+    var afterApply: ((kept: Boolean) -> Unit)? = null
+
     // ---- staging ----
 
     /** Scalar edits on saved sections: uci path → (saved, staged). The disabled toggle. */
@@ -465,10 +468,12 @@ class RouteStore(private val session: RouterSession) : Refreshable {
             session.exec(Commands.WAN_CONFIRM, timeoutMs = 15_000)
             revert()
             notice = "Applied — rollback disarmed"
+            afterApply?.invoke(true)
             true
         } catch (e: SshException) {
             error = e.message
             checkRollback()
+            afterApply?.invoke(false)
             false
         } finally {
             applying = false

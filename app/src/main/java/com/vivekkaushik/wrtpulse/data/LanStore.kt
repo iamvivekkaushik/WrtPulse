@@ -120,6 +120,9 @@ class LanStore(private val session: RouterSession) : Refreshable {
      */
     var beforeApply: (suspend () -> Unit)? = null
 
+    /** Told how each apply ended: true when the router kept it, false when it failed or rolled back. */
+    var afterApply: ((kept: Boolean) -> Unit)? = null
+
     // -----------------------------------------------------------------------
     // Reading
     // -----------------------------------------------------------------------
@@ -1387,6 +1390,7 @@ class LanStore(private val session: RouterSession) : Refreshable {
                 revert()
                 load()
             }
+            afterApply?.invoke(true)
             true
         } catch (e: SshException) {
             // Moving the router's own address takes the connection with it. The command
@@ -1394,10 +1398,12 @@ class LanStore(private val session: RouterSession) : Refreshable {
             if (moves && (e is SshException.Disconnected || e is SshException.Timeout)) {
                 settleNodes(following)
                 movedTo = target
+                afterApply?.invoke(true)
                 true
             } else {
                 cancelNodes(following)
                 error = e.message
+                afterApply?.invoke(false)
                 false
             }
         } finally {
