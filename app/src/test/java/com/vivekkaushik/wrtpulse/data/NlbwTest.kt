@@ -173,6 +173,19 @@ class NlbwTest {
     }
 
     @Test
+    fun `the WoL button learns whether the router has a magic-packet sender`() {
+        val inv = inventory()
+        assertNull(inv.wolPresent)
+        inv.ingest(mapOf("wakebin" to ""), 1_000L)
+        assertEquals(false, inv.wolPresent)
+        inv.ingest(mapOf("wakebin" to "/usr/bin/etherwake"), 1_005L)
+        assertEquals(true, inv.wolPresent)
+        // A snapshot from before the section existed says nothing either way.
+        inv.ingest(mapOf("leases" to ""), 1_010L)
+        assertEquals(true, inv.wolPresent)
+    }
+
+    @Test
     fun `opkg install plan parses sizes and free space`() {
         val plan = Parsers.installPlan(
             mapOf(

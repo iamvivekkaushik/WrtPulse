@@ -106,6 +106,9 @@ object Commands {
         "echo $SECTION resv" to "uci show dhcp 2>/dev/null | grep -i host || true",
         "echo $SECTION nlbwbin" to "command -v nlbw 2>/dev/null || true",
         "echo $SECTION nlbw" to "nlbw -c json 2>/dev/null || true",
+        // What the WoL button runs. Stock OpenWrt has neither: busybox leaves its ether-wake
+        // applet out, so without the etherwake package the button can only fail.
+        "echo $SECTION wakebin" to "command -v etherwake 2>/dev/null || command -v ether-wake 2>/dev/null || true",
     ).joinToString("; ") { (marker, cmd) -> "$marker; $cmd" }
 
     /**
@@ -126,6 +129,15 @@ object Commands {
         "else opkg update >/dev/null 2>&1; opkg install nlbwmon >/dev/null 2>&1; fi; " +
         "/etc/init.d/nlbwmon enable 2>/dev/null; /etc/init.d/nlbwmon start 2>/dev/null; " +
         "command -v nlbw"
+
+    /** The install-consent plan for etherwake, the sender the WoL button needs. */
+    val WOL_PLAN: String = installPlan("etherwake")
+
+    /** Installs etherwake; succeeds only if the binary lands. It is a tool, not a service. */
+    val WOL_INSTALL: String =
+        "if command -v apk >/dev/null; then apk update >/dev/null 2>&1; apk add etherwake >/dev/null 2>&1; " +
+        "else opkg update >/dev/null 2>&1; opkg install etherwake >/dev/null 2>&1; fi; " +
+        "command -v etherwake"
 
     /** Cuts a client's WAN access with a named REJECT rule; reversed by [unblockClient]. */
     fun blockClient(mac: String): String = listOf(

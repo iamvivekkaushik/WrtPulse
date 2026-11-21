@@ -136,7 +136,13 @@ fun ClientsScreen(
         }
         var nlbwDialogOpen by remember { mutableStateOf(false) }
         if (nlbwDialogOpen && live != null) {
-            NlbwInstallDialog(live, onDismiss = { nlbwDialogOpen = false })
+            PackageInstallDialog(
+                title = "Install nlbwmon?",
+                blurb = "Adds a small bandwidth accounting service to the router.",
+                plan = live::planNlbwInstall,
+                install = live::installNlbw,
+                onDismiss = { nlbwDialogOpen = false },
+            )
         }
         if (live != null && live.nlbwPresent == false) {
             NlbwOfferBanner(onSetUp = { nlbwDialogOpen = true })
@@ -271,14 +277,26 @@ private fun NlbwOfferBanner(onSetUp: () -> Unit) {
     }
 }
 
-/** Nothing installs until the user has seen the size and the space that will remain. */
+/**
+ * Nothing installs until the user has seen the size and the space that will remain. [then]
+ * is what the package was wanted for, offered once it lands; without it the dialog just closes.
+ */
 @Composable
-private fun NlbwInstallDialog(live: Inventory, onDismiss: () -> Unit) {
+private fun PackageInstallDialog(
+    title: String,
+    blurb: String,
+    plan: suspend () -> InstallPlan,
+    install: suspend () -> String,
+    onDismiss: () -> Unit,
+    thenLabel: String? = null,
+    then: (() -> Unit)? = null,
+) {
+    val fetchPlan = plan
     val scope = rememberCoroutineScope()
     var plan by remember { mutableStateOf<InstallPlan?>(null) }
     var installing by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(Unit) { plan = live.planNlbwInstall() }
+    LaunchedEffect(Unit) { plan = fetchPlan() }
 
     Dialog(onDismissRequest = { if (!installing) onDismiss() }) {
         Column(
@@ -288,9 +306,9 @@ private fun NlbwInstallDialog(live: Inventory, onDismiss: () -> Unit) {
                 .background(Wrt.BgBar, RoundedCornerShape(16.dp))
                 .padding(18.dp)
         ) {
-            Text("Install nlbwmon?", style = sans(15f, 650))
+            Text(title, style = sans(15f, 650))
             Text(
-                "Adds a small bandwidth accounting service to the router.",
+                blurb,
                 style = sans(11.5f, 400, Wrt.TextSecondary),
                 modifier = Modifier.padding(top = 4.dp),
             )
@@ -338,7 +356,13 @@ private fun NlbwInstallDialog(live: Inventory, onDismiss: () -> Unit) {
             }
             Spacer(Modifier.height(16.dp))
             if (result?.startsWith("Failed") == false) {
-                PrimaryButton("Done", onClick = onDismiss)
+                if (then != null && thenLabel != null) {
+                    PrimaryButton(thenLabel, onClick = { then(); onDismiss() })
+                    Spacer(Modifier.height(6.dp))
+                    GhostButton("Close", onClick = onDismiss)
+                } else {
+                    PrimaryButton("Done", onClick = onDismiss)
+                }
             } else if (p != null && p.problem == null) {
                 PrimaryButton(
                     if (installing) "Installing…" else "Install",
@@ -347,7 +371,7 @@ private fun NlbwInstallDialog(live: Inventory, onDismiss: () -> Unit) {
                             installing = true
                             result = null
                             scope.launch {
-                                result = live.installNlbw()
+                                result = install()
                                 installing = false
                             }
                         }
@@ -391,6 +415,7 @@ private fun ExpandedClientCard(
     var actionBusy by remember(client.mac) { mutableStateOf(false) }
     var renameOpen by remember(client.mac) { mutableStateOf(false) }
     var reserveOpen by remember(client.mac) { mutableStateOf(false) }
+    var wolSetupOpen by remember(client.mac) { mutableStateOf(false) }
 
     fun runAction(block: suspend () -> String) {
         if (live == null || actionBusy) return
@@ -427,6 +452,18 @@ private fun ExpandedClientCard(
                 reserveOpen = false
                 if (value.isNotBlank()) runAction { live!!.reserve(client.mac, value.trim(), client.name) }
             },
+        )
+    }
+    if (wolSetupOpen && live != null) {
+        PackageInstallDialog(
+            title = "Wake-on-LAN needs etherwake",
+            blurb = "The router has nothing to send the magic packet with. etherwake is a small " +
+                "tool that does only that, with no service running in the background.",
+            plan = live::planWolInstall,
+            install = live::installWol,
+            onDismiss = { wolSetupOpen = false },
+            thenLabel = "Wake ${client.name}",
+            then = { runAction { live.wake(client.mac) } },
         )
     }
     Column(
@@ -566,7 +603,9 @@ private fun ExpandedClientCard(
                 }
             }
             ClientAction(Modifier.weight(1f), "WoL", Wrt.TextSecondary, Wrt.BorderInput) {
-                runAction { live!!.wake(client.mac) }
+                // Without a sender the command can only fail with "not found"; offer the
+                // package instead, the way the usage meter offers nlbwmon.
+                if (live?.wolPresent == false) wolSetupOpen = true else runAction { live!!.wake(client.mac) }
             }
             ClientAction(Modifier.weight(1f), "Rename", Wrt.TextSecondary, Wrt.BorderInput) {
                 if (live != null) renameOpen = true

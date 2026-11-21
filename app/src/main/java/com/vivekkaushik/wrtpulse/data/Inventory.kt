@@ -34,6 +34,10 @@ class Inventory(private val session: RouterSession) {
     var nlbwPresent by mutableStateOf<Boolean?>(null)
         private set
 
+    /** Whether the router has a magic-packet sender; null until the first tick answers. */
+    var wolPresent by mutableStateOf<Boolean?>(null)
+        private set
+
     private var lastSections: Map<String, String>? = null
 
     // Sliding window of nlbw counter samples. nlbwmon folds long-lived flows into its
@@ -110,6 +114,20 @@ class Inventory(private val session: RouterSession) {
         return msg
     }
 
+    /** What installing etherwake would take, for the consent dialog the WoL button opens. */
+    suspend fun planWolInstall(): InstallPlan = try {
+        val out = session.exec(Commands.WOL_PLAN, timeoutMs = 60_000)
+        Parsers.installPlan(Parsers.sections(out.stdout), pkg = "etherwake")
+    } catch (e: SshException) {
+        InstallPlan("opkg", emptyList(), null, "Failed: ${e.message}")
+    }
+
+    suspend fun installWol(): String {
+        val msg = action(Commands.WOL_INSTALL, "Installed etherwake", timeoutMs = 120_000)
+        if (!msg.startsWith("Failed")) wolPresent = true
+        return msg
+    }
+
     /** Runs one action command, then refreshes the list so the UI shows the router's truth. */
     private suspend fun action(command: String, okMessage: String, timeoutMs: Long = 15_000): String = try {
         val result = session.exec(command, timeoutMs = timeoutMs)
@@ -147,6 +165,7 @@ class Inventory(private val session: RouterSession) {
         val reservations = Parsers.dhcpReservations(Parsers.uciShow(sections["resv"].orEmpty()))
 
         sections["nlbwbin"]?.let { nlbwPresent = it.isNotBlank() }
+        sections["wakebin"]?.let { wolPresent = it.isNotBlank() }
         val hosts = Parsers.nlbwHosts(sections["nlbw"].orEmpty())
         // Cumulative counters need no sampling — they are whatever the router reports now.
         if (sections.containsKey("nlbw")) totals = hosts.associateBy { it.mac }

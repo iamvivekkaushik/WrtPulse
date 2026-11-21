@@ -344,6 +344,14 @@ class PackageCommandTest {
         assertEquals(Commands.installPlan("nlbwmon"), Commands.NLBW_PLAN)
     }
 
+    @Test
+    fun `WoL offers etherwake with the same plan, and the client poll looks for either sender`() {
+        assertEquals(Commands.installPlan("etherwake"), Commands.WOL_PLAN)
+        assertTrue(Commands.WOL_INSTALL.endsWith("command -v etherwake"))
+        assertTrue(Commands.CLIENTS.contains("command -v etherwake"))
+        assertTrue(Commands.CLIENTS.contains("command -v ether-wake"))
+    }
+
     /**
      * apk resolves against a local index a fresh router has never fetched, so the plan and the
      * install must refresh it first — otherwise the simulate reports the package as "no such
@@ -355,6 +363,7 @@ class PackageCommandTest {
             Commands.installPlan("nlbwmon"),
             Commands.installPackage("nlbwmon"),
             Commands.NLBW_INSTALL,
+            Commands.WOL_INSTALL,
         ).forEach { command ->
             assertTrue(command, command.contains("apk update"))
             assertTrue(command, command.contains("opkg update"))
