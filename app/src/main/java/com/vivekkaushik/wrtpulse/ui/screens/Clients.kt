@@ -21,7 +21,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,8 +76,14 @@ fun ClientsScreen(
     var filter by remember { mutableIntStateOf(0) }
     var byUsage by remember { mutableStateOf(false) }
     val hasUsage = live?.nlbwPresent == true && live.totals.isNotEmpty()
-    val all = (if (live != null) live.clients.toList() else Demo.clients)
+    val fresh = (if (live != null) live.clients.toList() else Demo.clients)
         .let { if (byUsage && hasUsage) it.sortedByDescending { c -> c.usageTotal } else it }
+    // The order the rows were first drawn in, held while the screen is open. Re-sorting on
+    // every tick moved a card out from under the user's thumb as signal strength wavered,
+    // and took an open rename dialog with it. Pull to refresh, or the usage toggle, re-sorts.
+    var held by remember { mutableStateOf(emptyList<String>()) }
+    val all = stableOrder(held, fresh)
+    SideEffect { held = all.map { it.mac } }
 
     val wireless = all.filter { it.bars > 0 }
     val wired = all.filter { it.bars == -1 && !it.offline && !it.blocked }
@@ -89,6 +97,10 @@ fun ClientsScreen(
         else -> all
     }
     val defaultExpand = shown.firstOrNull { !it.blocked && !it.offline }?.mac
+    // The open card is the one the user tapped, or the first online client until they tap
+    // one. Either way it is pinned, so a refresh that changes who comes first cannot fold it.
+    val expandKey = expandedMac?.takeIf { mac -> shown.any { it.mac == mac } } ?: defaultExpand
+    LaunchedEffect(expandKey) { if (expandKey != null) expandedMac = expandKey }
 
     Column(Modifier.fillMaxSize().background(Wrt.BgScreen)) {
         ConnectionTopBar(
@@ -132,18 +144,25 @@ fun ClientsScreen(
             UsageSummaryStrip(
                 clients = all,
                 sortedByUsage = byUsage,
-                onToggleSort = { byUsage = !byUsage },
+                onToggleSort = { byUsage = !byUsage; held = emptyList() },
             )
         }
-        PullToRefresh(Modifier.weight(1f), enabled = live != null, onRefresh = { live?.tickOnce() }) {
+        PullToRefresh(
+            Modifier.weight(1f),
+            enabled = live != null,
+            onRefresh = { live?.tickOnce(); held = emptyList() },
+        ) {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                val expandKey = expandedMac ?: defaultExpand
                 shown.forEach { client ->
-                    val expandable = live != null || (!client.blocked && !client.offline)
-                    if (client.mac == expandKey && expandable) {
-                        ExpandedClientCard(client, ticker, live, onRename)
-                    } else {
-                        ClientRow(client, onClick = { if (expandable) expandedMac = client.mac })
+                    // Keyed by MAC so a card's state, an open dialog included, follows its
+                    // client if a row does move — a device joining or leaving above it.
+                    key(client.mac) {
+                        val expandable = live != null || (!client.blocked && !client.offline)
+                        if (client.mac == expandKey && expandable) {
+                            ExpandedClientCard(client, ticker, live, onRename)
+                        } else {
+                            ClientRow(client, onClick = { if (expandable) expandedMac = client.mac })
+                        }
                     }
                 }
                 if (live != null && shown.isEmpty()) {
@@ -157,6 +176,17 @@ fun ClientsScreen(
             }
         }
     }
+}
+
+/**
+ * [fresh] in the order [held] names, so rows stay where the user last saw them. A client
+ * [held] does not name — a device that just joined — goes at the bottom rather than among
+ * its kind, which would push down every row below it; one that left drops out.
+ */
+internal fun stableOrder(held: List<String>, fresh: List<Client>): List<Client> {
+    val byMac = fresh.associateBy { it.mac }
+    val heldMacs = held.toSet()
+    return held.mapNotNull { byMac[it] } + fresh.filter { it.mac !in heldMacs }
 }
 
 /**
