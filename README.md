@@ -98,7 +98,7 @@ does not configure.
 
 ### System, in more detail
 
-- **Packages** — the installed list, available updates, and feed search, on both `apk` (24.10+)
+- **Packages** — the installed list, available updates, and feed search, on both `apk` (25.12+)
   and `opkg`. Installs and removals run the package manager's own dry run first and show what
   it said. A short list of packages the router needs in order to boot, or to stay reachable,
   has no Remove button at all.

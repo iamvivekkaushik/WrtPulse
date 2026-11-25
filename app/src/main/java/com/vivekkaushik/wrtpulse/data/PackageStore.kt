@@ -21,7 +21,7 @@ import com.vivekkaushik.wrtpulse.ops.RouterPackage
  */
 class PackageStore(private val session: RouterSession) {
 
-    /** "apk" on 24.10 and later, "opkg" before it. */
+    /** "apk" on 25.12 and later, "opkg" before it. */
     var manager by mutableStateOf("opkg"); private set
 
     val installed = mutableStateListOf<RouterPackage>()
