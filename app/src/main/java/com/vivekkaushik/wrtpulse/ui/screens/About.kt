@@ -97,8 +97,8 @@ object AppLibraries {
 
 object AppLinks {
     const val SOURCE = "https://github.com/iamvivekkaushik/WrtPulse"
-    const val WEBSITE = "https://iamvivekkaushik.github.io/WrtPulse/"
-    const val PRIVACY = "https://iamvivekkaushik.github.io/WrtPulse/privacy.html"
+    const val WEBSITE = "https://wrtpulse.vivekkaushik.com/"
+    const val PRIVACY = "https://wrtpulse.vivekkaushik.com/privacy.html"
     const val PLAY = "https://play.google.com/store/apps/details?id=${BuildConfig.APPLICATION_ID}"
     const val ISSUES = "https://github.com/iamvivekkaushik/WrtPulse/issues"
 

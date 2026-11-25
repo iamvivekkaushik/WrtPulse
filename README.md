@@ -250,9 +250,9 @@ generated commit list underneath.
 
 `site/` is the landing page and the privacy policy, published to GitHub Pages by
 `.github/workflows/pages.yml` on every push that touches it — at
-<https://iamvivekkaushik.github.io/WrtPulse/> and
-<https://iamvivekkaushik.github.io/WrtPulse/privacy.html>, which is the URL the Play listing
-needs. The store images are copied in from `fastlane/metadata/android/en-US/images` at deploy
+<https://wrtpulse.vivekkaushik.com/> and
+<https://wrtpulse.vivekkaushik.com/privacy.html>, which is the URL the Play listing
+needs. `robots.txt` and `sitemap.xml` sit beside them; a new page needs a line in the sitemap. The store images are copied in from `fastlane/metadata/android/en-US/images` at deploy
 time rather than committed twice; to preview locally, run the same copy:
 
 ```bash
