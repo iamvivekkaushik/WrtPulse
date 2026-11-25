@@ -29,4 +29,4 @@ Changes are staged, shown as a diff, and applied in one uci batch. A change that
 SECURITY
 Passwords and private keys are sealed with an Android Keystore key and never leave the phone. Host keys are pinned on first contact, and a changed key stops the connection until you say otherwise. The app can generate its own ed25519 key, install it on the router, and prove it works before you rely on it.
 
-Requires an OpenWrt router with SSH enabled (21.02 or newer recommended; 24.10+ for apk). No account, no analytics, no ads.
+Requires an OpenWrt router with SSH enabled (21.02 or newer recommended; 25.12+ for apk). No account, no analytics, no ads.

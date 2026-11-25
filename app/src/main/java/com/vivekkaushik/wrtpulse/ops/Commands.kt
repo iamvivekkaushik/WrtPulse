@@ -362,7 +362,7 @@ object Commands {
         "uci add_list firewall.\$z.network='$network'; uci commit firewall; " +
         "/etc/init.d/firewall reload >/dev/null 2>&1; }; :"
 
-    /** Package manager differs across releases: apk on 24.10+, opkg before it. */
+    /** Package manager differs across releases: apk on 25.12+, opkg before it. */
     const val DETECT_PACKAGE_MANAGER = "command -v apk >/dev/null && echo apk || echo opkg"
 
     /**
@@ -501,7 +501,7 @@ object Commands {
     const val SPEEDTEST_CLEANUP = "rm -f $SPEEDTEST_UPLOAD_FILE $SPEEDTEST_COUNT_FILE $SPEEDTEST_PID_FILE"
 
     // ── Packages ──────────────────────────────────────────────────────────────
-    // 24.10 and later ship apk, everything before it ships opkg, and a single build of the
+    // 25.12 and later ship apk, everything before it ships opkg, and a single build of the
     // app is expected to manage both. Every command below asks which one is present rather
     // than assuming, and normalises the answer so the parsers don't have to know.
 
@@ -804,7 +804,7 @@ object Commands {
     const val USER_PACKAGES = "owut list -f fs-user 2>/dev/null"
 
     /**
-     * Puts the user's packages back after a flash. apk on 24.10+, opkg before it — same
+     * Puts the user's packages back after a flash. apk on 25.12+, opkg before it — same
      * split the packages screen uses. Names are validated by [safePackageName] first.
      */
     fun reinstall(packages: List<String>): String {
