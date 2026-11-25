@@ -3,12 +3,30 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WrtPulse — OpenWrt, over SSH</title>
+<title>WrtPulse — Android app to manage OpenWrt routers over SSH</title>
 <meta name="description" content="An Android app for managing OpenWrt routers over SSH. No agent on the router, no cloud in the middle — the app runs the same commands you would type yourself.">
-<meta property="og:title" content="WrtPulse — OpenWrt, over SSH">
+<link rel="canonical" href="https://wrtpulse.vivekkaushik.com/">
+<meta property="og:title" content="WrtPulse — Android app to manage OpenWrt routers over SSH">
 <meta property="og:description" content="Manage OpenWrt routers over SSH — Wi-Fi, clients, WAN, firewall, firmware. Nothing installed on the router, no cloud, no account.">
-<meta property="og:image" content="assets/featureGraphic.png">
+<meta property="og:url" content="https://wrtpulse.vivekkaushik.com/">
+<meta property="og:image" content="https://wrtpulse.vivekkaushik.com/assets/featureGraphic.png">
 <meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<!-- Facts about the app for search engines. Data only: the page still runs no script. -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "WrtPulse",
+  "operatingSystem": "Android",
+  "applicationCategory": "UtilitiesApplication",
+  "description": "An Android app for managing OpenWrt routers over SSH.",
+  "url": "https://wrtpulse.vivekkaushik.com/",
+  "installUrl": "https://play.google.com/store/apps/details?id=com.vivekkaushik.wrtpulse",
+  "image": "https://wrtpulse.vivekkaushik.com/assets/icon.png",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
 <link rel="icon" type="image/png" href="assets/icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Red+Hat+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -52,8 +70,9 @@
   .play-badge { display: inline-block; line-height: 0; margin-left: -12px; transition: transform .12s ease; }
   .play-badge:hover { transform: translateY(-1px); }
   .play-badge img { height: 74px; width: auto; display: block; }
-  .hero-shot { position: relative; justify-self: end; }
-  .hero-shot img { width: 100%; max-width: 380px; border-radius: 22px; border: 1px solid var(--border); box-shadow: 0 30px 80px rgba(0,0,0,.55); display: block; }
+  /* the box carries the width so the screenshot's space is held before the image arrives */
+  .hero-shot { position: relative; justify-self: end; width: 100%; max-width: 380px; }
+  .hero-shot img { width: 100%; height: auto; border-radius: 22px; border: 1px solid var(--border); box-shadow: 0 30px 80px rgba(0,0,0,.55); display: block; }
   .cmd { font-family: var(--mono); font-size: 12.5px; color: var(--dim); margin-top: 22px; }
   .cmd b { color: var(--accent); font-weight: 600; }
 
@@ -77,7 +96,7 @@
 
   /* gallery */
   .gallery { display: flex; gap: 14px; overflow-x: auto; padding: 6px 0 18px; scroll-snap-type: x mandatory; -webkit-overflow-scrolling: touch; }
-  .gallery img { flex: 0 0 auto; width: 250px; border-radius: 16px; border: 1px solid var(--border); scroll-snap-align: start; }
+  .gallery img { flex: 0 0 auto; width: 250px; height: auto; border-radius: 16px; border: 1px solid var(--border); scroll-snap-align: start; }
   .gallery::-webkit-scrollbar { height: 8px; } .gallery::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
 
   /* security */
@@ -117,8 +136,8 @@
 
   <header class="hero">
     <div>
-      <div class="eyebrow">Android · OpenWrt · SSH</div>
-      <h1>Your OpenWrt router,<br><span class="thin">over SSH.</span></h1>
+      <div class="eyebrow">Android app · OpenWrt · SSH</div>
+      <h1>Manage OpenWrt from Android,<br><span class="thin">over SSH.</span></h1>
       <p class="lede">No agent on the router. No cloud in the middle. Nothing scraped out of LuCI. WrtPulse opens an SSH session and runs the same commands you would type yourself — then shows you the answer.</p>
       <div class="cta">
         <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.vivekkaushik.wrtpulse"><img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" width="646" height="250" alt="Get it on Google Play"></a>
@@ -127,7 +146,7 @@
       <div class="cmd"><b>$</b> ubus · uci · iwinfo · logread · apk · sysupgrade</div>
     </div>
     <div class="hero-shot">
-      <img src="assets/01_gr.png" alt="WrtPulse dashboard showing live CPU, RAM, flash, the upstream link and throughput">
+      <img src="assets/01_gr.png" width="1080" height="1920" alt="WrtPulse dashboard showing live CPU, RAM, flash, the upstream link and throughput">
     </div>
   </header>
 
@@ -159,14 +178,14 @@
     <h2>Screens</h2>
     <p class="sub">Taken on a real router, not a mock.</p>
     <div class="gallery">
-      <img src="assets/01_gr.png" alt="Dashboard">
-      <img src="assets/02_fw_hub.png" alt="Network hub">
-      <img src="assets/03_fw_Forwards.png" alt="WAN with connection test">
-      <img src="assets/04_fw1.png" alt="Firewall zone matrix">
-      <img src="assets/05_fw_Defaults.png" alt="Firewall defaults and DoS defense">
-      <img src="assets/06_s3.png" alt="Firmware: five gates">
-      <img src="assets/07_n4.png" alt="Flash confirmation red zone">
-      <img src="assets/08_g1.png" alt="Guest Wi-Fi">
+      <img src="assets/01_gr.png" width="1080" height="1920" loading="lazy" alt="Dashboard">
+      <img src="assets/02_fw_hub.png" width="1080" height="1920" loading="lazy" alt="Network hub">
+      <img src="assets/03_fw_Forwards.png" width="1080" height="1920" loading="lazy" alt="WAN with connection test">
+      <img src="assets/04_fw1.png" width="1080" height="1920" loading="lazy" alt="Firewall zone matrix">
+      <img src="assets/05_fw_Defaults.png" width="1080" height="1920" loading="lazy" alt="Firewall defaults and DoS defense">
+      <img src="assets/06_s3.png" width="1080" height="1920" loading="lazy" alt="Firmware: five gates">
+      <img src="assets/07_n4.png" width="1080" height="1920" loading="lazy" alt="Flash confirmation red zone">
+      <img src="assets/08_g1.png" width="1080" height="1920" loading="lazy" alt="Guest Wi-Fi">
     </div>
   </section>
 
